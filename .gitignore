@@ -19,3 +19,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# User-generated uploads (keep local only)
+uploads/
