@@ -1,0 +1,870 @@
+const { z } = require("zod");
+const mongoose = require("mongoose");
+const { sendSuccess, sendError } = require("../utils/response");
+const Assignment = require("../models/Assignment");
+const AssignmentQuestion = require("../models/AssignmentQuestion");
+const AssignmentSubmission = require("../models/AssignmentSubmission");
+const ArenaQuestion = require("../models/ArenaQuestion");
+const ArenaSubmission = require("../models/ArenaSubmission");
+const LiveClass = require("../models/LiveClass");
+const TimetableSlot = require("../models/TimetableSlot");
+const TimetableEvent = require("../models/TimetableEvent");
+const MentorSlot = require("../models/MentorSlot");
+const Student = require("../models/Student");
+const Staff = require("../models/Staff");
+const Notification = require("../models/Notification");
+const { sendSimpleEmail } = require("../services/brevo");
+const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
+
+const starterCodeSchema = z
+  .object({
+    python: z.string().optional(),
+    javascript: z.string().optional(),
+    java: z.string().optional(),
+    cpp: z.string().optional(),
+  })
+  .optional();
+
+function slugifyQuestionName(input) {
+  const base = String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base || `q-${Date.now()}`;
+}
+
+function paginate(req) {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  return { page, limit, skip: (page - 1) * limit };
+}
+
+async function fanoutTimetableSlotNotification(slot, action) {
+  const batchId = String(slot?.batch_id || "").trim().toLowerCase();
+  if (!batchId) return;
+  const sectionId = String(slot?.section_id || "").trim().toLowerCase();
+  const title = "Timetable updated";
+  const body = `${slot.subject} on ${slot.day} (${slot.time}) by ${slot.teacher} was ${action}.`;
+  const refId = `timetable-slot:${String(slot._id)}`;
+
+  const studentFilter = sectionId
+    ? { batch_id: batchId, section_id: sectionId }
+    : { batch_id: batchId };
+  const students = await Student.find(studentFilter).select("_id").lean();
+  if (!students.length) return;
+
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: refId,
+  }));
+  await Notification.insertMany(docs, { ordered: false });
+}
+
+async function fanoutMentorSlotNotification(slot) {
+  const targetStudentIds = Array.isArray(slot?.target_student_ids)
+    ? slot.target_student_ids.map((id) => String(id)).filter(Boolean)
+    : [];
+  const targetBatchIds = Array.isArray(slot?.target_batch_ids)
+    ? slot.target_batch_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+  const targetSectionIds = Array.isArray(slot?.target_section_ids)
+    ? slot.target_section_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  let students = [];
+  if (targetStudentIds.length > 0) {
+    students = await Student.find({ _id: { $in: targetStudentIds } }).select("_id").lean();
+  } else if (targetBatchIds.length > 0) {
+    const filter = { batch_id: { $in: targetBatchIds } };
+    if (targetSectionIds.length > 0) {
+      filter.section_id = { $in: targetSectionIds };
+    }
+    students = await Student.find(filter).select("_id").lean();
+  }
+
+  if (!students.length) return;
+  const title = "New mentor session published";
+  const body = `${slot.mentor_name} mentor session on ${new Date(slot.date).toLocaleDateString()} at ${slot.time}.`;
+  const refId = `mentor-slot:${String(slot._id)}`;
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: refId,
+  }));
+  await Notification.insertMany(docs, { ordered: false });
+}
+
+async function notifyMentorPublishEmail(slot) {
+  const mentorName = String(slot?.mentor_name || "").trim();
+  if (!mentorName) return;
+
+  const recipients = await Staff.find({
+    role: { $in: ["mentor", "instructor"] },
+    is_active: true,
+    name: mentorName,
+  })
+    .select("email name role")
+    .lean();
+  if (!recipients.length) return;
+
+  const batchLine =
+    Array.isArray(slot.target_batch_ids) && slot.target_batch_ids.length
+      ? slot.target_batch_ids.join(", ")
+      : "N/A";
+  const sectionLine =
+    Array.isArray(slot.target_section_ids) && slot.target_section_ids.length
+      ? slot.target_section_ids.join(", ")
+      : "All sections";
+  const audienceLine =
+    Array.isArray(slot.target_student_ids) && slot.target_student_ids.length
+      ? `${slot.target_student_ids.length} selected student(s)`
+      : "All students in selected batch/sections";
+  const sessionDate = slot.date ? new Date(slot.date) : null;
+  const publishDate = slot.publish_date ? new Date(slot.publish_date) : null;
+
+  for (const recipient of recipients) {
+    if (!recipient.email) continue;
+    const subject = `Mentor session published - ${mentorName}`;
+    const htmlContent = `
+      <div style="font-family:Arial,sans-serif;color:#111">
+        <h2 style="margin:0 0 12px">New mentor session published</h2>
+        <p>Hello ${recipient.name || mentorName},</p>
+        <p>A mentor session has been published with the following details:</p>
+        <ul>
+          <li><strong>Mentor:</strong> ${mentorName}</li>
+          <li><strong>Session date:</strong> ${sessionDate ? sessionDate.toLocaleDateString() : "N/A"}</li>
+          <li><strong>Session time:</strong> ${slot.time || "N/A"}</li>
+          <li><strong>Publish date:</strong> ${publishDate ? publishDate.toLocaleString() : "Immediate"}</li>
+          <li><strong>Batch:</strong> ${batchLine}</li>
+          <li><strong>Sections:</strong> ${sectionLine}</li>
+          <li><strong>Audience:</strong> ${audienceLine}</li>
+          <li><strong>Meet link:</strong> ${slot.meet_link || "Not set"}</li>
+        </ul>
+        <p>Regards,<br/>CodeMasti Admin</p>
+      </div>
+    `.trim();
+    const textContent = [
+      `Hello ${recipient.name || mentorName},`,
+      "A mentor session has been published.",
+      `Mentor: ${mentorName}`,
+      `Session date: ${sessionDate ? sessionDate.toLocaleDateString() : "N/A"}`,
+      `Session time: ${slot.time || "N/A"}`,
+      `Publish date: ${publishDate ? publishDate.toLocaleString() : "Immediate"}`,
+      `Batch: ${batchLine}`,
+      `Sections: ${sectionLine}`,
+      `Audience: ${audienceLine}`,
+      `Meet link: ${slot.meet_link || "Not set"}`,
+    ].join("\n");
+    await sendSimpleEmail({ toEmail: recipient.email, subject, htmlContent, textContent });
+  }
+}
+
+/** —— Assignments —— */
+async function listAssignments(req, res) {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit || 20)));
+  const skip = (page - 1) * limit;
+  const subject = String(req.query.subject || "").trim();
+  const batchRaw = req.query.batch_id;
+  const batchNorm =
+    batchRaw !== undefined && String(batchRaw).trim() !== ""
+      ? String(batchRaw).trim().toLowerCase()
+      : null;
+
+  const clauses = [];
+  if (subject) clauses.push({ subject });
+  const batchClause = batchNorm ? assignmentMatchesCatalogBatchId(batchNorm) : null;
+  if (batchClause) clauses.push(batchClause);
+
+  const filter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
+
+  const [items, total] = await Promise.all([
+    Assignment.find(filter).sort({ release_date: -1 }).skip(skip).limit(limit).lean(),
+    Assignment.countDocuments(filter),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((a) => ({ id: String(a._id), ...a })),
+    "",
+    { page, limit, total }
+  );
+}
+
+async function getAssignment(req, res) {
+  const doc = await Assignment.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  return sendSuccess(res, { id: String(doc._id), ...doc });
+}
+
+async function createAssignment(req, res) {
+  const schema = z
+    .object({
+      batch_id: z.string().min(1).trim(),
+      section_id: z.string().trim().optional().default(""),
+      subject: z.string().min(1).trim(),
+      module: z.string().min(1).trim(),
+      assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional().default("written"),
+      release_date: z.coerce.date(),
+      deadline_date: z.coerce.date(),
+      resource_url: z.string().trim().optional().default(""),
+      resource_size: z.string().trim().optional().default(""),
+    })
+    .refine((d) => d.deadline_date >= d.release_date, {
+      message: "Deadline must be on or after the publish (go live) time.",
+      path: ["deadline_date"],
+    });
+  const body = schema.parse(req.body);
+  const created = await Assignment.create({
+    batch_id: body.batch_id.toLowerCase().trim(),
+    section_id: body.section_id || "",
+    subject: body.subject,
+    module: body.module,
+    assignment_type: body.assignment_type,
+    release_date: body.release_date,
+    deadline_date: body.deadline_date,
+    resource_url: body.resource_url || "",
+    resource_size: body.resource_size || "",
+  });
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function updateAssignment(req, res) {
+  const schema = z.object({
+    batch_id: z.string().trim().optional(),
+    section_id: z.string().trim().optional(),
+    subject: z.string().min(1).trim().optional(),
+    module: z.string().min(1).trim().optional(),
+    assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional(),
+    release_date: z.coerce.date().optional(),
+    deadline_date: z.coerce.date().optional(),
+    resource_url: z.string().trim().optional(),
+    resource_size: z.string().trim().optional(),
+  });
+  const body = schema.parse(req.body);
+  const doc = await Assignment.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  if (body.batch_id !== undefined) {
+    doc.batch_id = body.batch_id ? body.batch_id.toLowerCase().trim() : "";
+  }
+  const { batch_id: _b, ...rest } = body;
+  Object.assign(doc, rest);
+  const rel = doc.release_date;
+  const due = doc.deadline_date;
+  if (rel && due && new Date(due).getTime() < new Date(rel).getTime()) {
+    return sendError(
+      res,
+      400,
+      "VALIDATION",
+      "Deadline must be on or after the publish (go live) time."
+    );
+  }
+  await doc.save();
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteAssignment(req, res) {
+  const id = req.params.id;
+  const a = await Assignment.findById(id);
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const qRows = await AssignmentQuestion.find({ assignment_id: id }).select("_id").lean();
+  const qIds = qRows.map((r) => r._id);
+  await AssignmentSubmission.deleteMany({ question_id: { $in: qIds } });
+  await AssignmentQuestion.deleteMany({ assignment_id: id });
+  await Assignment.deleteOne({ _id: id });
+  return sendSuccess(res, { id }, "Deleted");
+}
+
+/** —— Assignment questions —— */
+async function listAssignmentQuestions(req, res) {
+  const { assignmentId } = req.params;
+  const a = await Assignment.findById(assignmentId).lean();
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const items = await AssignmentQuestion.find({ assignment_id: assignmentId }).sort({ name: 1 }).lean();
+  return sendSuccess(
+    res,
+    items.map((q) => ({
+      id: String(q._id),
+      assignment_id: String(q.assignment_id),
+      name: q.name,
+      title: q.title,
+      difficulty: q.difficulty,
+      xp: q.xp,
+      topics: q.topics,
+    }))
+  );
+}
+
+const questionBodySchema = z.object({
+  name: z.string().trim().optional(),
+  title: z.string().min(1).trim(),
+  description: z.string().min(1),
+  difficulty: z.enum(["easy", "medium", "hard"]).optional(),
+  xp: z.number().int().min(0).optional(),
+  topics: z.array(z.string()).optional(),
+  requirements: z.array(z.string()).optional(),
+  input_format: z.string().optional(),
+  output_format: z.string().optional(),
+  constraints: z.array(z.string()).optional(),
+  examples: z.array(z.any()).optional(),
+  time_limit: z.string().optional(),
+  memory_limit: z.string().optional(),
+  execution_mode: z.enum(["full_program", "function_only"]).optional(),
+  starter_code: starterCodeSchema,
+  hidden_tests: z.array(z.any()).optional(),
+  question_image_url: z.string().trim().optional(),
+  quiz_options: z
+    .array(
+      z.object({
+        text: z.string().trim().optional().default(""),
+        image_url: z.string().trim().optional().default(""),
+        is_correct: z.boolean().optional().default(false),
+      })
+    )
+    .optional(),
+});
+
+async function createAssignmentQuestion(req, res) {
+  const { assignmentId } = req.params;
+  const a = await Assignment.findById(assignmentId);
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const body = questionBodySchema.parse(req.body);
+  const computedName = slugifyQuestionName(body.name || body.title);
+  const created = await AssignmentQuestion.create({
+    assignment_id: assignmentId,
+    ...body,
+    name: computedName,
+    starter_code: body.starter_code || {},
+    hidden_tests: body.hidden_tests || [],
+  });
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function getAssignmentQuestion(req, res) {
+  const { assignmentId, questionId } = req.params;
+  const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId }).lean();
+  if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
+  return sendSuccess(res, { id: String(q._id), ...q, assignment_id: String(q.assignment_id) });
+}
+
+async function updateAssignmentQuestion(req, res) {
+  const { assignmentId, questionId } = req.params;
+  const body = questionBodySchema.partial().parse(req.body);
+  const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
+  if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
+  const { starter_code: starterPatch, ...rest } = body;
+  Object.assign(q, rest);
+  if (starterPatch && typeof starterPatch === "object") {
+    const prev = q.toObject().starter_code || {};
+    q.starter_code = { ...prev, ...starterPatch };
+  }
+  await q.save();
+  return sendSuccess(res, { id: String(q._id), ...q.toObject() }, "Updated");
+}
+
+async function deleteAssignmentQuestion(req, res) {
+  const { assignmentId, questionId } = req.params;
+  const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
+  if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
+  await AssignmentSubmission.deleteMany({ question_id: questionId });
+  await AssignmentQuestion.deleteOne({ _id: questionId });
+  return sendSuccess(res, { id: questionId }, "Deleted");
+}
+
+/** —— Arena —— */
+async function listArenaQuestions(req, res) {
+  const { page, limit, skip } = paginate(req);
+  const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
+  const filter = batch_id ? { batch_id } : {};
+  const [items, total] = await Promise.all([
+    ArenaQuestion.find(filter).sort({ number: 1 }).skip(skip).limit(limit).lean(),
+    ArenaQuestion.countDocuments(filter),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((q) => ({ id: String(q._id), ...q })),
+    "",
+    { page, limit, total }
+  );
+}
+
+const arenaBodySchema = z.object({
+  batch_id: z.string().trim().toLowerCase().min(1).optional(),
+  number: z.number().int().optional(),
+  title: z.string().min(1).trim(),
+  subject: z.string().optional(),
+  topic: z.string().optional(),
+  difficulty: z.enum(["easy", "medium", "hard"]).optional(),
+  description: z.string().min(1),
+  requirements: z.array(z.string()).optional(),
+  input_format: z.string().optional(),
+  output_format: z.string().optional(),
+  constraints: z.array(z.string()).optional(),
+  examples: z.array(z.any()).optional(),
+  time_limit: z.string().optional(),
+  memory_limit: z.string().optional(),
+  starter_code: starterCodeSchema,
+  hidden_tests: z.array(z.any()).optional(),
+  xp: z.number().int().optional(),
+  acceptance_rate: z.number().optional(),
+});
+
+async function getArenaQuestion(req, res) {
+  const doc = await ArenaQuestion.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+  return sendSuccess(res, { id: String(doc._id), ...doc });
+}
+
+async function createArenaQuestion(req, res) {
+  const body = arenaBodySchema.parse(req.body);
+  if (!body.batch_id) {
+    return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
+  }
+  const created = await ArenaQuestion.create({
+    ...body,
+    starter_code: body.starter_code || {},
+    hidden_tests: body.hidden_tests || [],
+  });
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function updateArenaQuestion(req, res) {
+  const body = arenaBodySchema.partial().parse(req.body);
+  const doc = await ArenaQuestion.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+  Object.assign(doc, body);
+  await doc.save();
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteArenaQuestion(req, res) {
+  const id = req.params.id;
+  const doc = await ArenaQuestion.findById(id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+  await ArenaSubmission.deleteMany({ question_id: id });
+  await ArenaQuestion.deleteOne({ _id: id });
+  return sendSuccess(res, { id }, "Deleted");
+}
+
+/** —— Live classes —— */
+async function listLiveClasses(req, res) {
+  const { page, limit, skip } = paginate(req);
+  const batch_id = String(req.query.batch_id || "").trim();
+  const filter = batch_id ? { batch_id } : {};
+  const [items, total] = await Promise.all([
+    LiveClass.find(filter).sort({ date: 1, start_time: 1 }).skip(skip).limit(limit).lean(),
+    LiveClass.countDocuments(filter),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((c) => ({ id: String(c._id), ...c })),
+    "",
+    { page, limit, total }
+  );
+}
+
+async function getLiveClass(req, res) {
+  const doc = await LiveClass.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
+  return sendSuccess(res, { id: String(doc._id), ...doc });
+}
+
+async function createLiveClass(req, res) {
+  const schema = z.object({
+    subject: z.string().min(1).trim(),
+    topic: z.string().min(1).trim(),
+    instructor: z.string().min(1).trim(),
+    batch_id: z.string().min(1).trim(),
+    date: z.string().min(10),
+    start_time: z.string().min(1),
+    end_time: z.string().min(1),
+    meet_link: z.string().min(1).trim(),
+    recording_link: z.string().optional().default(""),
+  });
+  const body = schema.parse(req.body);
+  const created = await LiveClass.create(body);
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function updateLiveClass(req, res) {
+  const schema = z.object({
+    subject: z.string().min(1).trim().optional(),
+    topic: z.string().min(1).trim().optional(),
+    instructor: z.string().min(1).trim().optional(),
+    batch_id: z.string().min(1).trim().optional(),
+    date: z.string().min(10).optional(),
+    start_time: z.string().optional(),
+    end_time: z.string().optional(),
+    meet_link: z.string().optional(),
+    recording_link: z.string().optional(),
+  });
+  const body = schema.parse(req.body);
+  const doc = await LiveClass.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
+  Object.assign(doc, body);
+  await doc.save();
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteLiveClass(req, res) {
+  const r = await LiveClass.deleteOne({ _id: req.params.id });
+  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Live class not found");
+  return sendSuccess(res, { id: req.params.id }, "Deleted");
+}
+
+/** —— Timetable slots —— */
+async function listTimetableSlots(req, res) {
+  const { page, limit, skip } = paginate(req);
+  const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
+  const section_id = String(req.query.section_id || "").trim().toLowerCase();
+  const filter = {};
+  if (batch_id) filter.batch_id = batch_id;
+  if (batch_id && section_id) {
+    filter.$or = [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: section_id }];
+  }
+  const [items, total] = await Promise.all([
+    TimetableSlot.find(filter).sort({ day: 1, time: 1 }).skip(skip).limit(limit).lean(),
+    TimetableSlot.countDocuments(filter),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((s) => ({ id: String(s._id), ...s })),
+    "",
+    { page, limit, total }
+  );
+}
+
+async function getTimetableSlot(req, res) {
+  const doc = await TimetableSlot.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  return sendSuccess(res, { id: String(doc._id), ...doc });
+}
+
+async function createTimetableSlot(req, res) {
+  const dayEnum = z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]);
+  const schema = z.object({
+    batch_id: z.string().min(1).trim(),
+    section_id: z.string().trim().optional().default(""),
+    day: dayEnum.optional(),
+    days: z.array(dayEnum).optional(),
+    time: z.string().min(1).trim(),
+    subject: z.string().min(1).trim(),
+    teacher: z.string().min(1).trim(),
+  });
+  const body = schema.parse(req.body);
+  const targetDays = [...new Set((body.days && body.days.length ? body.days : [body.day]).filter(Boolean))];
+  if (!targetDays.length) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Provide day or days");
+  }
+
+  const docs = targetDays.map((day) => ({
+    batch_id: body.batch_id.toLowerCase().trim(),
+    section_id: (body.section_id || "").toLowerCase().trim(),
+    day,
+    time: body.time.trim(),
+    subject: body.subject.trim(),
+    teacher: body.teacher.trim(),
+  }));
+
+  const created = await TimetableSlot.insertMany(docs, { ordered: false });
+  for (const row of created) {
+    await fanoutTimetableSlotNotification(row.toObject(), "created");
+  }
+  const data = created.map((r) => ({ id: String(r._id), ...r.toObject() }));
+  return sendSuccess(res, data, data.length === 1 ? "Created" : `Created ${data.length} slots`);
+}
+
+async function updateTimetableSlot(req, res) {
+  const schema = z.object({
+    batch_id: z.string().min(1).trim().optional(),
+    section_id: z.string().trim().optional(),
+    day: z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]).optional(),
+    time: z.string().optional(),
+    subject: z.string().optional(),
+    teacher: z.string().optional(),
+  });
+  const body = schema.parse(req.body);
+  const doc = await TimetableSlot.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  if (body.batch_id !== undefined) doc.batch_id = body.batch_id.toLowerCase().trim();
+  if (body.section_id !== undefined) doc.section_id = (body.section_id || "").toLowerCase().trim();
+  const { batch_id: _b, section_id: _s, ...rest } = body;
+  Object.assign(doc, rest);
+  if (body.time !== undefined) doc.time = body.time.trim();
+  if (body.subject !== undefined) doc.subject = body.subject.trim();
+  if (body.teacher !== undefined) doc.teacher = body.teacher.trim();
+  await doc.save();
+  await fanoutTimetableSlotNotification(doc.toObject(), "updated");
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteTimetableSlot(req, res) {
+  const doc = await TimetableSlot.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  const r = await TimetableSlot.deleteOne({ _id: req.params.id });
+  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  await fanoutTimetableSlotNotification(doc, "deleted");
+  return sendSuccess(res, { id: req.params.id }, "Deleted");
+}
+
+/** —— Timetable events —— */
+async function listTimetableEvents(req, res) {
+  const { page, limit, skip } = paginate(req);
+  const [items, total] = await Promise.all([
+    TimetableEvent.find({}).sort({ date: -1 }).skip(skip).limit(limit).lean(),
+    TimetableEvent.countDocuments({}),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((e) => ({ id: String(e._id), ...e })),
+    "",
+    { page, limit, total }
+  );
+}
+
+async function getTimetableEvent(req, res) {
+  const doc = await TimetableEvent.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Event not found");
+  return sendSuccess(res, { id: String(doc._id), ...doc });
+}
+
+async function createTimetableEvent(req, res) {
+  const schema = z.object({
+    title: z.string().min(1).trim(),
+    type: z.enum(["holiday", "workshop", "mentor", "event"]),
+    description: z.string().optional().default(""),
+    date: z.coerce.date(),
+    batch_id: z.string().optional().default(""),
+  });
+  const body = schema.parse(req.body);
+  const created = await TimetableEvent.create({
+    ...body,
+    batch_id: (body.batch_id || "").toLowerCase().trim(),
+  });
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function updateTimetableEvent(req, res) {
+  const schema = z.object({
+    title: z.string().optional(),
+    type: z.enum(["holiday", "workshop", "mentor", "event"]).optional(),
+    description: z.string().optional(),
+    date: z.coerce.date().optional(),
+    batch_id: z.string().optional(),
+  });
+  const body = schema.parse(req.body);
+  const doc = await TimetableEvent.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Event not found");
+  Object.assign(doc, body);
+  if (body.batch_id !== undefined) doc.batch_id = (body.batch_id || "").toLowerCase().trim();
+  await doc.save();
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteTimetableEvent(req, res) {
+  const r = await TimetableEvent.deleteOne({ _id: req.params.id });
+  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Event not found");
+  return sendSuccess(res, { id: req.params.id }, "Deleted");
+}
+
+/** —— Mentor slots —— */
+async function listMentorSlotsAdmin(req, res) {
+  const { page, limit, skip } = paginate(req);
+  const [items, total] = await Promise.all([
+    MentorSlot.find({}).sort({ date: 1 }).skip(skip).limit(limit).lean(),
+    MentorSlot.countDocuments({}),
+  ]);
+  return sendSuccess(
+    res,
+    items.map((m) => ({
+      id: String(m._id),
+      subject: m.subject,
+      mentor_name: m.mentor_name,
+      mentor_info: m.mentor_info || "",
+      date: m.date,
+      publish_date: m.publish_date || null,
+      time: m.time,
+      duration_minutes: Number(m.duration_minutes || 60),
+      meet_link: m.meet_link,
+      target_batch_ids: Array.isArray(m.target_batch_ids) ? m.target_batch_ids : [],
+      target_section_ids: Array.isArray(m.target_section_ids) ? m.target_section_ids : [],
+      target_student_ids: Array.isArray(m.target_student_ids) ? m.target_student_ids.map((id) => String(id)) : [],
+      booking_state: m.booking_state,
+      booked_by: m.booked_by ? String(m.booked_by) : null,
+      booked_at: m.booked_at,
+    })),
+    "",
+    { page, limit, total }
+  );
+}
+
+async function getMentorSlot(req, res) {
+  const doc = await MentorSlot.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
+  return sendSuccess(res, {
+    id: String(doc._id),
+    ...doc,
+    mentor_info: doc.mentor_info || "",
+    publish_date: doc.publish_date || null,
+    duration_minutes: Number(doc.duration_minutes || 60),
+    target_batch_ids: Array.isArray(doc.target_batch_ids) ? doc.target_batch_ids : [],
+    target_section_ids: Array.isArray(doc.target_section_ids) ? doc.target_section_ids : [],
+    target_student_ids: Array.isArray(doc.target_student_ids) ? doc.target_student_ids.map((id) => String(id)) : [],
+    booked_by: doc.booked_by ? String(doc.booked_by) : null,
+  });
+}
+
+async function createMentorSlot(req, res) {
+  const schema = z.object({
+    mentor_name: z.string().min(1).trim(),
+    mentor_info: z.string().trim().optional().default(""),
+    date: z.coerce.date(),
+    publish_date: z.coerce.date().optional(),
+    time: z.string().min(1).trim(),
+    duration_minutes: z.coerce.number().int().min(1).max(600).optional().default(60),
+    meet_link: z.string().optional().default(""),
+    target_batch_ids: z.array(z.string().trim().toLowerCase()).optional().default([]),
+    target_section_ids: z.array(z.string().trim().toLowerCase()).optional().default([]),
+    target_student_ids: z.array(z.string().trim()).optional().default([]),
+    booking_state: z.enum(["open", "booked", "cancelled"]).optional(),
+  });
+  const body = schema.parse(req.body);
+  if (new Date(body.date).getTime() <= Date.now()) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Session date must be in the future");
+  }
+  const targetStudentIds = body.target_student_ids.filter((id) => mongoose.isValidObjectId(id));
+  const targetBatchIds = [...new Set(body.target_batch_ids.filter(Boolean))];
+  const targetSectionIds = [...new Set(body.target_section_ids.filter(Boolean))];
+  const created = await MentorSlot.create({
+    subject: "Mentor Session",
+    mentor_name: body.mentor_name,
+    mentor_info: body.mentor_info || "",
+    date: body.date,
+    publish_date: body.publish_date || new Date(),
+    time: body.time,
+    duration_minutes: body.duration_minutes || 60,
+    meet_link: body.meet_link || "",
+    target_batch_ids: targetBatchIds,
+    target_section_ids: targetSectionIds,
+    target_student_ids: targetStudentIds,
+    booking_state: body.booking_state || "open",
+    booked_by: null,
+    booked_at: null,
+  });
+  if (!body.publish_date || new Date(body.publish_date).getTime() <= Date.now()) {
+    await fanoutMentorSlotNotification(created.toObject());
+    try {
+      await notifyMentorPublishEmail(created.toObject());
+    } catch (err) {
+      console.error("[MENTOR_EMAIL_SEND_FAILED]", err?.message || err);
+    }
+  }
+  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+}
+
+async function updateMentorSlot(req, res) {
+  const schema = z.object({
+    mentor_name: z.string().optional(),
+    mentor_info: z.string().optional(),
+    date: z.coerce.date().optional(),
+    publish_date: z.coerce.date().optional(),
+    time: z.string().optional(),
+    duration_minutes: z.coerce.number().int().min(1).max(600).optional(),
+    meet_link: z.string().optional(),
+    target_batch_ids: z.array(z.string().trim().toLowerCase()).optional(),
+    target_section_ids: z.array(z.string().trim().toLowerCase()).optional(),
+    target_student_ids: z.array(z.string().trim()).optional(),
+    booking_state: z.enum(["open", "booked", "cancelled"]).optional(),
+    booked_by: z.string().nullable().optional(),
+    booked_at: z.coerce.date().nullable().optional(),
+  });
+  const body = schema.parse(req.body);
+  const doc = await MentorSlot.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
+  const wasPublished = doc.publish_date ? new Date(doc.publish_date).getTime() <= Date.now() : true;
+  if (body.mentor_name !== undefined) doc.mentor_name = body.mentor_name;
+  if (body.mentor_info !== undefined) doc.mentor_info = body.mentor_info;
+  if (body.date !== undefined) doc.date = body.date;
+  if (body.publish_date !== undefined) doc.publish_date = body.publish_date;
+  if (body.time !== undefined) doc.time = body.time;
+  if (body.duration_minutes !== undefined) doc.duration_minutes = body.duration_minutes;
+  if (body.meet_link !== undefined) doc.meet_link = body.meet_link;
+  if (body.target_batch_ids !== undefined) doc.target_batch_ids = [...new Set(body.target_batch_ids.filter(Boolean))];
+  if (body.target_section_ids !== undefined) {
+    doc.target_section_ids = [...new Set(body.target_section_ids.filter(Boolean))];
+  }
+  if (body.target_student_ids !== undefined) {
+    doc.target_student_ids = body.target_student_ids.filter((id) => mongoose.isValidObjectId(id));
+  }
+  if (body.booking_state !== undefined) doc.booking_state = body.booking_state;
+  if (body.booked_by !== undefined) {
+    doc.booked_by = body.booked_by && mongoose.isValidObjectId(body.booked_by) ? body.booked_by : null;
+  }
+  if (body.booked_at !== undefined) doc.booked_at = body.booked_at;
+  if (new Date(doc.date).getTime() <= Date.now()) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Session date must be in the future");
+  }
+  await doc.save();
+  const isPublishedNow = doc.publish_date ? new Date(doc.publish_date).getTime() <= Date.now() : true;
+  if (!wasPublished && isPublishedNow) {
+    const snapshot = doc.toObject();
+    await fanoutMentorSlotNotification(snapshot);
+    try {
+      await notifyMentorPublishEmail(snapshot);
+    } catch (err) {
+      console.error("[MENTOR_EMAIL_SEND_FAILED]", err?.message || err);
+    }
+  }
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+}
+
+async function deleteMentorSlot(req, res) {
+  const r = await MentorSlot.deleteOne({ _id: req.params.id });
+  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
+  return sendSuccess(res, { id: req.params.id }, "Deleted");
+}
+
+module.exports = {
+  listAssignments,
+  getAssignment,
+  createAssignment,
+  updateAssignment,
+  deleteAssignment,
+  listAssignmentQuestions,
+  createAssignmentQuestion,
+  getAssignmentQuestion,
+  updateAssignmentQuestion,
+  deleteAssignmentQuestion,
+  listArenaQuestions,
+  getArenaQuestion,
+  createArenaQuestion,
+  updateArenaQuestion,
+  deleteArenaQuestion,
+  listLiveClasses,
+  getLiveClass,
+  createLiveClass,
+  updateLiveClass,
+  deleteLiveClass,
+  listTimetableSlots,
+  getTimetableSlot,
+  createTimetableSlot,
+  updateTimetableSlot,
+  deleteTimetableSlot,
+  listTimetableEvents,
+  getTimetableEvent,
+  createTimetableEvent,
+  updateTimetableEvent,
+  deleteTimetableEvent,
+  listMentorSlotsAdmin,
+  getMentorSlot,
+  createMentorSlot,
+  updateMentorSlot,
+  deleteMentorSlot,
+};

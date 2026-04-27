@@ -1,0 +1,235 @@
+const { z } = require("zod");
+const { sendSuccess, sendError } = require("../utils/response");
+const PersonalDoubt = require("../models/PersonalDoubt");
+const CommunityMessage = require("../models/CommunityMessage");
+const Student = require("../models/Student");
+const Staff = require("../models/Staff");
+const {
+  isCloudinaryConfigured,
+  uploadBufferToFolder,
+  buildCommunityUploadFolder,
+} = require("../utils/cloudinary");
+
+function mediaResourceType(mimetype) {
+  const type = String(mimetype || "");
+  if (/^image\/(jpeg|png|webp|gif)$/.test(type)) return "image";
+  if (/^video\/(mp4|quicktime|x-matroska|webm)$/.test(type)) return "video";
+  return "raw";
+}
+
+function mediaKindFromResourceType(resourceType) {
+  if (resourceType === "image") return "image";
+  if (resourceType === "video") return "video";
+  return "file";
+}
+
+async function uploadCommunityMedia(req) {
+  if (!req.file?.buffer) return null;
+  const resourceType = mediaResourceType(req.file.mimetype);
+  if (isCloudinaryConfigured()) {
+    const folder = buildCommunityUploadFolder(resourceType);
+    const result = await uploadBufferToFolder(req.file.buffer, resourceType, folder, {
+      filenameOverride: req.file.originalname || "",
+    });
+    return {
+      url: result.secure_url || result.url,
+      mime_type: req.file.mimetype || "",
+      file_name: req.file.originalname || "",
+      bytes: Number(result.bytes || req.file.size || 0),
+      kind: mediaKindFromResourceType(resourceType),
+    };
+  }
+
+  const fallbackBase = `${req.protocol}://${req.get("host")}`;
+  return {
+    // No cloud configured; return a data URL is not practical for large files, so require Cloudinary for media.
+    url: "",
+    mime_type: req.file.mimetype || "",
+    file_name: req.file.originalname || "",
+    bytes: Number(req.file.size || 0),
+    kind: mediaKindFromResourceType(resourceType),
+    _fallbackBase: fallbackBase,
+  };
+}
+
+async function listPersonal(req, res) {
+  const status = String(req.query.status || "pending").trim().toLowerCase();
+  const filter = {};
+  const batchId = String(req.query.batch_id || "").trim().toLowerCase();
+  const includeAllDefaultBatches =
+    String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
+  const defaultBatchIds = ["spark", "builders", "innovators"];
+  if (status === "pending" || status === "answered") filter.status = status;
+  if (includeAllDefaultBatches || batchId) {
+    const batchScope = includeAllDefaultBatches ? defaultBatchIds : [batchId];
+    const studentsInScope = await Student.find({
+      batch_id: { $in: batchScope },
+    })
+      .select("_id")
+      .lean();
+    const studentIdsInScope = studentsInScope.map((s) => s._id);
+    filter.student_id = { $in: studentIdsInScope };
+  }
+
+  const rows = await PersonalDoubt.find(filter).sort({ createdAt: -1 }).limit(500).lean();
+  const studentIds = [...new Set(rows.map((r) => String(r.student_id)).filter(Boolean))];
+  const students = await Student.find({ _id: { $in: studentIds } })
+    .select("name email batch_id section_id")
+    .lean();
+  const byId = new Map(students.map((s) => [String(s._id), s]));
+  const data = rows.map((d) => {
+    const s = byId.get(String(d.student_id));
+    return {
+      id: String(d._id),
+      student_id: String(d.student_id),
+      student_name: s?.name || "Student",
+      student_email: s?.email || "",
+      batch_id: s?.batch_id || "",
+      section_id: s?.section_id || "",
+      subject: d.subject,
+      title: d.title,
+      description: d.description,
+      code: d.code,
+      image_url: d.image_url,
+      status: d.status,
+      teacher_name: d.teacher_name || "",
+      teacher_reply: d.teacher_reply || "",
+      teacher_reply_code: d.teacher_reply_code || "",
+      teacher_reply_image_url: d.teacher_reply_image_url || "",
+      answered_at: d.answered_at || null,
+      created_at: d.createdAt,
+    };
+  });
+  return sendSuccess(res, data);
+}
+
+async function answerPersonal(req, res) {
+  const schema = z.object({
+    teacher_reply: z.string().max(5000).trim().optional().default(""),
+    teacher_reply_code: z.string().max(20000).optional().default(""),
+  });
+  const body = schema.parse(req.body || {});
+  const text = String(body.teacher_reply || "").trim();
+  const code = String(body.teacher_reply_code || "").trim();
+  const imageUrl = req.file
+    ? `${req.protocol}://${req.get("host")}/v1/static/doubt-images/${req.file.filename}`
+    : "";
+  if (!text && !code && !imageUrl) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Provide reply text, code, or image");
+  }
+  const doc = await PersonalDoubt.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "DOUBT_NOT_FOUND", "Personal doubt not found");
+  const staff = await Staff.findById(req.staff.sub).select("name").lean();
+  doc.status = "answered";
+  doc.teacher_reply = text;
+  doc.teacher_reply_code = code;
+  if (imageUrl) doc.teacher_reply_image_url = imageUrl;
+  doc.teacher_name = staff?.name || "Instructor";
+  doc.answered_at = new Date();
+  doc.unread_by_student = true;
+  await doc.save();
+  return sendSuccess(res, { id: String(doc._id), status: doc.status }, "Reply saved");
+}
+
+async function listCommunity(req, res) {
+  const batchId = String(req.query.batch_id || "").trim().toLowerCase();
+  const includeAllDefaultBatches =
+    String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
+  const defaultBatchIds = ["spark", "builders", "innovators"];
+  let filter = null;
+  if (includeAllDefaultBatches) {
+    filter = { channel_id: { $in: defaultBatchIds } };
+  } else {
+    if (!batchId) return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
+    filter = { channel_id: batchId };
+  }
+  const rows = await CommunityMessage.find(filter).sort({ createdAt: -1 }).limit(500).lean();
+  const myStaffId = String(req.staff.sub || "");
+  const staffIds = [...new Set(rows.map((m) => String(m.staff_id || "")).filter(Boolean))];
+  const studentIds = [...new Set(rows.map((m) => String(m.student_id || "")).filter(Boolean))];
+  const [staffRows, studentRows] = await Promise.all([
+    staffIds.length
+      ? Staff.find({ _id: { $in: staffIds } }).select("profile_image_url").lean()
+      : Promise.resolve([]),
+    studentIds.length
+      ? Student.find({ _id: { $in: studentIds } }).select("avatar_url").lean()
+      : Promise.resolve([]),
+  ]);
+  const staffAvatarById = new Map(staffRows.map((s) => [String(s._id), s.profile_image_url || ""]));
+  const studentAvatarById = new Map(studentRows.map((s) => [String(s._id), s.avatar_url || ""]));
+  const data = rows.reverse().map((m) => ({
+    staffId: m.staff_id ? String(m.staff_id) : "",
+    studentId: m.student_id ? String(m.student_id) : "",
+    id: String(m._id),
+    channel_id: m.channel_id,
+    author_name: m.author_name || "User",
+    author_role: m.author_role || "student",
+    is_mine: myStaffId ? String(m.staff_id || "") === myStaffId : false,
+    author_avatar_url: m.staff_id
+      ? staffAvatarById.get(String(m.staff_id)) || ""
+      : m.student_id
+        ? studentAvatarById.get(String(m.student_id)) || ""
+        : "",
+    text: m.text || "",
+    code: m.code || null,
+    media: m.media || null,
+    likes: Array.isArray(m.likes) ? m.likes.length : 0,
+    created_at: m.createdAt,
+  }));
+  return sendSuccess(res, data);
+}
+
+async function postCommunity(req, res) {
+  const bodySource = req.file ? req.body || {} : req.body || {};
+  const schema = z.object({
+    batch_id: z.string().min(1).trim().toLowerCase(),
+    text: z.string().optional().default(""),
+    code: z
+      .object({
+        lang: z.string().optional(),
+        content: z.string().optional(),
+      })
+      .optional(),
+  });
+  const body = schema.parse(bodySource);
+  const text = String(body.text || "").trim();
+  const codeContent = String(body.code?.content || "").trim();
+  let media = null;
+  if (req.file) {
+    if (!isCloudinaryConfigured()) {
+      return sendError(
+        res,
+        503,
+        "CLOUDINARY_NOT_CONFIGURED",
+        "Community media upload requires Cloudinary configuration"
+      );
+    }
+    media = await uploadCommunityMedia(req);
+  }
+  if (!text && !codeContent && !media?.url) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Provide text, code, or media");
+  }
+  const staff = await Staff.findById(req.staff.sub).select("name role").lean();
+  const created = await CommunityMessage.create({
+    channel_id: body.batch_id,
+    student_id: null,
+    staff_id: req.staff.sub,
+    author_role: staff?.role || "instructor",
+    author_name: staff?.name || "Instructor",
+    text,
+    code: codeContent ? { lang: body.code?.lang || "text", content: codeContent } : undefined,
+    media: media?.url ? media : undefined,
+    likes: [],
+  });
+  return sendSuccess(
+    res,
+    {
+      id: String(created._id),
+      channel_id: created.channel_id,
+      media: created.media || null,
+    },
+    "Posted"
+  );
+}
+
+module.exports = { listPersonal, answerPersonal, listCommunity, postCommunity };

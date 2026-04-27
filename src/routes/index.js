@@ -1,0 +1,46 @@
+const express = require("express");
+const authRoutes = require("./modules/auth.routes");
+const studentRoutes = require("./modules/student.routes");
+const dashboardRoutes = require("./modules/dashboard.routes");
+const announcementRoutes = require("./modules/announcement.routes");
+const notesRoutes = require("./modules/notes.routes");
+const assignmentRoutes = require("./modules/assignment.routes");
+const arenaRoutes = require("./modules/arena.routes");
+const timetableRoutes = require("./modules/timetable.routes");
+const classesRoutes = require("./modules/classes.routes");
+const adminRoutes = require("./modules/admin.routes");
+const staffAuthRoutes = require("./modules/staff-auth.routes");
+const staffManagementRoutes = require("./modules/staff-management.routes");
+const scorecardRoutes = require("./modules/scorecard.routes");
+const leaderboardRoutes = require("./modules/leaderboard.routes");
+const mentorSessionsRoutes = require("./modules/mentor-sessions.routes");
+const doubtsRoutes = require("./modules/doubts.routes");
+const supportRoutes = require("./modules/support.routes");
+const notificationsRoutes = require("./modules/notifications.routes");
+const staffPanelNotificationsRoutes = require("./modules/staff-panel-notifications.routes");
+const referralRoutes = require("./modules/referral.routes");
+
+const router = express.Router();
+
+router.use("/auth", authRoutes);
+router.use("/staff-auth", staffAuthRoutes);
+router.use("/staff", staffManagementRoutes);
+router.use("/students", studentRoutes);
+router.use("/dashboard", dashboardRoutes);
+router.use("/announcements", announcementRoutes);
+router.use("/notes", notesRoutes);
+router.use("/assignments", assignmentRoutes);
+router.use("/arena", arenaRoutes);
+router.use("/timetable", timetableRoutes);
+router.use("/classes", classesRoutes);
+router.use("/admin", adminRoutes);
+router.use("/scorecard", scorecardRoutes);
+router.use("/leaderboard", leaderboardRoutes);
+router.use("/mentor-sessions", mentorSessionsRoutes);
+router.use("/doubts", doubtsRoutes);
+router.use("/support", supportRoutes);
+router.use("/notifications", notificationsRoutes);
+router.use("/staff/panel-notifications", staffPanelNotificationsRoutes);
+router.use("/referral", referralRoutes);
+
+module.exports = router;
