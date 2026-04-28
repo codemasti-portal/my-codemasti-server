@@ -1,8 +1,9 @@
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
+const { getUploadsRoot } = require("../utils/upload-paths");
 
-const uploadsRoot = path.join(__dirname, "..", "..", "uploads");
+const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
 const doubtImagesDir = path.join(uploadsRoot, "doubt-images");
 const staffImagesDir = path.join(uploadsRoot, "staff-profile-images");

@@ -10,8 +10,9 @@ const {
   uploadBufferToFolder,
   buildStudentAvatarFolder,
 } = require("../utils/cloudinary");
+const { getUploadsRoot } = require("../utils/upload-paths");
 
-const uploadsRoot = path.join(__dirname, "..", "..", "uploads");
+const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
 
 async function getMe(req, res) {
