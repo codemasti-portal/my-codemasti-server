@@ -6,6 +6,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
+const { getUploadsRoot } = require("./utils/upload-paths");
 
 const { apiLimiter, otpLimiter } = require("./middlewares/rateLimit.middleware");
 const routes = require("./routes");
@@ -30,7 +31,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(apiLimiter);
 
-const uploadsRoot = path.join(__dirname, "..", "uploads");
+const uploadsRoot = getUploadsRoot();
 fs.mkdirSync(path.join(uploadsRoot, "avatars"), { recursive: true });
 fs.mkdirSync(path.join(uploadsRoot, "doubt-images"), { recursive: true });
 fs.mkdirSync(path.join(uploadsRoot, "staff-profile-images"), { recursive: true });
