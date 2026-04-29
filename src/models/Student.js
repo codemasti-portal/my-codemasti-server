@@ -39,6 +39,8 @@ const studentSchema = new mongoose.Schema(
     enrollment_date: { type: Date, default: Date.now },
     /** Optional bcrypt hash for password change flow; OTP remains primary login. */
     password_hash: { type: String, default: "" },
+    /** True only after student completes user-facing password setup/reset/update. */
+    password_set_by_user: { type: Boolean, default: false },
     referral_code: { type: String, trim: true, sparse: true, index: true },
     /** Added to verified referral count for display / student portal (offline or corrected referrals). */
     referral_bonus_count: { type: Number, default: 0, min: 0, max: 500 },

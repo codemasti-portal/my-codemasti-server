@@ -2,9 +2,13 @@ const fs = require("fs");
 const path = require("path");
 const { z } = require("zod");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
+const OtpRequest = require("../models/OtpRequest");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { sendOtpEmail } = require("../services/brevo");
+const { signAccessToken, verifyAccessToken } = require("../utils/tokens");
 const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
@@ -155,8 +159,113 @@ async function changePassword(req, res) {
   }
 
   student.password_hash = bcrypt.hashSync(body.new_password, 10);
+  student.password_set_by_user = true;
   await student.save();
   return sendSuccess(res, {}, "Password updated");
 }
 
-module.exports = { getMe, patchMe, uploadAvatar, changePassword };
+async function sendPasswordUpdateOtp(req, res) {
+  const student = await Student.findById(req.user.sub).lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  const email = String(student.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "EMAIL_NOT_FOUND", "No email found for this account");
+
+  const otp_request_id = `otp_req_${crypto.randomBytes(6).toString("hex")}`;
+  const otp = String(crypto.randomInt(100000, 1000000));
+  await OtpRequest.create({
+    otp_request_id,
+    email,
+    otp,
+    expires_at: new Date(Date.now() + 120 * 1000),
+  });
+
+  const expiresInSec = 120;
+  try {
+    await sendOtpEmail({ toEmail: email, otp, expiresInSec });
+  } catch (error) {
+    if (process.env.OTP_DEBUG_LOG !== "false") {
+      console.warn("[OTP_DEBUG]", error.message);
+      console.log(`[OTP_DEBUG] OTP for ${email}: ${otp}`);
+    }
+  }
+
+  return sendSuccess(
+    res,
+    { otp_request_id, expires_in_sec: expiresInSec, resend_after_sec: 30 },
+    "OTP sent"
+  );
+}
+
+async function verifyPasswordUpdateOtp(req, res) {
+  const schema = z.object({
+    otp: z.string().length(6),
+    otp_request_id: z.string(),
+  });
+  const body = schema.parse(req.body);
+  const student = await Student.findById(req.user.sub).lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  const email = String(student.email || "").trim().toLowerCase();
+
+  const record = await OtpRequest.findOne({ otp_request_id: body.otp_request_id, email }).lean();
+  if (!record || record.otp !== body.otp) {
+    return sendError(res, 400, "INVALID_OTP", "Invalid or expired OTP.");
+  }
+  if (record.used_at || Date.now() > new Date(record.expires_at).getTime()) {
+    return sendError(res, 400, "OTP_EXPIRED", "Invalid or expired OTP.");
+  }
+  await OtpRequest.updateOne({ _id: record._id }, { $set: { used_at: new Date() } });
+
+  const password_update_token = signAccessToken({
+    sub: String(student._id),
+    email,
+    type: "student_password_update",
+  });
+  return sendSuccess(res, { password_update_token, expires_in_sec: 600 }, "OTP verified");
+}
+
+async function updatePasswordWithOtp(req, res) {
+  const schema = z.object({
+    password_update_token: z.string().min(10),
+    new_password: z.string().min(8),
+    confirm_password: z.string().min(8),
+  });
+  const body = schema.parse(req.body);
+  if (body.new_password !== body.confirm_password) {
+    return sendError(res, 400, "PASSWORD_MISMATCH", "Passwords must match.");
+  }
+  if (!/[A-Z]/.test(body.new_password) || !/[0-9]/.test(body.new_password) || !/[^A-Za-z0-9]/.test(body.new_password)) {
+    return sendError(
+      res,
+      400,
+      "WEAK_PASSWORD",
+      "Password must be at least 8 characters and include 1 uppercase letter, 1 number, and 1 special character."
+    );
+  }
+
+  let decoded;
+  try {
+    decoded = verifyAccessToken(body.password_update_token);
+  } catch {
+    return sendError(res, 401, "INVALID_PASSWORD_UPDATE_TOKEN", "Password update session expired. Verify OTP again.");
+  }
+  if (!decoded?.sub || decoded?.type !== "student_password_update" || String(decoded.sub) !== String(req.user.sub)) {
+    return sendError(res, 401, "INVALID_PASSWORD_UPDATE_TOKEN", "Password update session expired. Verify OTP again.");
+  }
+
+  const student = await Student.findById(req.user.sub);
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  student.password_hash = bcrypt.hashSync(body.new_password, 10);
+  student.password_set_by_user = true;
+  await student.save();
+  return sendSuccess(res, {}, "Password updated successfully.");
+}
+
+module.exports = {
+  getMe,
+  patchMe,
+  uploadAvatar,
+  changePassword,
+  sendPasswordUpdateOtp,
+  verifyPasswordUpdateOtp,
+  updatePasswordWithOtp,
+};

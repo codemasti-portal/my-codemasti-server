@@ -180,6 +180,7 @@ async function createStaff(req, res) {
     name: body.name,
     role: body.role,
     password_hash,
+    password_set_by_user: Boolean(body.password),
     account_status: "active",
     is_active: true,
   });
@@ -285,7 +286,7 @@ async function resetPassword(req, res) {
   }
 
   const password_hash = bcrypt.hashSync(body.new_password, 10);
-  await Staff.updateOne({ _id: target._id }, { $set: { password_hash } });
+  await Staff.updateOne({ _id: target._id }, { $set: { password_hash, password_set_by_user: true } });
   emitEventNotification({
     audience: "individual",
     recipient_id: String(target._id),
