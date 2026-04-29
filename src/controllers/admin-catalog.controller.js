@@ -40,6 +40,30 @@ function paginate(req) {
   return { page, limit, skip: (page - 1) * limit };
 }
 
+function escapeRegex(input) {
+  return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function resolveStaffDisplayName(req) {
+  const sub = String(req?.staff?.sub || "").trim();
+  if (sub && mongoose.isValidObjectId(sub)) {
+    const staffDoc = await Staff.findById(sub).select("name").lean();
+    const name = String(staffDoc?.name || "").trim();
+    if (name) return name;
+  }
+  return "";
+}
+
+function weekdayFromDateString(dateStr) {
+  const raw = String(dateStr || "").trim();
+  if (!raw) return "";
+  const [y, m, d] = raw.slice(0, 10).split("-").map((v) => Number(v));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return "";
+  const dt = new Date(y, m - 1, d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleDateString("en-US", { weekday: "long" });
+}
+
 async function fanoutTimetableSlotNotification(slot, action) {
   const batchId = String(slot?.batch_id || "").trim().toLowerCase();
   if (!batchId) return;
@@ -458,6 +482,11 @@ async function listLiveClasses(req, res) {
   const { page, limit, skip } = paginate(req);
   const batch_id = String(req.query.batch_id || "").trim();
   const filter = batch_id ? { batch_id } : {};
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendSuccess(res, [], "", { page, limit, total: 0 });
+    filter.instructor = new RegExp(`^${escapeRegex(ownName)}$`, "i");
+  }
   const [items, total] = await Promise.all([
     LiveClass.find(filter).sort({ date: 1, start_time: 1 }).skip(skip).limit(limit).lean(),
     LiveClass.countDocuments(filter),
@@ -473,6 +502,12 @@ async function listLiveClasses(req, res) {
 async function getLiveClass(req, res) {
   const doc = await LiveClass.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName || String(doc.instructor || "").trim().toLowerCase() !== ownName.toLowerCase()) {
+      return sendError(res, 403, "FORBIDDEN", "You can access only your own classes");
+    }
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 
@@ -489,6 +524,11 @@ async function createLiveClass(req, res) {
     recording_link: z.string().optional().default(""),
   });
   const body = schema.parse(req.body);
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    body.instructor = ownName;
+  }
   const created = await LiveClass.create(body);
   return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
 }
@@ -508,12 +548,28 @@ async function updateLiveClass(req, res) {
   const body = schema.parse(req.body);
   const doc = await LiveClass.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName || String(doc.instructor || "").trim().toLowerCase() !== ownName.toLowerCase()) {
+      return sendError(res, 403, "FORBIDDEN", "You can update only your own classes");
+    }
+    body.instructor = ownName;
+  }
   Object.assign(doc, body);
   await doc.save();
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
 }
 
 async function deleteLiveClass(req, res) {
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    const mine = await LiveClass.findOne({
+      _id: req.params.id,
+      instructor: new RegExp(`^${escapeRegex(ownName)}$`, "i"),
+    }).lean();
+    if (!mine) return sendError(res, 403, "FORBIDDEN", "You can delete only your own classes");
+  }
   const r = await LiveClass.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Live class not found");
   return sendSuccess(res, { id: req.params.id }, "Deleted");
@@ -524,13 +580,28 @@ async function listTimetableSlots(req, res) {
   const { page, limit, skip } = paginate(req);
   const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
   const section_id = String(req.query.section_id || "").trim().toLowerCase();
+  const month = Number(req.query.month || 0);
+  const year = Number(req.query.year || 0);
   const filter = {};
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendSuccess(res, [], "", { page, limit, total: 0 });
+    filter.teacher = new RegExp(`^${escapeRegex(ownName)}$`, "i");
+  }
   if (batch_id) filter.batch_id = batch_id;
   if (batch_id && section_id) {
     filter.$or = [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: section_id }];
   }
+  if (year >= 1900) {
+    if (month >= 1 && month <= 12) {
+      const mm = String(month).padStart(2, "0");
+      filter.class_date = { $regex: `^${year}-${mm}-` };
+    } else {
+      filter.class_date = { $regex: `^${year}-` };
+    }
+  }
   const [items, total] = await Promise.all([
-    TimetableSlot.find(filter).sort({ day: 1, time: 1 }).skip(skip).limit(limit).lean(),
+    TimetableSlot.find(filter).sort({ class_date: 1, day: 1, time: 1 }).skip(skip).limit(limit).lean(),
     TimetableSlot.countDocuments(filter),
   ]);
   return sendSuccess(
@@ -544,6 +615,12 @@ async function listTimetableSlots(req, res) {
 async function getTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
+      return sendError(res, 403, "FORBIDDEN", "You can access only your own timetable slots");
+    }
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 
@@ -552,25 +629,39 @@ async function createTimetableSlot(req, res) {
   const schema = z.object({
     batch_id: z.string().min(1).trim(),
     section_id: z.string().trim().optional().default(""),
+    class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     day: dayEnum.optional(),
     days: z.array(dayEnum).optional(),
     time: z.string().min(1).trim(),
     subject: z.string().min(1).trim(),
     teacher: z.string().min(1).trim(),
+    meet_link: z.string().url().min(1).trim(),
+    is_taken: z.boolean().optional().default(false),
   });
   const body = schema.parse(req.body);
-  const targetDays = [...new Set((body.days && body.days.length ? body.days : [body.day]).filter(Boolean))];
-  if (!targetDays.length) {
-    return sendError(res, 400, "VALIDATION_ERROR", "Provide day or days");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    body.teacher = ownName;
+  }
+  const derivedDay = body.class_date ? weekdayFromDateString(body.class_date) : "";
+  const targetDays = body.class_date
+    ? [derivedDay]
+    : [...new Set((body.days && body.days.length ? body.days : [body.day]).filter(Boolean))];
+  if (!targetDays.length || (body.class_date && !derivedDay)) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Provide valid day/days or class_date");
   }
 
   const docs = targetDays.map((day) => ({
     batch_id: body.batch_id.toLowerCase().trim(),
     section_id: (body.section_id || "").toLowerCase().trim(),
     day,
+    class_date: body.class_date ? body.class_date.trim() : "",
     time: body.time.trim(),
     subject: body.subject.trim(),
     teacher: body.teacher.trim(),
+    meet_link: body.meet_link.trim(),
+    is_taken: Boolean(body.is_taken),
   }));
 
   const created = await TimetableSlot.insertMany(docs, { ordered: false });
@@ -585,21 +676,39 @@ async function updateTimetableSlot(req, res) {
   const schema = z.object({
     batch_id: z.string().min(1).trim().optional(),
     section_id: z.string().trim().optional(),
+    class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     day: z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]).optional(),
     time: z.string().optional(),
     subject: z.string().optional(),
     teacher: z.string().optional(),
+    meet_link: z.string().url().optional(),
+    is_taken: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
   const doc = await TimetableSlot.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
+      return sendError(res, 403, "FORBIDDEN", "You can update only your own timetable slots");
+    }
+    body.teacher = ownName;
+  }
   if (body.batch_id !== undefined) doc.batch_id = body.batch_id.toLowerCase().trim();
   if (body.section_id !== undefined) doc.section_id = (body.section_id || "").toLowerCase().trim();
+  if (body.class_date !== undefined) {
+    doc.class_date = body.class_date.trim();
+    const d = weekdayFromDateString(doc.class_date);
+    if (!d) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
+    doc.day = d;
+  }
   const { batch_id: _b, section_id: _s, ...rest } = body;
   Object.assign(doc, rest);
   if (body.time !== undefined) doc.time = body.time.trim();
   if (body.subject !== undefined) doc.subject = body.subject.trim();
   if (body.teacher !== undefined) doc.teacher = body.teacher.trim();
+  if (body.meet_link !== undefined) doc.meet_link = body.meet_link.trim();
+  if (body.is_taken !== undefined) doc.is_taken = Boolean(body.is_taken);
   await doc.save();
   await fanoutTimetableSlotNotification(doc.toObject(), "updated");
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
@@ -608,6 +717,12 @@ async function updateTimetableSlot(req, res) {
 async function deleteTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
+      return sendError(res, 403, "FORBIDDEN", "You can delete only your own timetable slots");
+    }
+  }
   const r = await TimetableSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Slot not found");
   await fanoutTimetableSlotNotification(doc, "deleted");

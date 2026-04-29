@@ -14,8 +14,11 @@ const uploadMw = require("../../middlewares/upload.middleware");
 const router = express.Router();
 
 const manageContent = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
+const manageNotes = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+const manageLiveClasses = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageAssignments = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
-const manageTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+const readTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+const manageTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
 const manageScorecard = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const batchCatalogRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const adminOnly = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
@@ -26,15 +29,15 @@ router.get("/announcements/:id", ...manageContent, content.getAnnouncement);
 router.patch("/announcements/:id", ...manageContent, content.updateAnnouncement);
 router.delete("/announcements/:id", ...manageContent, content.deleteAnnouncement);
 
-router.get("/notes", ...manageContent, content.listNotes);
-router.post("/notes", ...manageContent, content.createNote);
-router.get("/notes/:id", ...manageContent, content.getNote);
-router.patch("/notes/:id", ...manageContent, content.updateNote);
-router.delete("/notes/:id", ...manageContent, content.deleteNote);
+router.get("/notes", ...manageNotes, content.listNotes);
+router.post("/notes", ...manageNotes, content.createNote);
+router.get("/notes/:id", ...manageNotes, content.getNote);
+router.patch("/notes/:id", ...manageNotes, content.updateNote);
+router.delete("/notes/:id", ...manageNotes, content.deleteNote);
 
 router.post(
   "/uploads/note-asset",
-  ...manageContent,
+  ...manageNotes,
   uploadMw.noteAssetUpload,
   adminUpload.uploadNoteAsset
 );
@@ -82,21 +85,21 @@ router.get("/arena/questions/:id", ...manageContent, catalog.getArenaQuestion);
 router.patch("/arena/questions/:id", ...manageContent, catalog.updateArenaQuestion);
 router.delete("/arena/questions/:id", ...manageContent, catalog.deleteArenaQuestion);
 
-router.get("/live-classes", ...manageContent, catalog.listLiveClasses);
-router.post("/live-classes", ...manageContent, catalog.createLiveClass);
-router.get("/live-classes/:id", ...manageContent, catalog.getLiveClass);
-router.patch("/live-classes/:id", ...manageContent, catalog.updateLiveClass);
-router.delete("/live-classes/:id", ...manageContent, catalog.deleteLiveClass);
+router.get("/live-classes", ...manageLiveClasses, catalog.listLiveClasses);
+router.post("/live-classes", ...manageLiveClasses, catalog.createLiveClass);
+router.get("/live-classes/:id", ...manageLiveClasses, catalog.getLiveClass);
+router.patch("/live-classes/:id", ...manageLiveClasses, catalog.updateLiveClass);
+router.delete("/live-classes/:id", ...manageLiveClasses, catalog.deleteLiveClass);
 
-router.get("/timetable/slots", ...manageTimetable, catalog.listTimetableSlots);
+router.get("/timetable/slots", ...readTimetable, catalog.listTimetableSlots);
 router.post("/timetable/slots", ...manageTimetable, catalog.createTimetableSlot);
-router.get("/timetable/slots/:id", ...manageTimetable, catalog.getTimetableSlot);
+router.get("/timetable/slots/:id", ...readTimetable, catalog.getTimetableSlot);
 router.patch("/timetable/slots/:id", ...manageTimetable, catalog.updateTimetableSlot);
 router.delete("/timetable/slots/:id", ...manageTimetable, catalog.deleteTimetableSlot);
 
-router.get("/timetable/events", ...manageTimetable, catalog.listTimetableEvents);
+router.get("/timetable/events", ...readTimetable, catalog.listTimetableEvents);
 router.post("/timetable/events", ...manageTimetable, catalog.createTimetableEvent);
-router.get("/timetable/events/:id", ...manageTimetable, catalog.getTimetableEvent);
+router.get("/timetable/events/:id", ...readTimetable, catalog.getTimetableEvent);
 router.patch("/timetable/events/:id", ...manageTimetable, catalog.updateTimetableEvent);
 router.delete("/timetable/events/:id", ...manageTimetable, catalog.deleteTimetableEvent);
 

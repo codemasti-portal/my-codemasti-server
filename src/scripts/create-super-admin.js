@@ -35,6 +35,7 @@ async function main() {
         name: NAME || "Super Admin",
         role: "super_admin",
         password_hash,
+        password_set_by_user: false,
         is_active: true,
       },
     },

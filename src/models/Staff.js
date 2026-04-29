@@ -6,6 +6,8 @@ const staffSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     /** Optional bcrypt hash for manual DB setup / future password flows; login is OTP-based. */
     password_hash: { type: String, default: "" },
+    /** True only after staff completes user-facing password setup/reset/update. */
+    password_set_by_user: { type: Boolean, default: false },
     role: {
       type: String,
       enum: ["super_admin", "admin", "instructor", "mentor"],
