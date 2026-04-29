@@ -14,9 +14,18 @@ const { notFoundHandler, errorHandler } = require("./middlewares/error.middlewar
 
 const app = express();
 
-const corsOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean)
-  : null;
+function parseCorsOrigins(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+const corsOrigins = [
+  ...parseCorsOrigins(process.env.CORS_ORIGINS),
+  ...parseCorsOrigins(process.env.CORS_ORIGIN),
+].filter((origin, index, all) => all.indexOf(origin) === index);
 
 app.use(
   cors({
