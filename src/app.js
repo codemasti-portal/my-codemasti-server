@@ -7,12 +7,14 @@ const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
 const { getUploadsRoot } = require("./utils/upload-paths");
+const { connectDb } = require("./config/db");
 
 const { apiLimiter, otpLimiter } = require("./middlewares/rateLimit.middleware");
 const routes = require("./routes");
 const { notFoundHandler, errorHandler } = require("./middlewares/error.middleware");
 
 const app = express();
+let dbInitPromise = null;
 
 function parseCorsOrigins(raw) {
   if (!raw) return [];
@@ -39,6 +41,40 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(apiLimiter);
+
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState === 1) return next();
+
+  try {
+    if (!dbInitPromise) {
+      dbInitPromise = connectDb().finally(() => {
+        dbInitPromise = null;
+      });
+    }
+    await dbInitPromise;
+    return next();
+  } catch (error) {
+    console.error(
+      "[ERROR]",
+      JSON.stringify({
+        context: "DB_CONNECT_ON_REQUEST",
+        method: req.method,
+        url: req.originalUrl || req.url,
+        message: error.message,
+        name: error.name,
+      })
+    );
+    if (error.stack) console.error(error.stack);
+    return res.status(503).json({
+      success: false,
+      error: {
+        code: "DB_NOT_CONNECTED",
+        message: "Database is not connected. Please retry shortly.",
+        details: {},
+      },
+    });
+  }
+});
 
 const uploadsRoot = getUploadsRoot();
 fs.mkdirSync(path.join(uploadsRoot, "avatars"), { recursive: true });
