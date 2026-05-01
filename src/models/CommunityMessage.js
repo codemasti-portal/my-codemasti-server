@@ -30,6 +30,9 @@ const communityMessageSchema = new mongoose.Schema(
     code: { type: codeBlockSchema, default: undefined },
     media: { type: mediaSchema, default: undefined },
     likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "Student" }],
+    is_hidden: { type: Boolean, default: false, index: true },
+    hidden_by_staff_id: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },
+    hidden_at: { type: Date, default: null },
   },
   { timestamps: true, versionKey: false }
 );

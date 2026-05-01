@@ -120,13 +120,14 @@ async function listCommunityMessages(req, res) {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
   const skip = (page - 1) * limit;
 
+  const messageFilter = { channel_id: channelId, is_hidden: { $ne: true } };
   const [rows, total] = await Promise.all([
-    CommunityMessage.find({ channel_id: channelId })
+    CommunityMessage.find(messageFilter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean(),
-    CommunityMessage.countDocuments({ channel_id: channelId }),
+    CommunityMessage.countDocuments(messageFilter),
   ]);
 
   const data = rows.reverse().map((m) => ({

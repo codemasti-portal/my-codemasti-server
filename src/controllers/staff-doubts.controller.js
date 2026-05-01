@@ -173,10 +173,40 @@ async function listCommunity(req, res) {
     text: m.text || "",
     code: m.code || null,
     media: m.media || null,
+    is_hidden: !!m.is_hidden,
     likes: Array.isArray(m.likes) ? m.likes.length : 0,
     created_at: m.createdAt,
   }));
   return sendSuccess(res, data);
+}
+
+async function hideCommunity(req, res) {
+  const messageId = String(req.params.id || "").trim();
+  if (!messageId) return sendError(res, 400, "VALIDATION_ERROR", "Message id is required");
+  const doc = await CommunityMessage.findOneAndUpdate(
+    { _id: messageId, is_hidden: { $ne: true } },
+    {
+      $set: {
+        is_hidden: true,
+        hidden_by_staff_id: req.staff.sub,
+        hidden_at: new Date(),
+        text: "Hidden by admin",
+        code: undefined,
+        media: undefined,
+      },
+    },
+    { new: true }
+  ).lean();
+  if (!doc) return sendError(res, 404, "MESSAGE_NOT_FOUND", "Community message not found");
+  return sendSuccess(res, { id: String(doc._id), is_hidden: true }, "Message hidden");
+}
+
+async function deleteCommunity(req, res) {
+  const messageId = String(req.params.id || "").trim();
+  if (!messageId) return sendError(res, 400, "VALIDATION_ERROR", "Message id is required");
+  const deleted = await CommunityMessage.findByIdAndDelete(messageId).lean();
+  if (!deleted) return sendError(res, 404, "MESSAGE_NOT_FOUND", "Community message not found");
+  return sendSuccess(res, { id: String(deleted._id), deleted: true }, "Message deleted");
 }
 
 async function postCommunity(req, res) {
@@ -232,4 +262,4 @@ async function postCommunity(req, res) {
   );
 }
 
-module.exports = { listPersonal, answerPersonal, listCommunity, postCommunity };
+module.exports = { listPersonal, answerPersonal, listCommunity, postCommunity, hideCommunity, deleteCommunity };

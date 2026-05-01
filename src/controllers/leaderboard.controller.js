@@ -3,23 +3,41 @@ const { sendSuccess } = require("../utils/response");
 const Student = require("../models/Student");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaSubmission = require("../models/ArenaSubmission");
+const {
+  augmentStudentCatalogFieldsFromEnrollment,
+  catalogBatchMongoMatch,
+} = require("../utils/enrollment");
+
+function escapeRegex(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function buildBatchScopeFilter(studentDoc) {
+  const keys = Array.from(
+    new Set(
+      [studentDoc?.batch_id, studentDoc?.batch, studentDoc?.enrollment_batch_name]
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+    )
+  );
   const or = [];
-  if (studentDoc?.batch_id) or.push({ batch_id: String(studentDoc.batch_id) });
-  if (studentDoc?.batch) or.push({ batch: String(studentDoc.batch) });
-  if (studentDoc?.enrollment_batch_name) {
-    or.push({ enrollment_batch_name: String(studentDoc.enrollment_batch_name) });
+  for (const key of keys) {
+    const rx = new RegExp(`^${escapeRegex(key)}$`, "i");
+    or.push({ batch_id: rx }, { batch: rx }, { enrollment_batch_name: rx });
   }
   if (or.length === 0) return { _id: studentDoc?._id };
   return { $or: or };
 }
 
 async function getScopedStudentIdSet(studentId) {
-  const studentDoc = await Student.findById(studentId).lean();
+  const rawStudent = await Student.findById(studentId).lean();
+  const studentDoc = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
   if (!studentDoc) return null;
 
-  const filter = buildBatchScopeFilter(studentDoc);
+  const batchId = String(studentDoc.batch_id || "").trim().toLowerCase();
+  const filter = batchId
+    ? { role: "student", ...catalogBatchMongoMatch(batchId) }
+    : { role: "student", ...buildBatchScopeFilter(studentDoc) };
   const peerStudents = await Student.find(filter, { _id: 1 }).lean();
   return new Set(peerStudents.map((row) => String(row._id)));
 }
@@ -64,13 +82,61 @@ async function buildRows(timeFilter) {
     },
     { $unwind: "$q" },
     {
+      $lookup: {
+        from: "assignments",
+        localField: "assignment_id",
+        foreignField: "_id",
+        as: "a",
+      },
+    },
+    { $unwind: { path: "$a", preserveNullAndEmptyArrays: true } },
+    {
       $addFields: {
-        _assignXp: {
-          $ifNull: ["$xp_awarded", "$q.xp"],
+        _fullXp: {
+          $max: [{ $toInt: { $ifNull: ["$q.xp", 0] } }, 0],
         },
       },
     },
-    { $group: { _id: "$student_id", xp: { $sum: "$_assignXp" }, last: { $max: "$submitted_at" } } },
+    {
+      $group: {
+        _id: { student_id: "$student_id", question_id: "$question_id" },
+        best_xp: { $max: { $ifNull: ["$xp_awarded", 0] } },
+        first_submitted_at: { $min: "$submitted_at" },
+        full_xp: { $first: "$_fullXp" },
+        deadline_date: { $first: "$a.deadline_date" },
+        last: { $max: "$submitted_at" },
+      },
+    },
+    {
+      $addFields: {
+        derived_xp: {
+          $cond: [
+            {
+              $or: [
+                { $eq: ["$deadline_date", null] },
+                { $lte: ["$first_submitted_at", "$deadline_date"] },
+              ],
+            },
+            "$full_xp",
+            { $floor: { $divide: ["$full_xp", 2] } },
+          ],
+        },
+      },
+    },
+    {
+      $addFields: {
+        effective_xp: {
+          $cond: [{ $gt: ["$best_xp", 0] }, "$best_xp", "$derived_xp"],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: "$_id.student_id",
+        xp: { $sum: "$effective_xp" },
+        last: { $max: "$last" },
+      },
+    },
   ];
   const arenaPipe = [
     { $match: { status: "Accepted", ...t } },
@@ -114,7 +180,7 @@ async function buildLatestSubmissionMap(timeFilter) {
   const t = submittedAtMatch(timeFilter);
   const [assignmentLatest, arenaLatest] = await Promise.all([
     AssignmentSubmission.aggregate([
-      { $match: t },
+      { $match: { status: "Accepted", ...t } },
       { $group: { _id: "$student_id", last: { $max: "$submitted_at" } } },
     ]),
     ArenaSubmission.aggregate([
@@ -148,9 +214,7 @@ async function list(req, res) {
     buildRows(tf),
     buildLatestSubmissionMap(tf),
   ]);
-  const ids = [...merged.keys()]
-    .filter((id) => scopedStudentIds.has(id))
-    .map((id) => new mongoose.Types.ObjectId(id));
+  const ids = [...scopedStudentIds].map((id) => new mongoose.Types.ObjectId(id));
   const students = ids.length ? await Student.find({ _id: { $in: ids } }).lean() : [];
   const byId = new Map(students.map((s) => [String(s._id), s]));
 
@@ -158,13 +222,13 @@ async function list(req, res) {
     .map((oid) => String(oid))
     .map((id) => {
       const s = byId.get(id);
-      const v = merged.get(id);
-      if (!s || !v) return null;
+      const v = merged.get(id) || { xp: 0, last: new Date(0) };
+      if (!s) return null;
       return {
         id,
         name: s.name,
         avatar_url: s.avatar_url || "",
-        xp: v.xp,
+        xp: Math.max(0, Number(v.xp || 0)),
         batch: s.batch || "",
         latest_submission_time:
           (latestSubmissionMap.get(id) || v.last) > new Date(0)
@@ -184,8 +248,8 @@ async function list(req, res) {
 }
 
 async function me(req, res) {
-  const raw = String(req.query.time_filter || "this_month");
-  const tf = ["all_time", "this_year", "this_month", "this_week"].includes(raw) ? raw : "this_month";
+  const raw = String(req.query.time_filter || "all_time");
+  const tf = ["all_time", "this_year", "this_month", "this_week"].includes(raw) ? raw : "all_time";
   const scopedStudentIds = await getScopedStudentIdSet(req.user.sub);
   if (!scopedStudentIds) {
     return sendSuccess(res, {
@@ -205,9 +269,9 @@ async function me(req, res) {
   const myXp = entry?.xp ?? 0;
   const myLast = latestSubmissionMap.get(selfId) || entry?.last;
 
-  const sorted = [...merged.entries()]
-    .filter(([id]) => scopedStudentIds.has(id))
-    .sort((a, b) => b[1].xp - a[1].xp);
+  const sorted = [...scopedStudentIds]
+    .map((id) => [id, merged.get(id) || { xp: 0, last: new Date(0) }])
+    .sort((a, b) => Number(b[1].xp || 0) - Number(a[1].xp || 0) || String(a[0]).localeCompare(String(b[0])));
   const rankIdx = sorted.findIndex(([id]) => id === selfId);
 
   return sendSuccess(res, {

@@ -238,6 +238,7 @@ async function createAssignment(req, res) {
       assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional().default("written"),
       release_date: z.coerce.date(),
       deadline_date: z.coerce.date(),
+      question_count: z.number().int().min(0).max(200).optional().default(0),
       resource_url: z.string().trim().optional().default(""),
       resource_size: z.string().trim().optional().default(""),
     })
@@ -257,7 +258,45 @@ async function createAssignment(req, res) {
     resource_url: body.resource_url || "",
     resource_size: body.resource_size || "",
   });
-  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+
+  if (body.question_count > 0) {
+    const placeholders = Array.from({ length: body.question_count }, (_, idx) => {
+      const n = idx + 1;
+      const title = `Question ${n}`;
+      return {
+        assignment_id: created._id,
+        name: slugifyQuestionName(`question-${n}`),
+        title,
+        description: "Add question description.",
+        difficulty: "easy",
+        xp: 10,
+        topics: [],
+        requirements: [],
+        input_format: "",
+        output_format: "",
+        constraints: [],
+        examples: [],
+        time_limit: "1s",
+        memory_limit: "128MB",
+        execution_mode: "full_program",
+        starter_code: {},
+        hidden_tests: [],
+        question_image_url: "",
+        quiz_options: [],
+      };
+    });
+    await AssignmentQuestion.insertMany(placeholders);
+  }
+
+  return sendSuccess(
+    res,
+    {
+      id: String(created._id),
+      ...created.toObject(),
+      question_count: body.question_count,
+    },
+    "Created"
+  );
 }
 
 async function updateAssignment(req, res) {
