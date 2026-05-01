@@ -36,6 +36,16 @@ router.post(
   communityMediaUpload,
   doubtsController.postCommunity
 );
+router.patch(
+  "/doubts/community/:id/hide",
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR, ROLES.MENTOR]),
+  doubtsController.hideCommunity
+);
+router.delete(
+  "/doubts/community/:id",
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR, ROLES.MENTOR]),
+  doubtsController.deleteCommunity
+);
 
 router.get(
   "/directory/instructors",

@@ -4,6 +4,8 @@ const crypto = require("crypto");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
+const AssignmentSubmission = require("../models/AssignmentSubmission");
+const ArenaSubmission = require("../models/ArenaSubmission");
 const ReferralEvent = require("../models/ReferralEvent");
 const referralRewards = require("../utils/referralRewards");
 const { notifyReferralAdmissionSuccess } = require("../services/referralNotifications.service");
@@ -211,6 +213,112 @@ async function listStudents(req, res) {
     Student.countDocuments(filter),
   ]);
 
+  const pageBatchKeys = Array.from(
+    new Set(
+      items
+        .map((s) => String(s.batch_id || s.batch || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  let totalXpByStudent = new Map();
+  let batchRankByStudent = new Map();
+  if (pageBatchKeys.length > 0) {
+    const batchOr = pageBatchKeys.map((key) => ({
+      $or: [{ batch_id: key }, { batch: key }],
+    }));
+    const peers = await Student.find({ role: "student", $or: batchOr })
+      .select("_id name batch batch_id")
+      .lean();
+    const peerIds = peers.map((p) => p._id);
+    const peerIdStrings = new Set(peers.map((p) => String(p._id)));
+
+    const [assignmentXpRows, arenaXpRows] = await Promise.all([
+      AssignmentSubmission.aggregate([
+        {
+          $match: {
+            student_id: { $in: peerIds },
+            status: "Accepted",
+          },
+        },
+        {
+          $lookup: {
+            from: "assignmentquestions",
+            localField: "question_id",
+            foreignField: "_id",
+            as: "q",
+          },
+        },
+        { $unwind: { path: "$q", preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: { student_id: "$student_id", question_id: "$question_id" },
+            best_xp_awarded: { $max: { $ifNull: ["$xp_awarded", 0] } },
+            full_xp: { $max: { $ifNull: ["$q.xp", 0] } },
+          },
+        },
+        {
+          $addFields: {
+            effective_xp: {
+              $cond: [{ $gt: ["$best_xp_awarded", 0] }, "$best_xp_awarded", "$full_xp"],
+            },
+          },
+        },
+        { $group: { _id: "$_id.student_id", xp: { $sum: "$effective_xp" } } },
+      ]),
+      ArenaSubmission.aggregate([
+        {
+          $match: {
+            student_id: { $in: peerIds },
+            status: "Accepted",
+          },
+        },
+        {
+          $lookup: {
+            from: "arenaquestions",
+            localField: "question_id",
+            foreignField: "_id",
+            as: "q",
+          },
+        },
+        { $unwind: "$q" },
+        { $group: { _id: "$student_id", xp: { $sum: { $ifNull: ["$q.xp", 0] } } } },
+      ]),
+    ]);
+
+    totalXpByStudent = new Map();
+    for (const row of assignmentXpRows) {
+      totalXpByStudent.set(String(row._id), Math.max(0, Number(row.xp || 0)));
+    }
+    for (const row of arenaXpRows) {
+      const id = String(row._id);
+      totalXpByStudent.set(id, Math.max(0, Number(totalXpByStudent.get(id) || 0)) + Math.max(0, Number(row.xp || 0)));
+    }
+
+    const peersByBatch = new Map();
+    for (const peer of peers) {
+      const key = String(peer.batch_id || peer.batch || "").trim();
+      if (!key) continue;
+      if (!peersByBatch.has(key)) peersByBatch.set(key, []);
+      peersByBatch.get(key).push(peer);
+    }
+
+    batchRankByStudent = new Map();
+    for (const [, group] of peersByBatch) {
+      const sorted = [...group]
+        .filter((p) => peerIdStrings.has(String(p._id)))
+        .sort((a, b) => {
+          const axp = Number(totalXpByStudent.get(String(a._id)) || 0);
+          const bxp = Number(totalXpByStudent.get(String(b._id)) || 0);
+          if (bxp !== axp) return bxp - axp;
+          return String(a.name || "").localeCompare(String(b.name || ""));
+        });
+      sorted.forEach((peer, idx) => {
+        batchRankByStudent.set(String(peer._id), idx + 1);
+      });
+    }
+  }
+
   const referrerIds = items.map((s) => s._id).filter(Boolean);
   let verifiedByReferrer = new Map();
   if (referrerIds.length) {
@@ -229,6 +337,8 @@ async function listStudents(req, res) {
       ...base,
       referrals_made_count: verified,
       referrals_total: verified + bonus,
+      total_xp: Math.max(0, Number(totalXpByStudent.get(String(s._id)) || 0)),
+      batch_rank: Number(batchRankByStudent.get(String(s._id)) || 0) || null,
     };
   });
   return sendSuccess(res, data, "", { page, limit, total });

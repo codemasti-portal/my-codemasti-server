@@ -3,6 +3,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Assignment = require("../models/Assignment");
 const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
+const AssignmentXpGrant = require("../models/AssignmentXpGrant");
 const Student = require("../models/Student");
 const BatchCatalog = require("../models/BatchCatalog");
 const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
@@ -658,16 +659,30 @@ async function submit(req, res) {
   });
   const attemptNo = Number(previousAttempts || 0) + 1;
   const xpFull = fullQuestionXp(question.xp);
-  let xp_awarded =
+  const xpCandidate =
     status === "Accepted" ? xpAwardedForAccepted(question.xp, submittedAt, assignment?.deadline_date) : 0;
+  let xp_awarded = 0;
   if (status === "Accepted") {
-    const alreadyAccepted = await AssignmentSubmission.exists({
-      assignment_id: req.params.assignmentId,
-      question_id: req.params.questionId,
-      student_id: req.user.sub,
-      status: "Accepted",
-    });
-    if (alreadyAccepted) xp_awarded = 0;
+    const upsertResult = await AssignmentXpGrant.updateOne(
+      {
+        assignment_id: req.params.assignmentId,
+        question_id: req.params.questionId,
+        student_id: req.user.sub,
+      },
+      {
+        $setOnInsert: {
+          xp_awarded: xpCandidate,
+          full_xp: xpFull,
+          submitted_before_deadline: submittedAtOrBeforeDeadline(submittedAt, assignment?.deadline_date),
+          submitted_at: submittedAt,
+          deadline_date: assignment?.deadline_date || null,
+          granted_at: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+    // Award XP only if this is the first successful grant for this student+question.
+    xp_awarded = Number(upsertResult?.upsertedCount || 0) > 0 ? xpCandidate : 0;
   }
   const submission = await AssignmentSubmission.create({
     assignment_id: req.params.assignmentId,
@@ -693,6 +708,17 @@ async function submit(req, res) {
     evaluator_raw: evaluatorRaw,
     submitted_at: submittedAt,
   });
+
+  if (status === "Accepted" && xp_awarded > 0) {
+    await AssignmentXpGrant.updateOne(
+      {
+        assignment_id: req.params.assignmentId,
+        question_id: req.params.questionId,
+        student_id: req.user.sub,
+      },
+      { $set: { source_submission_id: submission._id } }
+    );
+  }
 
   return sendSuccess(res, {
     submission_id: String(submission._id),
