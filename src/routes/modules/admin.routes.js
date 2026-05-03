@@ -13,19 +13,23 @@ const uploadMw = require("../../middlewares/upload.middleware");
 
 const router = express.Router();
 
+/** Admins (+ super_admin) only — destructive / catalog-owner actions */
 const manageContent = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
+/** Instructors see the same admin pages but read-only where routes use this only for GETs */
+const staffPanelRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageNotes = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageLiveClasses = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageAssignments = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const readTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
-const manageScorecard = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+const readScorecard = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const batchCatalogRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+const viewStudents = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const adminOnly = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
 
-router.get("/announcements", ...manageContent, content.listAnnouncements);
+router.get("/announcements", ...staffPanelRead, content.listAnnouncements);
 router.post("/announcements", ...manageContent, content.createAnnouncement);
-router.get("/announcements/:id", ...manageContent, content.getAnnouncement);
+router.get("/announcements/:id", ...staffPanelRead, content.getAnnouncement);
 router.patch("/announcements/:id", ...manageContent, content.updateAnnouncement);
 router.delete("/announcements/:id", ...manageContent, content.deleteAnnouncement);
 
@@ -79,9 +83,9 @@ router.get("/assignments/:id", ...manageAssignments, catalog.getAssignment);
 router.patch("/assignments/:id", ...manageAssignments, catalog.updateAssignment);
 router.delete("/assignments/:id", ...manageAssignments, catalog.deleteAssignment);
 
-router.get("/arena/questions", ...manageContent, catalog.listArenaQuestions);
+router.get("/arena/questions", ...staffPanelRead, catalog.listArenaQuestions);
 router.post("/arena/questions", ...manageContent, catalog.createArenaQuestion);
-router.get("/arena/questions/:id", ...manageContent, catalog.getArenaQuestion);
+router.get("/arena/questions/:id", ...staffPanelRead, catalog.getArenaQuestion);
 router.patch("/arena/questions/:id", ...manageContent, catalog.updateArenaQuestion);
 router.delete("/arena/questions/:id", ...manageContent, catalog.deleteArenaQuestion);
 
@@ -103,40 +107,40 @@ router.get("/timetable/events/:id", ...readTimetable, catalog.getTimetableEvent)
 router.patch("/timetable/events/:id", ...manageTimetable, catalog.updateTimetableEvent);
 router.delete("/timetable/events/:id", ...manageTimetable, catalog.deleteTimetableEvent);
 
-router.get("/mentor-slots", ...manageContent, catalog.listMentorSlotsAdmin);
+router.get("/mentor-slots", ...staffPanelRead, catalog.listMentorSlotsAdmin);
 router.post("/mentor-slots", ...manageContent, catalog.createMentorSlot);
-router.get("/mentor-slots/:id", ...manageContent, catalog.getMentorSlot);
+router.get("/mentor-slots/:id", ...staffPanelRead, catalog.getMentorSlot);
 router.patch("/mentor-slots/:id", ...manageContent, catalog.updateMentorSlot);
 router.delete("/mentor-slots/:id", ...manageContent, catalog.deleteMentorSlot);
 
 router.get("/batches", ...batchCatalogRead, batchCatalog.list);
 router.post("/batches", ...manageContent, batchCatalog.create);
-router.get("/batches/:batch_id/students", ...manageContent, batchCatalog.listStudentsInBatch);
-router.get("/batches/:batch_id", ...manageContent, batchCatalog.getOne);
+router.get("/batches/:batch_id/students", ...batchCatalogRead, batchCatalog.listStudentsInBatch);
+router.get("/batches/:batch_id", ...batchCatalogRead, batchCatalog.getOne);
 router.patch("/batches/:batch_id", ...manageContent, batchCatalog.update);
 router.delete("/batches/:batch_id", ...manageContent, batchCatalog.remove);
 
-router.get("/students", ...manageContent, controller.listStudents);
-router.post("/students", ...manageContent, controller.createStudent);
-router.get("/students/:id", ...manageContent, controller.getStudent);
-router.patch("/students/:id", ...manageContent, controller.updateStudent);
+router.get("/students", ...viewStudents, controller.listStudents);
+router.post("/students", ...adminOnly, controller.createStudent);
+router.get("/students/:id", ...viewStudents, controller.getStudent);
+router.patch("/students/:id", ...adminOnly, controller.updateStudent);
 router.post(
   "/students/:id/avatar",
-  ...manageContent,
+  ...adminOnly,
   uploadMw.adminStudentAvatarUpload,
   controller.uploadStudentAvatar
 );
-router.delete("/students/:id", ...manageContent, controller.deleteStudent);
+router.delete("/students/:id", ...adminOnly, controller.deleteStudent);
 
-router.get("/scorecard/config", ...manageScorecard, adminScorecard.getConfig);
-router.put("/scorecard/config", ...manageScorecard, adminScorecard.updateConfig);
-router.get("/scorecard/students/:studentId/months", ...manageScorecard, adminScorecard.listStudentMonths);
-router.get("/scorecard/students/:studentId/:monthKey", ...manageScorecard, adminScorecard.getStudentMonth);
-router.put("/scorecard/students/:studentId/:monthKey", ...manageScorecard, adminScorecard.upsertStudentMonth);
-router.delete("/scorecard/students/:studentId/:monthKey", ...manageScorecard, adminScorecard.deleteStudentMonth);
+router.get("/scorecard/config", ...readScorecard, adminScorecard.getConfig);
+router.put("/scorecard/config", ...adminOnly, adminScorecard.updateConfig);
+router.get("/scorecard/students/:studentId/months", ...readScorecard, adminScorecard.listStudentMonths);
+router.get("/scorecard/students/:studentId/:monthKey", ...readScorecard, adminScorecard.getStudentMonth);
+router.put("/scorecard/students/:studentId/:monthKey", ...adminOnly, adminScorecard.upsertStudentMonth);
+router.delete("/scorecard/students/:studentId/:monthKey", ...adminOnly, adminScorecard.deleteStudentMonth);
 
-router.get("/support/conversations", ...manageContent, adminSupport.listConversations);
-router.get("/support/conversations/:conversationId/messages", ...manageContent, adminSupport.getConversationMessages);
+router.get("/support/conversations", ...staffPanelRead, adminSupport.listConversations);
+router.get("/support/conversations/:conversationId/messages", ...staffPanelRead, adminSupport.getConversationMessages);
 router.patch("/support/messages/:messageId/status", ...manageContent, adminSupport.updateMessageStatus);
 
 router.get("/todos", ...adminOnly, adminTodo.listTasks);
@@ -145,4 +149,3 @@ router.patch("/todos/:id", ...adminOnly, adminTodo.updateTask);
 router.delete("/todos/:id", ...adminOnly, adminTodo.deleteTask);
 
 module.exports = router;
-

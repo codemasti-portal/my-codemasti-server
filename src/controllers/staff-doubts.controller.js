@@ -8,6 +8,7 @@ const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
   buildCommunityUploadFolder,
+  buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
 
 function mediaResourceType(mimetype) {
@@ -111,9 +112,22 @@ async function answerPersonal(req, res) {
   const body = schema.parse(req.body || {});
   const text = String(body.teacher_reply || "").trim();
   const code = String(body.teacher_reply_code || "").trim();
-  const imageUrl = req.file
-    ? `${req.protocol}://${req.get("host")}/v1/static/doubt-images/${req.file.filename}`
-    : "";
+  let imageUrl = "";
+  if (req.file?.buffer) {
+    if (!isCloudinaryConfigured()) {
+      return sendError(
+        res,
+        503,
+        "CLOUDINARY_NOT_CONFIGURED",
+        "Doubt reply image upload requires Cloudinary configuration"
+      );
+    }
+    const folder = buildDoubtsUploadFolder("image");
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder, {
+      filenameOverride: req.file.originalname || "",
+    });
+    imageUrl = result.secure_url || result.url || "";
+  }
   if (!text && !code && !imageUrl) {
     return sendError(res, 400, "VALIDATION_ERROR", "Provide reply text, code, or image");
   }

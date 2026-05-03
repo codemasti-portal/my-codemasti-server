@@ -179,6 +179,10 @@ async function listStudents(req, res) {
   });
 
   const query = schema.parse(req.query);
+
+  const pageNum = query.page || 1;
+  const limitNum = query.limit || 50;
+
   const filter = { role: "student" };
   const andParts = [];
   if (query.batch_id) {
@@ -197,14 +201,14 @@ async function listStudents(req, res) {
     filter.$and = andParts;
   }
 
-  const page = query.page || 1;
-  const limit = query.limit || 50;
+  const page = pageNum;
+  const limit = limitNum;
   const skip = (page - 1) * limit;
 
   const [items, total] = await Promise.all([
     Student.find(filter)
       .select(
-        "name email batch batch_id course progress enrollment_date enrollment_number enrollment_batch_prefix enrollment_batch_name enrollment_year enrollment_section section_id enrollment_roll_no parent_name phone_number student_phone whatsapp_number school_name cst_registration_id batch_allowance school_class avatar_url referral_code referred_by registration_fee_discount_percent referral_bonus_count referral_benefits_queue"
+        "name email batch batch_id course progress enrollment_date enrollment_number enrollment_batch_prefix enrollment_batch_name enrollment_year enrollment_section section_id enrollment_roll_no parent_name phone_number student_phone whatsapp_number school_name cst_registration_id batch_allowance school_class avatar_url referral_code referred_by registration_fee_discount_percent referral_bonus_count referral_benefits_queue last_login_at last_login_ip last_login_user_agent"
       )
       .sort({ name: 1 })
       .skip(skip)
@@ -407,6 +411,9 @@ function studentResponse(doc) {
     registration_fee_discount_percent: d.registration_fee_discount_percent ?? 0,
     referral_bonus_count: d.referral_bonus_count ?? 0,
     referral_benefits_queue: serializeReferralQueue(d.referral_benefits_queue),
+    last_login_at: d.last_login_at || null,
+    last_login_ip: d.last_login_ip || "",
+    last_login_user_agent: d.last_login_user_agent || "",
   };
 }
 

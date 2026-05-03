@@ -7,6 +7,7 @@ const OtpRequest = require("../models/OtpRequest");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { sendOtpEmail } = require("../services/brevo");
+const { buildLoginMeta } = require("../utils/requestMeta");
 
 const sendOtpSchema = z.object({
   email: z.string().email(),
@@ -193,6 +194,7 @@ async function verifyOtp(req, res) {
   const access_token = signAccessToken({ sub: student.id, role: student.role, email: student.email });
   const refresh_token = signRefreshToken({ sub: student.id, type: "refresh" });
   await OtpRequest.updateOne({ _id: record._id }, { $set: { used_at: new Date() } });
+  await Student.updateOne({ _id: student.id }, { $set: buildLoginMeta(req) });
 
   return sendSuccess(res, {
     access_token,
@@ -225,6 +227,7 @@ async function loginWithPassword(req, res) {
   const student = buildStudentPayload(studentDoc.toObject ? studentDoc.toObject() : studentDoc);
   const access_token = signAccessToken({ sub: student.id, role: student.role, email: student.email });
   const refresh_token = signRefreshToken({ sub: student.id, type: "refresh" });
+  await Student.updateOne({ _id: student.id }, { $set: buildLoginMeta(req) });
 
   return sendSuccess(res, {
     access_token,
@@ -434,6 +437,7 @@ async function googleLogin(req, res) {
 
   const access_token = signAccessToken({ sub: student.id, role: student.role, email: student.email });
   const refresh_token = signRefreshToken({ sub: student.id, type: "refresh" });
+  await Student.updateOne({ _id: student.id }, { $set: buildLoginMeta(req) });
 
   return sendSuccess(res, {
     access_token,
