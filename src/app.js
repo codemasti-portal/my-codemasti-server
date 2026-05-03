@@ -35,7 +35,13 @@ app.use(
     credentials: true,
   })
 );
-app.use(helmet());
+app.use(
+  helmet({
+    // Allow the admin/student frontends (different origins/ports in dev)
+    // to render images/PDFs served from `/v1/static/...`.
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 app.use(morgan("dev"));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -78,7 +84,6 @@ app.use(async (req, res, next) => {
 
 const uploadsRoot = getUploadsRoot();
 fs.mkdirSync(path.join(uploadsRoot, "avatars"), { recursive: true });
-fs.mkdirSync(path.join(uploadsRoot, "doubt-images"), { recursive: true });
 fs.mkdirSync(path.join(uploadsRoot, "staff-profile-images"), { recursive: true });
 fs.mkdirSync(path.join(uploadsRoot, "staff-resumes"), { recursive: true });
 app.use("/v1/static", express.static(uploadsRoot));

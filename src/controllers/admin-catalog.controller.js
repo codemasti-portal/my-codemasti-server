@@ -14,6 +14,15 @@ const Student = require("../models/Student");
 const Staff = require("../models/Staff");
 const Notification = require("../models/Notification");
 const { sendSimpleEmail } = require("../services/brevo");
+const {
+  notifyStudentsForSlot,
+  buildResourceUploadedEmail,
+  fmtWhenLocal,
+} = require("../services/student-notifications.service");
+const {
+  notifyInstructorsForSlot,
+  buildResourceUploadedEmail: buildInstructorResourceEmail,
+} = require("../services/instructor-notifications.service");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 
 const starterCodeSchema = z
@@ -664,17 +673,17 @@ async function getTimetableSlot(req, res) {
 }
 
 async function createTimetableSlot(req, res) {
-  const dayEnum = z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]);
   const schema = z.object({
     batch_id: z.string().min(1).trim(),
     section_id: z.string().trim().optional().default(""),
-    class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    day: dayEnum.optional(),
-    days: z.array(dayEnum).optional(),
+    class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     time: z.string().min(1).trim(),
     subject: z.string().min(1).trim(),
+    topic: z.string().optional().default(""),
     teacher: z.string().min(1).trim(),
     meet_link: z.string().url().min(1).trim(),
+    recording_link: z.string().optional().default(""),
+    notes_link: z.string().optional().default(""),
     is_taken: z.boolean().optional().default(false),
   });
   const body = schema.parse(req.body);
@@ -683,29 +692,54 @@ async function createTimetableSlot(req, res) {
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
     body.teacher = ownName;
   }
-  const derivedDay = body.class_date ? weekdayFromDateString(body.class_date) : "";
-  const targetDays = body.class_date
-    ? [derivedDay]
-    : [...new Set((body.days && body.days.length ? body.days : [body.day]).filter(Boolean))];
-  if (!targetDays.length || (body.class_date && !derivedDay)) {
-    return sendError(res, 400, "VALIDATION_ERROR", "Provide valid day/days or class_date");
-  }
+  const derivedDay = weekdayFromDateString(body.class_date);
+  if (!derivedDay) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
 
-  const docs = targetDays.map((day) => ({
+  const docs = [
+    {
     batch_id: body.batch_id.toLowerCase().trim(),
     section_id: (body.section_id || "").toLowerCase().trim(),
-    day,
-    class_date: body.class_date ? body.class_date.trim() : "",
+    day: derivedDay,
+    class_date: body.class_date.trim(),
     time: body.time.trim(),
     subject: body.subject.trim(),
+    topic: String(body.topic || "").trim(),
     teacher: body.teacher.trim(),
     meet_link: body.meet_link.trim(),
+    recording_link: String(body.recording_link || "").trim(),
+    notes_link: String(body.notes_link || "").trim(),
     is_taken: Boolean(body.is_taken),
-  }));
+    },
+  ];
 
   const created = await TimetableSlot.insertMany(docs, { ordered: false });
   for (const row of created) {
     await fanoutTimetableSlotNotification(row.toObject(), "created");
+    const slot = row.toObject();
+    if (String(slot.recording_link || "").trim()) {
+      const whenText = fmtWhenLocal(slot.class_date, slot.time);
+      await notifyStudentsForSlot({
+        slot,
+        type: "recording_uploaded",
+        title: "Recording uploaded",
+        body: `Recording is available for ${slot.subject} (${whenText}).`,
+        deep_link: "/lectures",
+        dedupePrefix: "recordingUploaded",
+        email: null, // keep creation quiet; usually added after class ends
+      });
+    }
+    if (String(slot.notes_link || "").trim()) {
+      const whenText = fmtWhenLocal(slot.class_date, slot.time);
+      await notifyStudentsForSlot({
+        slot,
+        type: "notes_uploaded",
+        title: "Notes uploaded",
+        body: `Notes are available for ${slot.subject} (${whenText}).`,
+        deep_link: "/lectures",
+        dedupePrefix: "notesUploaded",
+        email: null,
+      });
+    }
   }
   const data = created.map((r) => ({ id: String(r._id), ...r.toObject() }));
   return sendSuccess(res, data, data.length === 1 ? "Created" : `Created ${data.length} slots`);
@@ -716,16 +750,22 @@ async function updateTimetableSlot(req, res) {
     batch_id: z.string().min(1).trim().optional(),
     section_id: z.string().trim().optional(),
     class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    day: z.enum(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]).optional(),
     time: z.string().optional(),
     subject: z.string().optional(),
+    topic: z.string().optional(),
     teacher: z.string().optional(),
     meet_link: z.string().url().optional(),
+    recording_link: z.string().optional(),
+    notes_link: z.string().optional(),
     is_taken: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
   const doc = await TimetableSlot.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
+  const prevClassDate = String(doc.class_date || "").trim();
+  const prevTime = String(doc.time || "").trim();
+  const prevRecording = String(doc.recording_link || "").trim();
+  const prevNotes = String(doc.notes_link || "").trim();
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
@@ -745,11 +785,72 @@ async function updateTimetableSlot(req, res) {
   Object.assign(doc, rest);
   if (body.time !== undefined) doc.time = body.time.trim();
   if (body.subject !== undefined) doc.subject = body.subject.trim();
+  if (body.topic !== undefined) doc.topic = String(body.topic || "").trim();
   if (body.teacher !== undefined) doc.teacher = body.teacher.trim();
   if (body.meet_link !== undefined) doc.meet_link = body.meet_link.trim();
+  if (body.recording_link !== undefined) doc.recording_link = String(body.recording_link || "").trim();
+  if (body.notes_link !== undefined) doc.notes_link = String(body.notes_link || "").trim();
   if (body.is_taken !== undefined) doc.is_taken = Boolean(body.is_taken);
+
+  // If the scheduled time changes, allow reminders to fire again for the new start time.
+  const nextClassDate = String(doc.class_date || "").trim();
+  const nextTime = String(doc.time || "").trim();
+  if (prevClassDate !== nextClassDate || prevTime !== nextTime) {
+    doc.student_reminder_10m_sent_at = null;
+    doc.instructor_reminder_10m_sent_at = null;
+    doc.meet_link_missing_10m_alert_sent_at = null;
+  }
+
   await doc.save();
   await fanoutTimetableSlotNotification(doc.toObject(), "updated");
+
+  // Student reminders: fire only when link becomes available for the first time.
+  const nextRecording = String(doc.recording_link || "").trim();
+  const nextNotes = String(doc.notes_link || "").trim();
+  const slot = doc.toObject();
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+
+  if (!prevRecording && nextRecording) {
+    await notifyStudentsForSlot({
+      slot,
+      type: "recording_uploaded",
+      title: "Recording uploaded",
+      body: `Recording is available for ${slot.subject} (${whenText}).`,
+      deep_link: "/lectures",
+      dedupePrefix: "recordingUploaded",
+      email: ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "recording" }),
+    });
+
+    await notifyInstructorsForSlot({
+      slot,
+      event_type: "timetable_recording_uploaded",
+      title: "Recording uploaded",
+      message: `Recording link added for ${slot.subject} (${whenText}).`,
+      emailBuilder: ({ staff }) =>
+        buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "recording" }),
+    });
+  }
+  if (!prevNotes && nextNotes) {
+    await notifyStudentsForSlot({
+      slot,
+      type: "notes_uploaded",
+      title: "Notes uploaded",
+      body: `Notes are available for ${slot.subject} (${whenText}).`,
+      deep_link: "/lectures",
+      dedupePrefix: "notesUploaded",
+      email: ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "notes" }),
+    });
+
+    await notifyInstructorsForSlot({
+      slot,
+      event_type: "timetable_notes_uploaded",
+      title: "Notes uploaded",
+      message: `Notes link added for ${slot.subject} (${whenText}).`,
+      emailBuilder: ({ staff }) =>
+        buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "notes" }),
+    });
+  }
+
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
 }
 

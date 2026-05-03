@@ -8,6 +8,7 @@ const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
   buildCommunityUploadFolder,
+  buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
 
 function mediaResourceType(mimetype) {
@@ -38,8 +39,20 @@ async function createPersonal(req, res) {
   });
 
   let image_url = "";
-  if (req.file) {
-    image_url = `${req.protocol}://${req.get("host")}/v1/static/doubt-images/${req.file.filename}`;
+  if (req.file?.buffer) {
+    if (!isCloudinaryConfigured()) {
+      return sendError(
+        res,
+        503,
+        "CLOUDINARY_NOT_CONFIGURED",
+        "Doubt image upload requires Cloudinary configuration"
+      );
+    }
+    const folder = buildDoubtsUploadFolder("image");
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder, {
+      filenameOverride: req.file.originalname || "",
+    });
+    image_url = result.secure_url || result.url || "";
   }
 
   const doc = await PersonalDoubt.create({

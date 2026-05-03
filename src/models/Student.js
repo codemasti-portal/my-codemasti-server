@@ -41,6 +41,9 @@ const studentSchema = new mongoose.Schema(
     password_hash: { type: String, default: "" },
     /** True only after student completes user-facing password setup/reset/update. */
     password_set_by_user: { type: Boolean, default: false },
+    last_login_at: { type: Date, default: null },
+    last_login_ip: { type: String, default: "", trim: true },
+    last_login_user_agent: { type: String, default: "", trim: true },
     referral_code: { type: String, trim: true, sparse: true, index: true },
     /** Added to verified referral count for display / student portal (offline or corrected referrals). */
     referral_bonus_count: { type: Number, default: 0, min: 0, max: 500 },

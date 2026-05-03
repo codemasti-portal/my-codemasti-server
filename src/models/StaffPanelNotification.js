@@ -15,6 +15,8 @@ const staffPanelNotificationSchema = new mongoose.Schema(
     recipient_id: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null, index: true },
     source: { type: String, enum: SOURCES, default: "manual", index: true },
     event_type: { type: String, default: "", trim: true, maxlength: 80 },
+    /** Optional key to prevent duplicate event notifications. */
+    dedupe_key: { type: String, default: "", trim: true, maxlength: 160 },
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },
   },
   { timestamps: true, versionKey: false }
@@ -22,6 +24,11 @@ const staffPanelNotificationSchema = new mongoose.Schema(
 
 staffPanelNotificationSchema.index({ createdAt: -1 });
 staffPanelNotificationSchema.index({ audience: 1, createdAt: -1 });
+// Prevent duplicates when dedupe_key is set.
+staffPanelNotificationSchema.index(
+  { dedupe_key: 1 },
+  { unique: true, sparse: true, partialFilterExpression: { dedupe_key: { $type: "string", $ne: "" } } }
+);
 
 module.exports = mongoose.model("StaffPanelNotification", staffPanelNotificationSchema);
 module.exports.AUDIENCES = AUDIENCES;

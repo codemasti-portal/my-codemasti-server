@@ -7,6 +7,7 @@ const StaffOtpRequest = require("../models/StaffOtpRequest");
 const Staff = require("../models/Staff");
 const { sendOtpEmail } = require("../services/brevo");
 const { permissionsForRole } = require("../utils/rbac");
+const { buildLoginMeta } = require("../utils/requestMeta");
 
 const sendOtpSchema = z.object({
   email: z.string().email(),
@@ -169,6 +170,7 @@ async function verifyOtp(req, res) {
   });
   const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true });
   await StaffOtpRequest.updateOne({ _id: record._id }, { $set: { used_at: new Date() } });
+  await Staff.updateOne({ _id: sub }, { $set: buildLoginMeta(req) });
 
   return sendSuccess(res, {
     access_token,
@@ -203,6 +205,7 @@ async function loginWithPassword(req, res) {
   const sub = String(staffDoc._id);
   const access_token = signAccessToken({ sub, role: staffDoc.role, email: staffDoc.email, staff: true });
   const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true });
+  await Staff.updateOne({ _id: sub }, { $set: buildLoginMeta(req) });
   return sendSuccess(res, {
     access_token,
     refresh_token,

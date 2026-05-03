@@ -6,7 +6,13 @@ const Student = require("../models/Student");
 
 function parseClassDateTime(date, hhmm) {
   const [hour, minute] = hhmm.split(":").map((v) => Number(v));
-  return new Date(`${date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00.000Z`);
+  // Interpret stored date + time in *local* time (not UTC).
+  // Adding 'Z' forces UTC and shifts the computed "Live Now" window for IST users.
+  const isoLocal = `${date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00.000`;
+  const d = new Date(isoLocal);
+  if (!Number.isNaN(d.getTime())) return d;
+  // Fallback for non-ISO parsing environments.
+  return new Date(`${date} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
 }
 
 function deriveStatus(now, startAt, endAt) {
@@ -150,6 +156,83 @@ async function live(req, res) {
   return sendSuccess(res, data);
 }
 
+async function recordings(req, res) {
+  const schema = z.object({
+    q: z.string().optional(),
+    subject: z.string().optional(),
+    instructor: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    page: z.coerce.number().optional().default(1),
+    limit: z.coerce.number().optional().default(20),
+  });
+  const query = schema.parse(req.query);
+
+  const student = await Student.findById(req.user.sub).lean();
+  if (!student) {
+    return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  }
+
+  const vis = studentClassVisibilityFilter(student);
+  const filter = {
+    ...vis,
+    recording_link: { $exists: true, $ne: "" },
+  };
+
+  if (query.from || query.to) {
+    filter.date = {};
+    if (query.from) filter.date.$gte = query.from;
+    if (query.to) filter.date.$lte = query.to;
+  }
+
+  if (query.subject?.trim()) {
+    filter.subject = { $regex: query.subject.trim(), $options: "i" };
+  }
+  if (query.instructor?.trim()) {
+    filter.instructor = { $regex: query.instructor.trim(), $options: "i" };
+  }
+
+  if (query.q?.trim()) {
+    const q = query.q.trim();
+    filter.$and = [
+      ...(filter.$and || []),
+      {
+        $or: [
+          { subject: { $regex: q, $options: "i" } },
+          { topic: { $regex: q, $options: "i" } },
+          { instructor: { $regex: q, $options: "i" } },
+        ],
+      },
+    ];
+  }
+
+  const page = Math.max(1, Number(query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
+  const skip = (page - 1) * limit;
+
+  const [rows, total] = await Promise.all([
+    LiveClass.find(filter)
+      .sort({ date: -1, start_time: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    LiveClass.countDocuments(filter),
+  ]);
+
+  const data = rows.map((row) => ({
+    id: String(row._id),
+    subject: row.subject,
+    topic: row.topic,
+    instructor: row.instructor,
+    date: row.date,
+    start_time: row.start_time,
+    end_time: row.end_time,
+    recording_link: row.recording_link,
+  }));
+
+  return sendSuccess(res, data, "", { page, limit, total });
+}
+
 async function join(req, res) {
   const classDoc = await LiveClass.findById(req.params.classId).lean();
   if (!classDoc) {
@@ -232,4 +315,4 @@ async function joins(req, res) {
   return sendSuccess(res, data, "", { page, limit, total });
 }
 
-module.exports = { live, join, joins };
+module.exports = { live, recordings, join, joins };

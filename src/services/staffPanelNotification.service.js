@@ -35,6 +35,7 @@ async function createNotification(payload) {
     recipient_id: payload.recipient_id ? toObjectId(payload.recipient_id) : null,
     source: payload.source || "manual",
     event_type: payload.event_type || "",
+    dedupe_key: String(payload.dedupe_key || "").trim(),
     created_by: payload.created_by ? toObjectId(payload.created_by) : null,
   });
   return doc;
@@ -54,9 +55,11 @@ async function emitEventNotification(payload) {
       recipient_id: payload.recipient_id,
       source: "event",
       event_type: payload.event_type || "",
+      dedupe_key: payload.dedupe_key || "",
       created_by: payload.created_by || null,
     });
   } catch (e) {
+    if (e && (e.code === 11000 || String(e.message || "").includes("E11000"))) return;
     console.warn("[StaffPanelNotification]", e.message || e);
   }
 }

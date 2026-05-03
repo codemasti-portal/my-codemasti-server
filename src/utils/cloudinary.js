@@ -86,6 +86,15 @@ function buildCommunityUploadFolder(resourceType) {
   return `${root}/${kind}/${y}/${m}`;
 }
 
+/**
+ * Doubts (personal) images:
+ * {root}/images/YYYY/MM
+ * CLOUDINARY_DOUBTS_FOLDER (default codemasti/doubts), CLOUDINARY_DOUBTS_USE_DATE
+ */
+function buildDoubtsUploadFolder(resourceType) {
+  return buildDatedSubfolder("codemasti/doubts", "CLOUDINARY_DOUBTS_FOLDER", "CLOUDINARY_DOUBTS_USE_DATE", resourceType);
+}
+
 function sanitizeStudentIdForFolder(id) {
   const s = String(id ?? "").replace(/[^a-f0-9]/gi, "");
   return s || "unknown";
@@ -99,6 +108,22 @@ function sanitizeStudentIdForFolder(id) {
 function buildStudentAvatarFolder(studentId) {
   const root = (process.env.CLOUDINARY_STUDENTS_ROOT || "codemasti/students").replace(/^\/+|\/+$/g, "");
   const seg = sanitizeStudentIdForFolder(studentId);
+  return `${root}/profiles/${seg}`;
+}
+
+function sanitizeStaffIdForFolder(id) {
+  const s = String(id ?? "").replace(/[^a-f0-9]/gi, "");
+  return s || "unknown";
+}
+
+/**
+ * One Cloudinary folder per staff member (profile photos + resumes).
+ * Root: CLOUDINARY_STAFF_ROOT (default codemasti/staff)
+ * Path: {root}/profiles/{mongoObjectId}
+ */
+function buildStaffProfileFolder(staffId) {
+  const root = (process.env.CLOUDINARY_STAFF_ROOT || "codemasti/staff").replace(/^\/+|\/+$/g, "");
+  const seg = sanitizeStaffIdForFolder(staffId);
   return `${root}/profiles/${seg}`;
 }
 
@@ -168,5 +193,7 @@ module.exports = {
   buildAssignmentUploadFolder,
   buildAssignmentQuestionUploadFolder,
   buildCommunityUploadFolder,
+  buildDoubtsUploadFolder,
   buildStudentAvatarFolder,
+  buildStaffProfileFolder,
 };

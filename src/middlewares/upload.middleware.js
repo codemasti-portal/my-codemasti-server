@@ -5,13 +5,11 @@ const { getUploadsRoot } = require("../utils/upload-paths");
 
 const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
-const doubtImagesDir = path.join(uploadsRoot, "doubt-images");
 const staffImagesDir = path.join(uploadsRoot, "staff-profile-images");
 const staffResumesDir = path.join(uploadsRoot, "staff-resumes");
 
 function ensureDirs() {
   fs.mkdirSync(avatarsDir, { recursive: true });
-  fs.mkdirSync(doubtImagesDir, { recursive: true });
   fs.mkdirSync(staffImagesDir, { recursive: true });
   fs.mkdirSync(staffResumesDir, { recursive: true });
 }
@@ -50,16 +48,8 @@ exports.adminStudentAvatarUpload = studentAvatarMemory.single("file");
 /** Student app POST /me/avatar — same as admin (memory + Cloudinary or disk). Field name: file */
 exports.studentSelfAvatarUpload = studentAvatarMemory.single("file");
 
-const doubtStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, doubtImagesDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "") || ".jpg";
-    cb(null, `${req.user.sub}-${Date.now()}${ext}`);
-  },
-});
-
 exports.doubtImageUpload = multer({
-  storage: doubtStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 3 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
@@ -67,16 +57,8 @@ exports.doubtImageUpload = multer({
   },
 }).single("image");
 
-const staffImageStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, staffImagesDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "") || ".jpg";
-    cb(null, `staff-${req.user.sub}-${Date.now()}${ext}`);
-  },
-});
-
 exports.staffProfileImageUpload = multer({
-  storage: staffImageStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
@@ -84,16 +66,8 @@ exports.staffProfileImageUpload = multer({
   },
 }).single("file");
 
-const staffResumeStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, staffResumesDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "") || ".pdf";
-    cb(null, `resume-${req.user.sub}-${Date.now()}${ext}`);
-  },
-});
-
 exports.staffResumeUpload = multer({
-  storage: staffResumeStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const isPdfMime = file.mimetype === "application/pdf";
