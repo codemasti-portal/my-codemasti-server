@@ -2,6 +2,7 @@ const express = require("express");
 const { requireAuth } = require("../../middlewares/auth.middleware");
 const { studentSelfAvatarUpload } = require("../../middlewares/upload.middleware");
 const controller = require("../../controllers/student.controller");
+const scorecard = require("../../controllers/student-scorecard.controller");
 
 const router = express.Router();
 
@@ -12,5 +13,8 @@ router.post("/me/password/otp/verify", requireAuth, controller.verifyPasswordUpd
 router.post("/me/password/otp/update", requireAuth, controller.updatePasswordWithOtp);
 router.get("/me", requireAuth, controller.getMe);
 router.patch("/me", requireAuth, controller.patchMe);
+
+router.get("/scorecard/tests", requireAuth, scorecard.listActiveScorecardTests);
+router.get("/scorecard/records", requireAuth, scorecard.listMyScorecardRecords);
 
 module.exports = router;

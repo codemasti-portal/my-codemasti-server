@@ -6,6 +6,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaSubmission = require("../models/ArenaSubmission");
+const ArenaQuestion = require("../models/ArenaQuestion");
 const ReferralEvent = require("../models/ReferralEvent");
 const referralRewards = require("../utils/referralRewards");
 const { notifyReferralAdmissionSuccess } = require("../services/referralNotifications.service");
@@ -25,6 +26,125 @@ const { getUploadsRoot } = require("../utils/upload-paths");
 
 const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
+
+/** Arena catalog visible to a student's batch (aligned with student arena list). */
+function arenaStudentCatalogFilter(batchKey) {
+  const batchId = String(batchKey || "").trim().toLowerCase();
+  if (!batchId) return null;
+  return {
+    $and: [
+      {
+        $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
+      },
+      { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
+    ],
+  };
+}
+
+async function arenaProgressForStudentId(studentId, batchKey) {
+  const filter = arenaStudentCatalogFilter(batchKey);
+  if (!filter) {
+    return { arena_questions_total: 0, arena_solved_count: 0 };
+  }
+  const qs = await ArenaQuestion.find(filter).select("_id").lean();
+  const qIds = qs.map((q) => q._id);
+  const total = qIds.length;
+  if (!total) {
+    return { arena_questions_total: 0, arena_solved_count: 0 };
+  }
+  const solvedDistinct = await ArenaSubmission.distinct("question_id", {
+    student_id: studentId,
+    status: "Accepted",
+    question_id: { $in: qIds },
+  });
+  return {
+    arena_questions_total: total,
+    arena_solved_count: solvedDistinct.length,
+  };
+}
+
+async function arenaQuestionsForAdminBatchKeys(batchKeys) {
+  const keys = [...new Set(batchKeys.map((k) => String(k || "").trim().toLowerCase()).filter(Boolean))];
+  if (!keys.length) return [];
+  return ArenaQuestion.find({
+    $and: [
+      {
+        $or: [{ batch_id: { $in: keys } }, { batch_ids: { $in: keys } }],
+      },
+      { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
+    ],
+  })
+    .select("_id batch_id batch_ids is_disabled")
+    .lean();
+}
+
+function arenaQuestionIdsForStudentBatch(batchKey, questions) {
+  const b = String(batchKey || "").trim().toLowerCase();
+  if (!b) return [];
+  return questions
+    .filter((q) => {
+      if (q.is_disabled === true) return false;
+      const bid = String(q.batch_id || "").trim().toLowerCase();
+      if (bid === b) return true;
+      const arr = Array.isArray(q.batch_ids) ? q.batch_ids : [];
+      return arr.some((x) => String(x || "").trim().toLowerCase() === b);
+    })
+    .map((q) => q._id);
+}
+
+/**
+ * Per-student arena solved counts (distinct accepted questions in their batch catalog).
+ */
+async function arenaProgressMapsForStudentRows(studentRows) {
+  const solvedMap = new Map();
+  const totalMap = new Map();
+
+  const byBatch = new Map();
+  for (const s of studentRows) {
+    const sid = String(s._id);
+    const bk = String(s.batch_id || s.batch || "").trim().toLowerCase();
+    if (!bk) {
+      solvedMap.set(sid, 0);
+      totalMap.set(sid, 0);
+      continue;
+    }
+    if (!byBatch.has(bk)) byBatch.set(bk, []);
+    byBatch.get(bk).push({ sid, oid: s._id });
+  }
+
+  const batchKeys = [...byBatch.keys()];
+  const allQs = await arenaQuestionsForAdminBatchKeys(batchKeys);
+
+  for (const [bk, pairs] of byBatch.entries()) {
+    const qIds = arenaQuestionIdsForStudentBatch(bk, allQs);
+    const total = qIds.length;
+    for (const { sid } of pairs) {
+      totalMap.set(sid, total);
+    }
+    if (!pairs.length || !qIds.length) {
+      for (const { sid } of pairs) solvedMap.set(sid, 0);
+      continue;
+    }
+    const studObjectIds = pairs.map((p) => p.oid);
+    const agg = await ArenaSubmission.aggregate([
+      {
+        $match: {
+          student_id: { $in: studObjectIds },
+          status: "Accepted",
+          question_id: { $in: qIds },
+        },
+      },
+      { $group: { _id: { sid: "$student_id", qid: "$question_id" } } },
+      { $group: { _id: "$_id.sid", n: { $sum: 1 } } },
+    ]);
+    const counts = new Map(agg.map((r) => [String(r._id), Number(r.n || 0)]));
+    for (const { sid } of pairs) {
+      solvedMap.set(sid, counts.get(sid) || 0);
+    }
+  }
+
+  return { solvedMap, totalMap };
+}
 
 async function createStudent(req, res) {
   const schema = z.object({
@@ -334,16 +454,27 @@ async function listStudents(req, res) {
     verifiedByReferrer = new Map(agg.map((row) => [String(row._id), row.c]));
   }
 
+  let arenaSolvedMap = new Map();
+  let arenaTotalMap = new Map();
+  if (items.length) {
+    const maps = await arenaProgressMapsForStudentRows(items);
+    arenaSolvedMap = maps.solvedMap;
+    arenaTotalMap = maps.totalMap;
+  }
+
   const data = items.map((s) => {
     const base = studentResponse(s);
     const verified = verifiedByReferrer.get(String(s._id)) || 0;
     const bonus = base.referral_bonus_count ?? 0;
+    const sid = String(s._id);
     return {
       ...base,
       referrals_made_count: verified,
       referrals_total: verified + bonus,
-      total_xp: Math.max(0, Number(totalXpByStudent.get(String(s._id)) || 0)),
-      batch_rank: Number(batchRankByStudent.get(String(s._id)) || 0) || null,
+      total_xp: Math.max(0, Number(totalXpByStudent.get(sid) || 0)),
+      batch_rank: Number(batchRankByStudent.get(sid) || 0) || null,
+      arena_solved_count: arenaSolvedMap.get(sid) ?? 0,
+      arena_questions_total: arenaTotalMap.get(sid) ?? 0,
     };
   });
   return sendSuccess(res, data, "", { page, limit, total });
@@ -426,10 +557,13 @@ async function getStudent(req, res) {
   const data = studentResponse(doc);
   const refCount = await Student.countDocuments({ referred_by: doc._id });
   const bonus = data.referral_bonus_count ?? 0;
+  const batchKey = String(doc.batch_id || doc.batch || "").trim().toLowerCase();
+  const arenaProgress = await arenaProgressForStudentId(doc._id, batchKey);
   return sendSuccess(res, {
     ...data,
     referrals_made_count: refCount,
     referrals_total: refCount + bonus,
+    ...arenaProgress,
   });
 }
 
@@ -639,6 +773,57 @@ async function deleteStudent(req, res) {
   return sendSuccess(res, { id: req.params.id }, "Student removed");
 }
 
+/** Map catalog program to enrollment letter (S / B / I). */
+const PROGRAM_BATCH_TO_PREFIX = {
+  spark: "S",
+  builders: "B",
+  innovators: "I",
+};
+
+/**
+ * Rewrites enrollment_number prefix so the student moves to Spark / Builders / Innovators
+ * while keeping year, section, and roll digits stable.
+ */
+async function reassignStudentProgramBatch(req, res) {
+  const schema = z.object({
+    batch_id: z.enum(["spark", "builders", "innovators"]),
+  });
+  let body;
+  try {
+    body = schema.parse(req.body || {});
+  } catch {
+    return sendError(res, 400, "VALIDATION_ERROR", "batch_id must be spark, builders, or innovators");
+  }
+
+  const doc = await Student.findOne({ _id: req.params.id, role: "student" });
+  if (!doc) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+
+  const cur = doc.enrollment_number;
+  if (!cur || !String(cur).trim()) {
+    return sendError(res, 400, "NO_ENROLLMENT", "Student has no enrollment number; set enrollment first.");
+  }
+
+  try {
+    parseEnrollmentNumber(cur);
+  } catch (e) {
+    return sendError(res, 400, "INVALID_ENROLLMENT", e.message || "Invalid enrollment number");
+  }
+
+  const wantPrefix = PROGRAM_BATCH_TO_PREFIX[body.batch_id];
+  const digits = String(cur).trim().toUpperCase().slice(1);
+  const next = `${wantPrefix}${digits}`;
+
+  const taken = await Student.findOne({ enrollment_number: next }).lean();
+  if (taken && String(taken._id) !== String(doc._id)) {
+    return sendError(res, 409, "ENROLLMENT_COLLISION", "That enrollment number is already in use");
+  }
+
+  doc.enrollment_number = next;
+  applyEnrollmentDerivedFieldsToStudentDocument(doc);
+  await doc.save();
+  return sendSuccess(res, studentResponse(doc.toObject()), "Program batch updated");
+}
+
 module.exports = {
   createStudent,
   listStudents,
@@ -646,5 +831,6 @@ module.exports = {
   updateStudent,
   uploadStudentAvatar,
   deleteStudent,
+  reassignStudentProgramBatch,
 };
 

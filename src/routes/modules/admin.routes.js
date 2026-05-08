@@ -124,6 +124,7 @@ router.get("/students", ...viewStudents, controller.listStudents);
 router.post("/students", ...adminOnly, controller.createStudent);
 router.get("/students/:id", ...viewStudents, controller.getStudent);
 router.patch("/students/:id", ...adminOnly, controller.updateStudent);
+router.patch("/students/:id/program-batch", ...adminOnly, controller.reassignStudentProgramBatch);
 router.post(
   "/students/:id/avatar",
   ...adminOnly,
@@ -132,12 +133,17 @@ router.post(
 );
 router.delete("/students/:id", ...adminOnly, controller.deleteStudent);
 
-router.get("/scorecard/config", ...readScorecard, adminScorecard.getConfig);
-router.put("/scorecard/config", ...adminOnly, adminScorecard.updateConfig);
-router.get("/scorecard/students/:studentId/months", ...readScorecard, adminScorecard.listStudentMonths);
-router.get("/scorecard/students/:studentId/:monthKey", ...readScorecard, adminScorecard.getStudentMonth);
-router.put("/scorecard/students/:studentId/:monthKey", ...adminOnly, adminScorecard.upsertStudentMonth);
-router.delete("/scorecard/students/:studentId/:monthKey", ...adminOnly, adminScorecard.deleteStudentMonth);
+router.get("/scorecard/entries", ...readScorecard, adminScorecard.listEntries);
+router.post("/scorecard/entries", ...adminOnly, adminScorecard.createEntry);
+router.post("/scorecard/entries/bulk", ...adminOnly, adminScorecard.bulkCreateEntries);
+router.patch("/scorecard/entries/:id", ...adminOnly, adminScorecard.patchEntry);
+router.delete("/scorecard/entries/:id", ...adminOnly, adminScorecard.deleteEntry);
+router.get("/scorecard/records", ...readScorecard, adminScorecard.listRecords);
+router.get("/scorecard/summary", ...readScorecard, adminScorecard.scorecardSummary);
+router.get("/scorecard/tests", ...readScorecard, adminScorecard.listTests);
+router.post("/scorecard/tests", ...adminOnly, adminScorecard.createTest);
+router.patch("/scorecard/tests/:id", ...adminOnly, adminScorecard.patchTest);
+router.delete("/scorecard/tests/:id", ...adminOnly, adminScorecard.deleteTest);
 
 router.get("/support/conversations", ...staffPanelRead, adminSupport.listConversations);
 router.get("/support/conversations/:conversationId/messages", ...staffPanelRead, adminSupport.getConversationMessages);

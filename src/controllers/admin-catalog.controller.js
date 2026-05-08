@@ -23,6 +23,7 @@ const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
 } = require("../services/instructor-notifications.service");
+const { studentsInCatalogBatchesFilter } = require("../utils/enrollment");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 
 const starterCodeSchema = z
@@ -81,9 +82,7 @@ async function fanoutTimetableSlotNotification(slot, action) {
   const body = `${slot.subject} on ${slot.day} (${slot.time}) by ${slot.teacher} was ${action}.`;
   const refId = `timetable-slot:${String(slot._id)}`;
 
-  const studentFilter = sectionId
-    ? { batch_id: batchId, section_id: sectionId }
-    : { batch_id: batchId };
+  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
   const students = await Student.find(studentFilter).select("_id").lean();
   if (!students.length) return;
 
@@ -95,6 +94,44 @@ async function fanoutTimetableSlotNotification(slot, action) {
     read_at: null,
     ref_id: refId,
   }));
+  await Notification.insertMany(docs, { ordered: false });
+}
+
+/**
+ * When an assignment is created for a catalog batch (and optional section),
+ * notify all matching students in-app.
+ */
+async function fanoutAssignmentCreatedNotification(assignment) {
+  const batchId = String(assignment?.batch_id || "").trim().toLowerCase();
+  if (!batchId) return;
+  const sectionId = String(assignment?.section_id || "").trim().toLowerCase();
+  const subject = String(assignment?.subject || "").trim();
+  const moduleLabel = String(assignment?.module || "").trim();
+  const explicitTitle = String(assignment?.title || "").trim();
+  const headline = explicitTitle || moduleLabel || subject || "New assignment";
+  const deadline = assignment?.deadline_date ? new Date(assignment.deadline_date) : null;
+  const deadlineText = deadline && !Number.isNaN(deadline.getTime()) ? deadline.toLocaleString() : "See portal";
+
+  const title = "New assignment";
+  const body = `${headline}${subject && headline !== subject ? ` · ${subject}` : ""}. Deadline: ${deadlineText}.`;
+  const refId = `assignment:${String(assignment._id)}`;
+  const deepLink = `/assignments/${String(assignment._id)}`;
+
+  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
+
+  const students = await Student.find(studentFilter).select("_id").lean();
+  if (!students.length) return;
+
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: refId,
+    deep_link: deepLink,
+  }));
+
   await Notification.insertMany(docs, { ordered: false });
 }
 
@@ -111,12 +148,11 @@ async function fanoutMentorSlotNotification(slot) {
 
   let students = [];
   if (targetStudentIds.length > 0) {
-    students = await Student.find({ _id: { $in: targetStudentIds } }).select("_id").lean();
+    students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
   } else if (targetBatchIds.length > 0) {
-    const filter = { batch_id: { $in: targetBatchIds } };
-    if (targetSectionIds.length > 0) {
-      filter.section_id = { $in: targetSectionIds };
-    }
+    const filter = studentsInCatalogBatchesFilter(targetBatchIds, {
+      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
+    });
     students = await Student.find(filter).select("_id").lean();
   }
 
@@ -265,7 +301,7 @@ async function createAssignment(req, res) {
     batchIds = [body.batch_id];
   }
   if (!batchIds.length) {
-    return sendError(res, "At least one batch must be selected.", 400);
+    return sendError(res, 400, "BATCH_REQUIRED", "At least one batch must be selected.");
   }
 
   // Create one assignment record per batch
@@ -274,6 +310,7 @@ async function createAssignment(req, res) {
     const created = await Assignment.create({
       batch_id: batchId.toLowerCase().trim(),
       section_id: body.section_id || "",
+      title: body.title || "",
       subject: body.subject,
       module: body.module,
       assignment_type: body.assignment_type,
@@ -310,6 +347,12 @@ async function createAssignment(req, res) {
         };
       });
       await AssignmentQuestion.insertMany(placeholders);
+    }
+
+    try {
+      await fanoutAssignmentCreatedNotification(created.toObject ? created.toObject() : created);
+    } catch (e) {
+      console.warn("[ASSIGNMENT_NOTIFY_FANOUT]", e?.message || e);
     }
 
     createdAssignments.push({

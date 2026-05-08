@@ -1,6 +1,7 @@
 const { sendSuccess } = require("../utils/response");
 const Announcement = require("../models/Announcement");
 const Student = require("../models/Student");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 
 function normSid(v) {
   return String(v ?? "")
@@ -9,18 +10,19 @@ function normSid(v) {
     .replace(/\s+/g, "-");
 }
 
-function programMatches(student, ann) {
+function programMatches(rawStudent, ann) {
   if (ann.scope !== "batch") return false;
-  const annBid = String(ann.batch_id || "").trim();
-  const stBid = String(student.batch_id || "").trim();
-  const annB = String(ann.batch || "").trim();
-  const stB = String(student.batch || "").trim();
+  const student = augmentStudentCatalogFieldsFromEnrollment(rawStudent || {});
+  const annBid = String(ann.batch_id || "").trim().toLowerCase();
+  const stBid = String(student.batch_id || "").trim().toLowerCase();
+  const annB = String(ann.batch || "").trim().toLowerCase();
+  const stB = String(student.batch || "").trim().toLowerCase();
   if (annBid) {
     if (stBid && annBid === stBid) return true;
     if (!stBid && stB && annB && stB === annB) return true;
     return false;
   }
-  return annB === stB;
+  return annB === stB && Boolean(annB);
 }
 
 function sectionAllows(student, ann) {
