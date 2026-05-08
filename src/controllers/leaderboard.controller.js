@@ -141,9 +141,9 @@ async function buildRows(timeFilter) {
   const arenaPipe = [
     { $match: { status: "Accepted", ...t } },
     {
-      // Deduplicate: keep only the first accepted submission per (student, question)
       $group: {
         _id: { student_id: "$student_id", question_id: "$question_id" },
+        credited: { $max: { $ifNull: ["$xp_credited", 0] } },
         first_submitted_at: { $min: "$submitted_at" },
       },
     },
@@ -157,10 +157,20 @@ async function buildRows(timeFilter) {
     },
     { $unwind: "$q" },
     {
-      // Sum XP once per question per student
+      $addFields: {
+        effective_xp: {
+          $cond: [
+            { $gt: ["$credited", 0] },
+            "$credited",
+            { $max: [{ $toInt: { $ifNull: ["$q.xp", 0] } }, 0] },
+          ],
+        },
+      },
+    },
+    {
       $group: {
         _id: "$_id.student_id",
-        xp: { $sum: { $max: [{ $toInt: { $ifNull: ["$q.xp", 0] } }, 0] } },
+        xp: { $sum: "$effective_xp" },
         last: { $max: "$first_submitted_at" },
       },
     },
