@@ -189,7 +189,8 @@ async function listStudents(req, res) {
     andParts.push(catalogBatchMongoMatch(String(query.batch_id).trim().toLowerCase()));
   }
   if (query.batch) {
-    andParts.push({ batch: query.batch });
+    const batchRx = new RegExp("^" + query.batch.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
+    andParts.push({ batch: batchRx });
   }
   if (query.q?.trim()) {
     const rx = new RegExp(query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
@@ -210,7 +211,7 @@ async function listStudents(req, res) {
       .select(
         "name email batch batch_id course progress enrollment_date enrollment_number enrollment_batch_prefix enrollment_batch_name enrollment_year enrollment_section section_id enrollment_roll_no parent_name phone_number student_phone whatsapp_number school_name cst_registration_id batch_allowance school_class avatar_url referral_code referred_by registration_fee_discount_percent referral_bonus_count referral_benefits_queue last_login_at last_login_ip last_login_user_agent"
       )
-      .sort({ name: 1 })
+      .sort({ enrollment_number: 1, name: 1 })
       .skip(skip)
       .limit(limit)
       .lean(),

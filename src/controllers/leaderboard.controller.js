@@ -141,15 +141,29 @@ async function buildRows(timeFilter) {
   const arenaPipe = [
     { $match: { status: "Accepted", ...t } },
     {
+      // Deduplicate: keep only the first accepted submission per (student, question)
+      $group: {
+        _id: { student_id: "$student_id", question_id: "$question_id" },
+        first_submitted_at: { $min: "$submitted_at" },
+      },
+    },
+    {
       $lookup: {
         from: "arenaquestions",
-        localField: "question_id",
+        localField: "_id.question_id",
         foreignField: "_id",
         as: "q",
       },
     },
     { $unwind: "$q" },
-    { $group: { _id: "$student_id", xp: { $sum: "$q.xp" }, last: { $max: "$submitted_at" } } },
+    {
+      // Sum XP once per question per student
+      $group: {
+        _id: "$_id.student_id",
+        xp: { $sum: { $max: [{ $toInt: { $ifNull: ["$q.xp", 0] } }, 0] } },
+        last: { $max: "$first_submitted_at" },
+      },
+    },
   ];
 
   const [assignRows, arenaRows] = await Promise.all([
