@@ -11,6 +11,8 @@ const arenaSubmissionSchema = new mongoose.Schema(
     execution_time_ms: { type: Number, default: 0 },
     memory_mb: { type: Number, default: 0 },
     submitted_at: { type: Date, default: Date.now },
+    /** XP actually credited to the student for this submission (0 if practice / wrong). */
+    xp_credited: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true, versionKey: false }
 );

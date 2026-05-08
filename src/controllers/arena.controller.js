@@ -4,6 +4,21 @@ const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const Student = require("../models/Student");
 
+/**
+ * Calendar YYYY-MM-DD in the client's timezone, matching browser Date.getTimezoneOffset().
+ * @param {Date|string|number} submittedAt
+ * @param {number} tzOffsetMinutes - value from `new Date().getTimezoneOffset()` (e.g. IST ≈ -330)
+ */
+function toLocalCalendarYmd(submittedAt, tzOffsetMinutes) {
+  const t = new Date(submittedAt).getTime();
+  const shifted = t - Number(tzOffsetMinutes) * 60 * 1000;
+  const d = new Date(shifted);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 async function list(req, res) {
   const topic = String(req.query.topic || "").trim();
   const search = String(req.query.search || "").trim();
@@ -48,20 +63,17 @@ async function list(req, res) {
 
   const questions = await ArenaQuestion.find(filter).sort({ number: 1 }).lean();
   const qIds = questions.map((q) => q._id);
-  const latestSubs = qIds.length
+  const allSubs = qIds.length
     ? await ArenaSubmission.find({ question_id: { $in: qIds }, student_id: req.user.sub })
-        .sort({ submitted_at: -1 })
+        .select("question_id status")
         .lean()
     : [];
-  const latestByQ = new Map();
-  for (const s of latestSubs) {
-    const k = String(s.question_id);
-    if (!latestByQ.has(k)) latestByQ.set(k, s);
-  }
+  const solvedSet = new Set(
+    allSubs.filter((s) => String(s.status || "").toLowerCase() === "accepted").map((s) => String(s.question_id))
+  );
 
   const items = questions.map((q) => {
-    const latest = latestByQ.get(String(q._id));
-    const st = latest?.status?.toLowerCase() === "accepted" ? "solved" : "unsolved";
+    const st = solvedSet.has(String(q._id)) ? "solved" : "unsolved";
     return {
       id: String(q._id),
       number: q.number,
@@ -190,21 +202,41 @@ async function submit(req, res) {
     execution_time_ms: isQuiz ? 0 : 90 + Math.floor(Math.random() * 80),
     memory_mb: isQuiz ? 0 : 24 + Math.floor(Math.random() * 10),
     submitted_at: new Date(),
+    xp_credited: 0,
   });
 
-  // Award XP only if accepted and first time solving
-  if (status === "Accepted") {
-    const previousAccepted = await ArenaSubmission.findOne({
-      question_id: question._id,
-      student_id: req.user.sub,
-      status: "Accepted",
-      _id: { $ne: submission._id },
-    });
+  let xpAwardReason = "wrong";
 
-    if (!previousAccepted) {
-      xpAwarded = question.xp || 20;
-      // Add XP to student profile
+  if (status === "Accepted") {
+    const totalXp = Math.max(0, Number(question.xp) || 20);
+    const halfXp = Math.floor(totalXp / 2);
+
+    const timeline = await ArenaSubmission.find({ question_id: question._id, student_id: req.user.sub })
+      .sort({ submitted_at: 1 })
+      .select("_id status")
+      .lean();
+
+    const idx = timeline.findIndex((s) => String(s._id) === String(submission._id));
+    const before = idx > 0 ? timeline.slice(0, idx) : [];
+    const priorAccepted = before.filter((s) => String(s.status || "").toLowerCase() === "accepted");
+
+    if (priorAccepted.length > 0) {
+      xpAwarded = 0;
+      xpAwardReason = "practice";
+    } else {
+      const hadWrongBefore = before.some((s) => String(s.status || "").toLowerCase() !== "accepted");
+      if (!hadWrongBefore && before.length === 0) {
+        xpAwarded = totalXp;
+        xpAwardReason = "full";
+      } else {
+        xpAwarded = halfXp;
+        xpAwardReason = "half";
+      }
+    }
+
+    if (xpAwarded > 0) {
       await Student.findByIdAndUpdate(req.user.sub, { $inc: { xp: xpAwarded } });
+      await ArenaSubmission.updateOne({ _id: submission._id }, { $set: { xp_credited: xpAwarded } });
     }
   }
 
@@ -217,6 +249,7 @@ async function submit(req, res) {
     submitted_at: submission.submitted_at,
     xpAwarded,
     xp_awarded: xpAwarded,
+    xp_award_reason: xpAwardReason,
   });
 }
 
@@ -239,30 +272,39 @@ async function submissions(req, res) {
     status: doc.status,
     test_cases_passed: doc.test_cases_passed,
     submitted_at: doc.submitted_at,
+    language: doc.language || "",
+    code: doc.code || "",
+    xp_credited: typeof doc.xp_credited === "number" ? doc.xp_credited : 0,
+    execution_time_ms: doc.execution_time_ms,
+    memory_mb: doc.memory_mb,
   }));
 
   return sendSuccess(res, items, "", { page, limit, total });
 }
 
 async function activity(req, res) {
-  // Return full calendar year worth of data (Jan 1 to Dec 31 of current year)
   const now = new Date();
   const year = Number(req.query.year || now.getFullYear());
-  const start = new Date(`${year}-01-01T00:00:00.000Z`);
-  const end = new Date(`${year}-12-31T23:59:59.999Z`);
+  const rawTz = req.query.tzOffset ?? req.query.tz_offset ?? "0";
+  const tzOffsetMinutes = Number.isFinite(Number(rawTz)) ? Number(rawTz) : 0;
+
+  // Widen UTC range so submissions near year boundaries still map to the requested local calendar year
+  const wideStart = new Date(`${year - 1}-12-01T00:00:00.000Z`);
+  const wideEnd = new Date(`${year + 1}-01-31T23:59:59.999Z`);
 
   const rows = await ArenaSubmission.find({
     student_id: req.user.sub,
-    submitted_at: { $gte: start, $lte: end },
+    submitted_at: { $gte: wideStart, $lte: wideEnd },
   })
     .select("submitted_at")
     .lean();
 
   const daily_counts = {};
+  const yPrefix = `${year}-`;
   for (const row of rows) {
-    // Use ISO date string sliced to YYYY-MM-DD for consistent date keys
-    const d = new Date(row.submitted_at).toISOString().slice(0, 10);
-    daily_counts[d] = (daily_counts[d] || 0) + 1;
+    const key = toLocalCalendarYmd(row.submitted_at, tzOffsetMinutes);
+    if (!key.startsWith(yPrefix)) continue;
+    daily_counts[key] = (daily_counts[key] || 0) + 1;
   }
 
   return sendSuccess(res, daily_counts);

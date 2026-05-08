@@ -399,15 +399,32 @@ async function listStudents(req, res) {
           },
         },
         {
+          $group: {
+            _id: { student_id: "$student_id", question_id: "$question_id" },
+            credited: { $max: { $ifNull: ["$xp_credited", 0] } },
+          },
+        },
+        {
           $lookup: {
             from: "arenaquestions",
-            localField: "question_id",
+            localField: "_id.question_id",
             foreignField: "_id",
             as: "q",
           },
         },
         { $unwind: "$q" },
-        { $group: { _id: "$student_id", xp: { $sum: { $ifNull: ["$q.xp", 0] } } } },
+        {
+          $addFields: {
+            effective_xp: {
+              $cond: [
+                { $gt: ["$credited", 0] },
+                "$credited",
+                { $max: [{ $toInt: { $ifNull: ["$q.xp", 0] } }, 0] },
+              ],
+            },
+          },
+        },
+        { $group: { _id: "$_id.student_id", xp: { $sum: "$effective_xp" } } },
       ]),
     ]);
 
