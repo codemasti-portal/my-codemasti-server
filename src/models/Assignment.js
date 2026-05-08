@@ -8,6 +8,8 @@ const assignmentSchema = new mongoose.Schema(
     batch_id: { type: String, default: "", trim: true, index: true },
     /** Empty means assignment is released to all sections in the selected batch. */
     section_id: { type: String, default: "", trim: true, index: true },
+    /** Assignment title (e.g. "Variables & Data Types") */
+    title: { type: String, default: "", trim: true },
     subject: { type: String, required: true, trim: true, index: true },
     module: { type: String, required: true, trim: true, index: true },
     assignment_type: {

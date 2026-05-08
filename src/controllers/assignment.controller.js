@@ -60,14 +60,19 @@ function lateXpAmount(fullXp) {
   return Math.floor(fullXp / 2);
 }
 
-/** Accepted only: full XP if submitted at or before assignment deadline, otherwise half (floor). */
+/** Accepted only: 
+ * - Full XP if submitted at or before assignment deadline (on-time)
+ * - 0.5x full XP if submitted after deadline (late penalty)
+ */
 function xpAwardedForAccepted(questionXp, submittedAt, deadlineDate) {
   const full = fullQuestionXp(questionXp);
   if (!deadlineDate) return full;
   const tSub = new Date(submittedAt).getTime();
   const tEnd = new Date(deadlineDate).getTime();
   if (Number.isNaN(tEnd)) return full;
+  // On-time: full XP
   if (tSub <= tEnd) return full;
+  // Late: half XP
   return lateXpAmount(full);
 }
 
@@ -662,7 +667,14 @@ async function submit(req, res) {
   const xpCandidate =
     status === "Accepted" ? xpAwardedForAccepted(question.xp, submittedAt, assignment?.deadline_date) : 0;
   let xp_awarded = 0;
-  if (status === "Accepted") {
+  
+  /** XP is awarded ONLY for the first attempt, regardless of status.
+   * - First attempt + Accepted + on-time: Full XP (as mentioned in question)
+   * - First attempt + Accepted + late: 0.5x full XP
+   * - Subsequent attempts: 0 XP (even if Accepted)
+   * - First attempt + not Accepted: 0 XP
+   */
+  if (attemptNo === 1 && status === "Accepted") {
     const upsertResult = await AssignmentXpGrant.updateOne(
       {
         assignment_id: req.params.assignmentId,
@@ -681,7 +693,7 @@ async function submit(req, res) {
       },
       { upsert: true }
     );
-    // Award XP only if this is the first successful grant for this student+question.
+    // Award XP only if this is the first attempt for this student+question.
     xp_awarded = Number(upsertResult?.upsertedCount || 0) > 0 ? xpCandidate : 0;
   }
   const submission = await AssignmentSubmission.create({
@@ -734,7 +746,7 @@ async function submit(req, res) {
     evaluator_model: submission.evaluator_model || "",
     submitted_at: submission.submitted_at,
     xp_awarded,
-    xp_on_time: xpFull,
+    xp_if_on_time: xpFull,
     xp_if_late: lateXpAmount(xpFull),
     submitted_before_deadline:
       status === "Accepted" ? submittedAtOrBeforeDeadline(submittedAt, assignment?.deadline_date) : false,

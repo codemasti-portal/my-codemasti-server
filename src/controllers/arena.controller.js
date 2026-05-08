@@ -2,6 +2,7 @@ const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
+const Student = require("../models/Student");
 
 async function list(req, res) {
   const topic = String(req.query.topic || "").trim();
@@ -9,15 +10,41 @@ async function list(req, res) {
   const difficulty = String(req.query.difficulty || "").trim().toLowerCase();
   const statusFilter = String(req.query.status || "").trim().toLowerCase();
 
-  const filter = {};
-  if (topic) filter.topic = topic;
-  if (difficulty) filter.difficulty = difficulty;
-  if (search) {
-    filter.$or = [
-      { title: { $regex: search, $options: "i" } },
-      { topic: { $regex: search, $options: "i" } },
-    ];
+  // Get student's batch
+  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+
+  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
+
+  // Build filter conditions as an array for $and
+  const filterConditions = [
+    {
+      $or: [
+        { batch_id: batchId }, // Old format: single batch_id
+        { batch_ids: { $in: [batchId] } }, // New format: array of batch_ids
+      ],
+    },
+    // Exclude disabled questions from student view
+    { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
+  ];
+
+  if (topic) {
+    filterConditions.push({ topic });
   }
+  if (difficulty) {
+    filterConditions.push({ difficulty });
+  }
+  if (search) {
+    filterConditions.push({
+      $or: [
+        { title: { $regex: search, $options: "i" } },
+        { topic: { $regex: search, $options: "i" } },
+      ],
+    });
+  }
+
+  // Combine all conditions with $and
+  const filter = filterConditions.length === 1 ? filterConditions[0] : { $and: filterConditions };
 
   const questions = await ArenaQuestion.find(filter).sort({ number: 1 }).lean();
   const qIds = questions.map((q) => q._id);
@@ -57,7 +84,21 @@ async function list(req, res) {
 }
 
 async function detail(req, res) {
-  const question = await ArenaQuestion.findById(req.params.questionId).lean();
+  // Get student's batch
+  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+
+  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
+
+  // Find question and check if it's assigned to this batch
+  const question = await ArenaQuestion.findOne({
+    _id: req.params.questionId,
+    $or: [
+      { batch_id: batchId },
+      { batch_ids: { $in: [batchId] } },
+    ],
+  }).lean();
+
   if (!question) return sendError(res, 404, "QUESTION_NOT_FOUND", "Arena question not found");
 
   return sendSuccess(res, {
@@ -72,6 +113,13 @@ async function detail(req, res) {
     time_limit: question.time_limit,
     memory_limit: question.memory_limit,
     starter_code: question.starter_code || {},
+    hidden_tests: question.hidden_tests || [],
+    difficulty: question.difficulty,
+    topic: question.topic,
+    xp: question.xp,
+    question_type: question.question_type || "coding",
+    question_image_url: question.question_image_url,
+    quiz_options: question.quiz_options || [],
   });
 }
 
@@ -93,17 +141,44 @@ function run(req, res) {
 
 async function submit(req, res) {
   const schema = z.object({
+    questionId: z.string().optional(),
     language: z.string().min(1),
     code: z.string().min(1),
   });
   const body = schema.parse(req.body);
 
-  const question = await ArenaQuestion.findById(req.params.questionId).lean();
+  // Support questionId from body or route param
+  const qId = req.params.questionId || body.questionId;
+  const question = await ArenaQuestion.findById(qId).lean();
   if (!question) return sendError(res, 404, "QUESTION_NOT_FOUND", "Arena question not found");
 
-  const passed = Math.max(1, Math.min(12, Math.floor(Math.random() * 13)));
-  const total = 12;
-  const status = passed >= 9 ? "Accepted" : "Wrong Answer";
+  const isQuiz = String(question.question_type || "coding").toLowerCase() === "quiz";
+
+  let status = "Wrong Answer";
+  let xpAwarded = 0;
+  let testCasesPassed = "0/1";
+
+  if (isQuiz) {
+    // Evaluate quiz client-submission using is_correct flag
+    let selectedIdx = -1;
+    try {
+      const parsed = JSON.parse(body.code);
+      selectedIdx = Number(parsed?.selected_option_index ?? -1);
+    } catch { /* not JSON — wrong answer */ }
+
+    const options = Array.isArray(question.quiz_options) ? question.quiz_options : [];
+    const selectedOpt = selectedIdx >= 0 ? options[selectedIdx] : null;
+    const isCorrect = Boolean(selectedOpt?.is_correct);
+
+    status = isCorrect ? "Accepted" : "Wrong Answer";
+    testCasesPassed = isCorrect ? "1/1" : "0/1";
+  } else {
+    // Coding/Written: simple mock grading (real judge not wired yet)
+    const passed = Math.max(1, Math.min(12, Math.floor(Math.random() * 13)));
+    const total = 12;
+    status = passed >= 9 ? "Accepted" : "Wrong Answer";
+    testCasesPassed = `${passed}/${total}`;
+  }
 
   const submission = await ArenaSubmission.create({
     question_id: question._id,
@@ -111,11 +186,27 @@ async function submit(req, res) {
     language: body.language,
     code: body.code,
     status,
-    test_cases_passed: `${passed}/${total}`,
-    execution_time_ms: 90 + Math.floor(Math.random() * 80),
-    memory_mb: 24 + Math.floor(Math.random() * 10),
+    test_cases_passed: testCasesPassed,
+    execution_time_ms: isQuiz ? 0 : 90 + Math.floor(Math.random() * 80),
+    memory_mb: isQuiz ? 0 : 24 + Math.floor(Math.random() * 10),
     submitted_at: new Date(),
   });
+
+  // Award XP only if accepted and first time solving
+  if (status === "Accepted") {
+    const previousAccepted = await ArenaSubmission.findOne({
+      question_id: question._id,
+      student_id: req.user.sub,
+      status: "Accepted",
+      _id: { $ne: submission._id },
+    });
+
+    if (!previousAccepted) {
+      xpAwarded = question.xp || 20;
+      // Add XP to student profile
+      await Student.findByIdAndUpdate(req.user.sub, { $inc: { xp: xpAwarded } });
+    }
+  }
 
   return sendSuccess(res, {
     submission_id: String(submission._id),
@@ -124,6 +215,8 @@ async function submit(req, res) {
     execution_time_ms: submission.execution_time_ms,
     memory_mb: submission.memory_mb,
     submitted_at: submission.submitted_at,
+    xpAwarded,
+    xp_awarded: xpAwarded,
   });
 }
 
@@ -152,30 +245,54 @@ async function submissions(req, res) {
 }
 
 async function activity(req, res) {
-  const range = String(req.query.range || "year");
-  const start = new Date();
-  if (range === "year") {
-    start.setUTCFullYear(start.getUTCFullYear() - 1);
-  } else if (range === "month") {
-    start.setUTCMonth(start.getUTCMonth() - 1);
-  } else {
-    start.setUTCDate(start.getUTCDate() - 30);
-  }
+  // Return full calendar year worth of data (Jan 1 to Dec 31 of current year)
+  const now = new Date();
+  const year = Number(req.query.year || now.getFullYear());
+  const start = new Date(`${year}-01-01T00:00:00.000Z`);
+  const end = new Date(`${year}-12-31T23:59:59.999Z`);
 
   const rows = await ArenaSubmission.find({
     student_id: req.user.sub,
-    submitted_at: { $gte: start },
+    submitted_at: { $gte: start, $lte: end },
   })
     .select("submitted_at")
     .lean();
 
   const daily_counts = {};
   for (const row of rows) {
+    // Use ISO date string sliced to YYYY-MM-DD for consistent date keys
     const d = new Date(row.submitted_at).toISOString().slice(0, 10);
     daily_counts[d] = (daily_counts[d] || 0) + 1;
   }
 
-  return sendSuccess(res, { daily_counts });
+  return sendSuccess(res, daily_counts);
 }
 
-module.exports = { list, detail, run, submit, submissions, activity };
+async function solved(req, res) {
+  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+
+  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
+
+  // Support both old single batch_id and new batch_ids array format
+  const questions = await ArenaQuestion.find({
+    $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
+  })
+    .select("_id")
+    .lean();
+  const qIds = questions.map((q) => q._id);
+
+  const acceptedSubs = await ArenaSubmission.find({
+    question_id: { $in: qIds },
+    student_id: req.user.sub,
+    status: "Accepted",
+  })
+    .select("question_id")
+    .lean();
+
+  const solvedIds = [...new Set(acceptedSubs.map((s) => String(s.question_id)))];
+  return sendSuccess(res, solvedIds);
+}
+
+module.exports = { list, detail, run, submit, submissions, activity, solved };
+

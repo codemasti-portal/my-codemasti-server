@@ -79,6 +79,56 @@ function catalogBatchMongoMatch(batchId) {
 }
 
 /**
+ * Mongo $or branch conditions for membership in one catalog program (spark / builders / innovators).
+ * Enrollment letter wins when enrollment_number matches I|S|B + 6 digits, so a stale `batch_id`
+ * alone cannot place a Spark student in Builders notifications (and vice versa).
+ * Students with no enrollment_number still match on `batch_id` only (legacy rows).
+ */
+function catalogBatchMembershipOrConditions(batchKey) {
+  const bid = String(batchKey || "").trim().toLowerCase();
+  if (!bid) return [];
+  const letter = CATALOG_BATCH_ID_TO_PREFIX[bid];
+  if (!letter) {
+    return [{ batch_id: bid }];
+  }
+  return [
+    { enrollment_number: new RegExp(`^${letter}\\d{6}$`, "i") },
+    {
+      $and: [
+        {
+          $or: [{ enrollment_number: { $exists: false } }, { enrollment_number: null }, { enrollment_number: "" }],
+        },
+        { batch_id: bid },
+      ],
+    },
+  ];
+}
+
+/**
+ * Filter for Student.find: role student, in any of the given catalog batches, optional section(s).
+ */
+function studentsInCatalogBatchesFilter(batchKeys, { sectionId = "", sectionIds } = {}) {
+  const keys = [...new Set((batchKeys || []).map((k) => String(k || "").trim().toLowerCase()).filter(Boolean))];
+  if (!keys.length) {
+    return { _id: null };
+  }
+  const orConds = keys.flatMap((k) => catalogBatchMembershipOrConditions(k));
+  const filter = { role: "student", $or: orConds };
+
+  const sidSingle = String(sectionId || "").trim().toLowerCase();
+  const sidMany = Array.isArray(sectionIds)
+    ? sectionIds.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  const normalizedSections = sidMany.length ? [...new Set(sidMany)] : sidSingle ? [sidSingle] : [];
+  if (normalizedSections.length === 1) {
+    filter.section_id = normalizedSections[0];
+  } else if (normalizedSections.length > 1) {
+    filter.section_id = { $in: normalizedSections };
+  }
+  return filter;
+}
+
+/**
  * Overlay batch, batch_id, and enrollment-derived fields from enrollment_number when parseable.
  */
 function augmentStudentCatalogFieldsFromEnrollment(lean) {
@@ -129,6 +179,8 @@ module.exports = {
   PREFIX_TO_BATCH,
   deriveStudentBatchFromEnrollment,
   catalogBatchMongoMatch,
+  catalogBatchMembershipOrConditions,
+  studentsInCatalogBatchesFilter,
   augmentStudentCatalogFieldsFromEnrollment,
   applyEnrollmentDerivedFieldsToStudentDocument,
 };

@@ -75,10 +75,13 @@ function studentMatchesAnnouncement(student, ann) {
   if (ann.scope === "global") return true;
   if (ann.scope !== "batch") return false;
 
-  const annBid = String(ann.batch_id || "").trim();
-  const annBatch = String(ann.batch || "").trim();
-  const stBid = String(student.batch_id || "").trim();
-  const stBatch = String(student.batch || "").trim();
+  // Prefer enrollment-derived catalog batch so stale `batch_id` cannot reassign students across programs.
+  const augmented = augmentStudentCatalogFieldsFromEnrollment(student);
+  const stBid = String(augmented.batch_id || "").trim().toLowerCase();
+  const stBatch = String(augmented.batch || "").trim().toLowerCase();
+
+  const annBid = String(ann.batch_id || "").trim().toLowerCase();
+  const annBatch = String(ann.batch || "").trim().toLowerCase();
 
   let programOk = false;
   if (annBid) {
@@ -98,7 +101,9 @@ function studentMatchesAnnouncement(student, ann) {
 async function fanoutAnnouncementNotification(annDoc) {
   if (!annDoc || !isPublishedNow(annDoc.date)) return;
 
-  const students = await Student.find({}).select("_id batch batch_id section_id enrollment_section").lean();
+  const students = await Student.find({ role: "student" })
+    .select("_id batch batch_id section_id enrollment_section enrollment_number")
+    .lean();
   const matched = students.filter((s) => studentMatchesAnnouncement(s, annDoc));
   if (!matched.length) return;
   const refId = String(annDoc._id);

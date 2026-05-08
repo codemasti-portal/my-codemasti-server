@@ -12,7 +12,6 @@ const LiveClass = require("../models/LiveClass");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ClassJoinAudit = require("../models/ClassJoinAudit");
 const ArenaQuestion = require("../models/ArenaQuestion");
-const ScorecardMonth = require("../models/ScorecardMonth");
 const MentorSlot = require("../models/MentorSlot");
 const CommunityMessage = require("../models/CommunityMessage");
 const Notification = require("../models/Notification");
@@ -540,25 +539,6 @@ async function seed() {
         hidden_tests: [{ input: "[[3,2,4],6]", output: "[1,2]" }],
         xp: 20,
         acceptance_rate: 68,
-      },
-    },
-    { upsert: true }
-  );
-
-  await ScorecardMonth.updateOne(
-    { student_id: student._id, month_key: "2026-04" },
-    {
-      $set: {
-        subjects: [
-          {
-            name: "DSA",
-            components: [
-              { label: "Contest 1", obtained: 18, total: 25, status: "On-time only" },
-              { label: "Contest 2", obtained: 0, total: 25, status: "Not Conducted Yet" },
-              { label: "Assignments", obtained: 40, total: 50, status: "" },
-            ],
-          },
-        ],
       },
     },
     { upsert: true }

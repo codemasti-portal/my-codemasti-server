@@ -23,6 +23,7 @@ const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
 } = require("../services/instructor-notifications.service");
+const { studentsInCatalogBatchesFilter } = require("../utils/enrollment");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 
 const starterCodeSchema = z
@@ -81,9 +82,7 @@ async function fanoutTimetableSlotNotification(slot, action) {
   const body = `${slot.subject} on ${slot.day} (${slot.time}) by ${slot.teacher} was ${action}.`;
   const refId = `timetable-slot:${String(slot._id)}`;
 
-  const studentFilter = sectionId
-    ? { batch_id: batchId, section_id: sectionId }
-    : { batch_id: batchId };
+  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
   const students = await Student.find(studentFilter).select("_id").lean();
   if (!students.length) return;
 
@@ -95,6 +94,44 @@ async function fanoutTimetableSlotNotification(slot, action) {
     read_at: null,
     ref_id: refId,
   }));
+  await Notification.insertMany(docs, { ordered: false });
+}
+
+/**
+ * When an assignment is created for a catalog batch (and optional section),
+ * notify all matching students in-app.
+ */
+async function fanoutAssignmentCreatedNotification(assignment) {
+  const batchId = String(assignment?.batch_id || "").trim().toLowerCase();
+  if (!batchId) return;
+  const sectionId = String(assignment?.section_id || "").trim().toLowerCase();
+  const subject = String(assignment?.subject || "").trim();
+  const moduleLabel = String(assignment?.module || "").trim();
+  const explicitTitle = String(assignment?.title || "").trim();
+  const headline = explicitTitle || moduleLabel || subject || "New assignment";
+  const deadline = assignment?.deadline_date ? new Date(assignment.deadline_date) : null;
+  const deadlineText = deadline && !Number.isNaN(deadline.getTime()) ? deadline.toLocaleString() : "See portal";
+
+  const title = "New assignment";
+  const body = `${headline}${subject && headline !== subject ? ` · ${subject}` : ""}. Deadline: ${deadlineText}.`;
+  const refId = `assignment:${String(assignment._id)}`;
+  const deepLink = `/assignments/${String(assignment._id)}`;
+
+  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
+
+  const students = await Student.find(studentFilter).select("_id").lean();
+  if (!students.length) return;
+
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: refId,
+    deep_link: deepLink,
+  }));
+
   await Notification.insertMany(docs, { ordered: false });
 }
 
@@ -111,12 +148,11 @@ async function fanoutMentorSlotNotification(slot) {
 
   let students = [];
   if (targetStudentIds.length > 0) {
-    students = await Student.find({ _id: { $in: targetStudentIds } }).select("_id").lean();
+    students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
   } else if (targetBatchIds.length > 0) {
-    const filter = { batch_id: { $in: targetBatchIds } };
-    if (targetSectionIds.length > 0) {
-      filter.section_id = { $in: targetSectionIds };
-    }
+    const filter = studentsInCatalogBatchesFilter(targetBatchIds, {
+      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
+    });
     students = await Student.find(filter).select("_id").lean();
   }
 
@@ -240,7 +276,9 @@ async function getAssignment(req, res) {
 async function createAssignment(req, res) {
   const schema = z
     .object({
-      batch_id: z.string().min(1).trim(),
+      batch_ids: z.array(z.string().min(1).trim()).optional().default([]),
+      batch_id: z.string().min(1).trim().optional(), // legacy support for single batch_id
+      title: z.string().min(1).trim().optional().default(""),
       section_id: z.string().trim().optional().default(""),
       subject: z.string().min(1).trim(),
       module: z.string().min(1).trim(),
@@ -256,53 +294,81 @@ async function createAssignment(req, res) {
       path: ["deadline_date"],
     });
   const body = schema.parse(req.body);
-  const created = await Assignment.create({
-    batch_id: body.batch_id.toLowerCase().trim(),
-    section_id: body.section_id || "",
-    subject: body.subject,
-    module: body.module,
-    assignment_type: body.assignment_type,
-    release_date: body.release_date,
-    deadline_date: body.deadline_date,
-    resource_url: body.resource_url || "",
-    resource_size: body.resource_size || "",
-  });
-
-  if (body.question_count > 0) {
-    const placeholders = Array.from({ length: body.question_count }, (_, idx) => {
-      const n = idx + 1;
-      const title = `Question ${n}`;
-      return {
-        assignment_id: created._id,
-        name: slugifyQuestionName(`question-${n}`),
-        title,
-        description: "Add question description.",
-        difficulty: "easy",
-        xp: 10,
-        topics: [],
-        requirements: [],
-        input_format: "",
-        output_format: "",
-        constraints: [],
-        examples: [],
-        time_limit: "1s",
-        memory_limit: "128MB",
-        execution_mode: "full_program",
-        starter_code: {},
-        hidden_tests: [],
-        question_image_url: "",
-        quiz_options: [],
-      };
-    });
-    await AssignmentQuestion.insertMany(placeholders);
+  
+  // Support both batch_ids (array) and batch_id (legacy single)
+  let batchIds = body.batch_ids && body.batch_ids.length > 0 ? body.batch_ids : [];
+  if (!batchIds.length && body.batch_id) {
+    batchIds = [body.batch_id];
+  }
+  if (!batchIds.length) {
+    return sendError(res, 400, "BATCH_REQUIRED", "At least one batch must be selected.");
   }
 
-  return sendSuccess(
-    res,
-    {
+  // Create one assignment record per batch
+  const createdAssignments = [];
+  for (const batchId of batchIds) {
+    const created = await Assignment.create({
+      batch_id: batchId.toLowerCase().trim(),
+      section_id: body.section_id || "",
+      title: body.title || "",
+      subject: body.subject,
+      module: body.module,
+      assignment_type: body.assignment_type,
+      release_date: body.release_date,
+      deadline_date: body.deadline_date,
+      resource_url: body.resource_url || "",
+      resource_size: body.resource_size || "",
+    });
+
+    if (body.question_count > 0) {
+      const placeholders = Array.from({ length: body.question_count }, (_, idx) => {
+        const n = idx + 1;
+        const title = `Question ${n}`;
+        return {
+          assignment_id: created._id,
+          name: slugifyQuestionName(`question-${n}`),
+          title,
+          description: "Add question description.",
+          difficulty: "easy",
+          xp: 10,
+          topics: [],
+          requirements: [],
+          input_format: "",
+          output_format: "",
+          constraints: [],
+          examples: [],
+          time_limit: "1s",
+          memory_limit: "128MB",
+          execution_mode: "full_program",
+          starter_code: {},
+          hidden_tests: [],
+          question_image_url: "",
+          quiz_options: [],
+        };
+      });
+      await AssignmentQuestion.insertMany(placeholders);
+    }
+
+    try {
+      await fanoutAssignmentCreatedNotification(created.toObject ? created.toObject() : created);
+    } catch (e) {
+      console.warn("[ASSIGNMENT_NOTIFY_FANOUT]", e?.message || e);
+    }
+
+    createdAssignments.push({
       id: String(created._id),
       ...created.toObject(),
       question_count: body.question_count,
+    });
+  }
+
+  // Return first assignment or success message with count
+  return sendSuccess(
+    res,
+    {
+      assignments: createdAssignments,
+      count: createdAssignments.length,
+      message: `Created assignment for ${createdAssignments.length} batch${createdAssignments.length !== 1 ? "es" : ""}`,
     },
     "Created"
   );
@@ -310,7 +376,9 @@ async function createAssignment(req, res) {
 
 async function updateAssignment(req, res) {
   const schema = z.object({
+    batch_ids: z.array(z.string().min(1).trim()).optional(),
     batch_id: z.string().trim().optional(),
+    title: z.string().trim().optional(),
     section_id: z.string().trim().optional(),
     subject: z.string().min(1).trim().optional(),
     module: z.string().min(1).trim().optional(),
@@ -323,11 +391,17 @@ async function updateAssignment(req, res) {
   const body = schema.parse(req.body);
   const doc = await Assignment.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
-  if (body.batch_id !== undefined) {
+  
+  // Handle batch_ids array (for future multi-batch support) - for now update the single batch_id
+  if (body.batch_ids !== undefined && body.batch_ids.length > 0) {
+    doc.batch_id = body.batch_ids[0].toLowerCase().trim();
+  } else if (body.batch_id !== undefined) {
     doc.batch_id = body.batch_id ? body.batch_id.toLowerCase().trim() : "";
   }
-  const { batch_id: _b, ...rest } = body;
+  
+  const { batch_id: _b, batch_ids: _bs, ...rest } = body;
   Object.assign(doc, rest);
+  
   const rel = doc.release_date;
   const due = doc.deadline_date;
   if (rel && due && new Date(due).getTime() < new Date(rel).getTime()) {
@@ -454,7 +528,17 @@ async function deleteAssignmentQuestion(req, res) {
 async function listArenaQuestions(req, res) {
   const { page, limit, skip } = paginate(req);
   const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
-  const filter = batch_id ? { batch_id } : {};
+  
+  // Filter by batch_id (either old format batch_id field or new format in batch_ids array)
+  const filter = batch_id
+    ? {
+        $or: [
+          { batch_id }, // Old format: single batch_id
+          { batch_ids: { $in: [batch_id] } }, // New format: array of batch_ids
+        ],
+      }
+    : {};
+  
   const [items, total] = await Promise.all([
     ArenaQuestion.find(filter).sort({ number: 1 }).skip(skip).limit(limit).lean(),
     ArenaQuestion.countDocuments(filter),
@@ -469,12 +553,14 @@ async function listArenaQuestions(req, res) {
 
 const arenaBodySchema = z.object({
   batch_id: z.string().trim().toLowerCase().min(1).optional(),
+  batch_ids: z.array(z.string()).transform(arr => arr.map(s => String(s).trim().toLowerCase())).optional(),
   number: z.number().int().optional(),
+  question_type: z.enum(["quiz", "coding", "written"]).optional().default("coding"),
   title: z.string().min(1).trim(),
   subject: z.string().optional(),
   topic: z.string().optional(),
   difficulty: z.enum(["easy", "medium", "hard"]).optional(),
-  description: z.string().min(1),
+  description: z.string().trim().min(1),
   requirements: z.array(z.string()).optional(),
   input_format: z.string().optional(),
   output_format: z.string().optional(),
@@ -484,8 +570,19 @@ const arenaBodySchema = z.object({
   memory_limit: z.string().optional(),
   starter_code: starterCodeSchema,
   hidden_tests: z.array(z.any()).optional(),
+  question_image_url: z.string().trim().nullable().optional(),
+  quiz_options: z
+    .array(
+      z.object({
+        text: z.string().trim().optional().default(""),
+        image_url: z.string().trim().nullable().optional().default(null),
+        is_correct: z.boolean().optional().default(false),
+      })
+    )
+    .optional(),
   xp: z.number().int().optional(),
   acceptance_rate: z.number().optional(),
+  is_disabled: z.boolean().optional(),
 });
 
 async function getArenaQuestion(req, res) {
@@ -495,25 +592,53 @@ async function getArenaQuestion(req, res) {
 }
 
 async function createArenaQuestion(req, res) {
-  const body = arenaBodySchema.parse(req.body);
-  if (!body.batch_id) {
-    return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
+  try {
+    const body = arenaBodySchema.parse(req.body);
+    
+    // Validate batch selection: either batch_id or batch_ids required
+    const hasBatchId = body.batch_id && String(body.batch_id).trim();
+    const hasBatchIds = body.batch_ids && Array.isArray(body.batch_ids) && body.batch_ids.length > 0;
+    
+    if (!hasBatchId && !hasBatchIds) {
+      return sendError(res, 400, "VALIDATION_ERROR", "batch_id or batch_ids is required");
+    }
+    
+    const created = await ArenaQuestion.create({
+      ...body,
+      starter_code: body.starter_code || {},
+      hidden_tests: body.hidden_tests || [],
+    });
+    return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+  } catch (error) {
+    if (error?.errors && Array.isArray(error.errors)) {
+      const messages = error.errors.map(e => {
+        const path = Array.isArray(e.path) ? e.path.join('.') : String(e.path || 'field');
+        return `${path}: ${e.message}`;
+      }).join('; ');
+      return sendError(res, 400, "VALIDATION_ERROR", messages);
+    }
+    throw error;
   }
-  const created = await ArenaQuestion.create({
-    ...body,
-    starter_code: body.starter_code || {},
-    hidden_tests: body.hidden_tests || [],
-  });
-  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
 }
 
 async function updateArenaQuestion(req, res) {
-  const body = arenaBodySchema.partial().parse(req.body);
-  const doc = await ArenaQuestion.findById(req.params.id);
-  if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
-  Object.assign(doc, body);
-  await doc.save();
-  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+  try {
+    const body = arenaBodySchema.partial().parse(req.body);
+    const doc = await ArenaQuestion.findById(req.params.id);
+    if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+    Object.assign(doc, body);
+    await doc.save();
+    return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+  } catch (error) {
+    if (error?.errors && Array.isArray(error.errors)) {
+      const messages = error.errors.map(e => {
+        const path = Array.isArray(e.path) ? e.path.join('.') : String(e.path || 'field');
+        return `${path}: ${e.message}`;
+      }).join('; ');
+      return sendError(res, 400, "VALIDATION_ERROR", messages);
+    }
+    throw error;
+  }
 }
 
 async function deleteArenaQuestion(req, res) {
