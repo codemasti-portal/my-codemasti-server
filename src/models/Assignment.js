@@ -6,6 +6,8 @@ const assignmentSchema = new mongoose.Schema(
   {
     /** Catalog batch (e.g. spark, builders); lowercase. Empty = legacy / visible to all batches. */
     batch_id: { type: String, default: "", trim: true, index: true },
+    /** Optional multi-batch tagging (same convention as arena); use with batch_id for queries. */
+    batch_ids: { type: [{ type: String, trim: true }], default: [] },
     /** Empty means assignment is released to all sections in the selected batch. */
     section_id: { type: String, default: "", trim: true, index: true },
     /** Assignment title (e.g. "Variables & Data Types") */

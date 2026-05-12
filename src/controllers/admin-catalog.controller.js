@@ -23,8 +23,10 @@ const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
 } = require("../services/instructor-notifications.service");
-const { studentsInCatalogBatchesFilter } = require("../utils/enrollment");
+const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
+const googleMeetCal = require("../services/google-calendar-meet.service");
+const { ROLES } = require("../utils/rbac");
 
 const starterCodeSchema = z
   .object({
@@ -307,8 +309,10 @@ async function createAssignment(req, res) {
   // Create one assignment record per batch
   const createdAssignments = [];
   for (const batchId of batchIds) {
+    const normBatch = batchId.toLowerCase().trim();
     const created = await Assignment.create({
-      batch_id: batchId.toLowerCase().trim(),
+      batch_id: normBatch,
+      batch_ids: [normBatch],
       section_id: body.section_id || "",
       title: body.title || "",
       subject: body.subject,
@@ -392,11 +396,15 @@ async function updateAssignment(req, res) {
   const doc = await Assignment.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
   
-  // Handle batch_ids array (for future multi-batch support) - for now update the single batch_id
+  // Handle batch_ids array (for future multi-batch support) — keep batch_id + batch_ids in sync
   if (body.batch_ids !== undefined && body.batch_ids.length > 0) {
-    doc.batch_id = body.batch_ids[0].toLowerCase().trim();
+    const normalized = body.batch_ids.map((x) => String(x || "").toLowerCase().trim()).filter(Boolean);
+    doc.batch_ids = normalized;
+    doc.batch_id = normalized[0] || "";
   } else if (body.batch_id !== undefined) {
-    doc.batch_id = body.batch_id ? body.batch_id.toLowerCase().trim() : "";
+    const one = body.batch_id ? body.batch_id.toLowerCase().trim() : "";
+    doc.batch_id = one;
+    doc.batch_ids = one ? [one] : [];
   }
   
   const { batch_id: _b, batch_ids: _bs, ...rest } = body;
@@ -1205,6 +1213,90 @@ async function updateMentorSlot(req, res) {
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
 }
 
+async function googleMeetCalendarStatus(req, res) {
+  return sendSuccess(res, {
+    configured: googleMeetCal.isGoogleMeetCalendarConfigured(),
+  });
+}
+
+async function provisionTimetableGoogleMeet(req, res) {
+  const provisionSchema = z.object({
+    batch_id: z.string().min(1).trim(),
+    section_id: z.string().trim().optional().default(""),
+    class_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    time: z.string().min(1).trim(),
+    subject: z.string().min(1).trim(),
+    topic: z.string().optional().default(""),
+    teacher: z.string().min(1).trim(),
+  });
+  const body = provisionSchema.parse(req.body);
+
+  if (!googleMeetCal.isGoogleMeetCalendarConfigured()) {
+    return sendError(
+      res,
+      503,
+      "NOT_CONFIGURED",
+      "Google Calendar / Meet is not configured. Set GOOGLE_CALENDAR_* variables on the server and install googleapis."
+    );
+  }
+
+  const filter = catalogBatchStudentFilter(body.batch_id.toLowerCase(), body.section_id);
+  const students = await Student.find(filter).select("email").lean().limit(5000);
+  const studentEmails = [
+    ...new Set(students.map((s) => String(s.email || "").trim().toLowerCase()).filter(Boolean)),
+  ];
+
+  const teacherNameTrim = body.teacher.trim();
+  let teacherEmail = "";
+  const instructors = await Staff.find({ role: ROLES.INSTRUCTOR, is_active: true }).select("name email").lean();
+  const instructorMatch = instructors.find(
+    (row) => String(row.name || "").trim().toLowerCase() === teacherNameTrim.toLowerCase()
+  );
+  if (instructorMatch && String(instructorMatch.email || "").includes("@")) {
+    teacherEmail = String(instructorMatch.email).trim().toLowerCase();
+  }
+
+  const attendeeSet = new Set(studentEmails);
+  if (teacherEmail) attendeeSet.add(teacherEmail);
+  const attendeeEmails = [...attendeeSet];
+
+  const topicTxt = String(body.topic || "").trim();
+  const title = `${body.subject.trim()}${topicTxt ? ` — ${topicTxt}` : ""}`;
+  const description = [
+    "CodeMasti live class",
+    `Batch: ${body.batch_id.trim().toLowerCase()}${String(body.section_id || "").trim() ? ` · Section: ${String(body.section_id).trim()}` : ""}`,
+    `Teacher: ${teacherNameTrim}`,
+    topicTxt ? `Topic: ${topicTxt}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const result = await googleMeetCal.createMeetCalendarEvent({
+      title,
+      description,
+      dateYmd: body.class_date.trim(),
+      timeRange: body.time.trim(),
+      attendeeEmails,
+    });
+    return sendSuccess(
+      res,
+      {
+        meet_link: result.meetLink,
+        html_link: result.htmlLink,
+        event_id: result.eventId,
+        attendee_count: result.attendeeEmails.length,
+        student_count: studentEmails.length,
+        instructor_email_included: Boolean(teacherEmail),
+      },
+      "Meet link created and calendar invites sent."
+    );
+  } catch (e) {
+    console.error("[PROVISION_TIMETABLE_GOOGLE_MEET]", e?.message || e);
+    return sendError(res, 502, "GOOGLE_MEET_FAILED", String(e.message || "Failed to create Meet"));
+  }
+}
+
 async function deleteMentorSlot(req, res) {
   const r = await MentorSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
@@ -1237,6 +1329,8 @@ module.exports = {
   createTimetableSlot,
   updateTimetableSlot,
   deleteTimetableSlot,
+  googleMeetCalendarStatus,
+  provisionTimetableGoogleMeet,
   listTimetableEvents,
   getTimetableEvent,
   createTimetableEvent,

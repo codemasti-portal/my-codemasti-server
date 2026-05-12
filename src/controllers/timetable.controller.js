@@ -3,6 +3,7 @@ const { sendSuccess } = require("../utils/response");
 const TimetableSlot = require("../models/TimetableSlot");
 const TimetableEvent = require("../models/TimetableEvent");
 const Student = require("../models/Student");
+const { catalogBatchIdsFromStudentLean } = require("../utils/enrollment");
 
 async function weekly(req, res) {
   const schema = z.object({
@@ -11,17 +12,15 @@ async function weekly(req, res) {
   });
   const query = schema.parse(req.query);
 
-  const student = await Student.findById(req.user.sub)
-    .select("batch_id section_id")
-    .lean();
-  const batch_id = String(student?.batch_id || "").trim().toLowerCase();
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
 
-  if (!batch_id) {
+  if (!batchKeys.length) {
     return sendSuccess(res, []);
   }
 
-  const filter = { batch_id };
+  const filter = { batch_id: { $in: batchKeys } };
   if (section_id) {
     filter.$or = [
       { section_id: "" },
@@ -74,12 +73,12 @@ async function recordings(req, res) {
   });
   const query = schema.parse(req.query);
 
-  const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
-  const batch_id = String(student?.batch_id || "").trim().toLowerCase();
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
-  if (!batch_id) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
+  if (!batchKeys.length) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
 
-  const filter = { batch_id, recording_link: { $exists: true, $ne: "" } };
+  const filter = { batch_id: { $in: batchKeys }, recording_link: { $exists: true, $ne: "" } };
   if (section_id) {
     filter.$or = [
       { section_id: "" },
@@ -143,12 +142,12 @@ async function notes(req, res) {
   });
   const query = schema.parse(req.query);
 
-  const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
-  const batch_id = String(student?.batch_id || "").trim().toLowerCase();
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
-  if (!batch_id) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
+  if (!batchKeys.length) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
 
-  const filter = { batch_id, notes_link: { $exists: true, $ne: "" } };
+  const filter = { batch_id: { $in: batchKeys }, notes_link: { $exists: true, $ne: "" } };
   if (section_id) {
     filter.$or = [
       { section_id: "" },
@@ -206,8 +205,8 @@ async function events(req, res) {
     to: z.string().min(10),
   });
   const query = schema.parse(req.query);
-  const student = await Student.findById(req.user.sub).select("batch_id").lean();
-  const batch_id = String(student?.batch_id || "").trim().toLowerCase();
+  const student = await Student.findById(req.user.sub).select("batch_id enrollment_number").lean();
+  const batchKeys = catalogBatchIdsFromStudentLean(student);
 
   const fromDate = new Date(`${query.from}T00:00:00.000Z`);
   const toDate = new Date(`${query.to}T23:59:59.999Z`);
@@ -215,8 +214,8 @@ async function events(req, res) {
   const filter = {
     date: { $gte: fromDate, $lte: toDate },
   };
-  if (batch_id) {
-    filter.$or = [{ batch_id: "" }, { batch_id }];
+  if (batchKeys.length) {
+    filter.$or = [{ batch_id: "" }, { batch_id: { $in: batchKeys } }];
   }
 
   const rows = await TimetableEvent.find(filter).sort({ date: 1 }).lean();
