@@ -8,6 +8,7 @@ const Student = require("../models/Student");
 const BatchCatalog = require("../models/BatchCatalog");
 const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { executePythonCode } = require("../services/python-executor-local");
 
 function normalizeExpectedOutput(testRow) {
@@ -88,14 +89,28 @@ function isAssignmentReleased(assignment, now = new Date()) {
   return !Number.isNaN(t) && t <= now.getTime();
 }
 
-/** Matches student list visibility: published + batch scope. */
+/** Normalized catalog batch keys on an assignment (batch_id + batch_ids), deduped. */
+function assignmentScopeBatchKeys(assignment) {
+  const keys = [];
+  const a = assignment || {};
+  const primary = String(a.batch_id || "").toLowerCase().trim();
+  if (primary) keys.push(primary);
+  const arr = Array.isArray(a.batch_ids) ? a.batch_ids : [];
+  for (const x of arr) {
+    const z = String(x || "").toLowerCase().trim();
+    if (z) keys.push(z);
+  }
+  return [...new Set(keys)];
+}
+
+/** Matches student list visibility: published + batch scope (batch_id and/or batch_ids, legacy global when unscoped). */
 function isAssignmentVisibleToStudent(assignment, student, now = new Date()) {
   if (!isAssignmentReleased(assignment, now)) return false;
   const sbatch = String(student?.batch_id || "").toLowerCase().trim();
-  const bid = String(assignment.batch_id || "").toLowerCase().trim();
-  if (!bid) return true;
+  const scopes = assignmentScopeBatchKeys(assignment);
+  if (scopes.length === 0) return true;
   if (!sbatch) return false;
-  return bid === sbatch;
+  return scopes.includes(sbatch);
 }
 
 function normCatalogSectionId(s) {
@@ -138,7 +153,8 @@ function studentSectionDisplay(student, catalogDoc) {
 
 function assignmentScopeLabels(assignment, student, catalogById) {
   const sbatch = String(student?.batch_id || "").toLowerCase().trim();
-  const ab = String(assignment.batch_id || "").trim().toLowerCase();
+  const keys = assignmentScopeBatchKeys(assignment);
+  const ab = keys[0] || "";
   const progBid = ab || sbatch;
   const cat = progBid ? catalogById.get(progBid) : null;
   const program_label = cat?.name || batchDisplayName(progBid) || (progBid ? progBid : "Program");
@@ -150,7 +166,7 @@ function assignmentScopeLabels(assignment, student, catalogById) {
     section_label = studentSectionDisplay(student, cat) || "All sections";
   }
   const scope_line = `${program_label} — ${section_label}`;
-  return { program_label, section_label, scope_line, batch_id: assignment.batch_id || "" };
+  return { program_label, section_label, scope_line, batch_id: assignment.batch_id || ab || "" };
 }
 
 function mergePublishedIntoFilter(baseFilter, now = new Date()) {
@@ -228,17 +244,7 @@ async function list(req, res) {
   if (subject) parts.push({ subject });
   if (assignmentType) parts.push({ assignment_type: assignmentType });
   if (sbatch) {
-    parts.push({
-      $or: [
-        { batch_id: { $exists: false } },
-        { batch_id: "" },
-        {
-          $expr: {
-            $eq: [{ $toLower: { $trim: { input: { $ifNull: ["$batch_id", ""] } } } }, sbatch],
-          },
-        },
-      ],
-    });
+    parts.push({ $or: assignmentCatalogBatchScopeOr(sbatch) });
   }
 
   const baseFilter =
@@ -393,9 +399,7 @@ async function filters(req, res) {
     });
   }
 
-  const assignmentFilter = mergePublishedIntoFilter({
-    $or: [{ batch_id: "" }, { batch_id: { $exists: false } }, { batch_id: sbatch }],
-  });
+  const assignmentFilter = mergePublishedIntoFilter(sbatch ? { $or: assignmentCatalogBatchScopeOr(sbatch) } : {});
   const assignmentIds = (await Assignment.find(assignmentFilter).select("_id").lean()).map((x) => x._id);
   if (!assignmentIds.length) {
     return sendSuccess(res, {

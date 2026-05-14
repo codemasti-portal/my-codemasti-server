@@ -78,6 +78,22 @@ function catalogBatchMongoMatch(batchId) {
   };
 }
 
+/** Program batch key(s) for loading timetable/notifications consistently (document batch_id ∪ enrollment-derived catalog id). */
+function catalogBatchIdsFromStudentLean(student) {
+  const ids = new Set();
+  const bid = String(student?.batch_id || "").trim().toLowerCase();
+  if (bid) ids.add(bid);
+  try {
+    if (student?.enrollment_number) {
+      const p = parseEnrollmentNumber(student.enrollment_number);
+      ids.add(String(deriveStudentBatchFromEnrollment(p).batch_id || "").trim().toLowerCase());
+    }
+  } catch {
+    /* invalid / partial enrollment_number */
+  }
+  return [...ids].filter(Boolean);
+}
+
 /**
  * Mongo $or branch conditions for membership in one catalog program (spark / builders / innovators).
  * Enrollment letter wins when enrollment_number matches I|S|B + 6 digits, so a stale `batch_id`
@@ -174,6 +190,35 @@ function applyEnrollmentDerivedFieldsToStudentDocument(doc) {
   }
 }
 
+/** Same rules as optional section filter on `GET /admin/batches/:batch_id/students`. */
+function catalogBatchStudentFilter(batchId, rawSection) {
+  const batch_id = String(batchId || "").trim().toLowerCase();
+  const membership = catalogBatchMongoMatch(batch_id);
+  if (rawSection === undefined || String(rawSection).trim() === "") {
+    return { role: "student", ...membership };
+  }
+  const sid = String(rawSection ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+  let sectionPart;
+  if (sid === "__unassigned__") {
+    sectionPart = { $or: [{ section_id: "" }, { section_id: { $exists: false } }] };
+  } else {
+    sectionPart = {
+      $or: [
+        { section_id: sid },
+        {
+          $and: [
+            {
+              $or: [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: null }],
+            },
+            { enrollment_section: sid },
+          ],
+        },
+      ],
+    };
+  }
+  return { role: "student", $and: [membership, sectionPart] };
+}
+
 module.exports = {
   parseEnrollmentNumber,
   PREFIX_TO_BATCH,
@@ -181,6 +226,8 @@ module.exports = {
   catalogBatchMongoMatch,
   catalogBatchMembershipOrConditions,
   studentsInCatalogBatchesFilter,
+  catalogBatchStudentFilter,
+  catalogBatchIdsFromStudentLean,
   augmentStudentCatalogFieldsFromEnrollment,
   applyEnrollmentDerivedFieldsToStudentDocument,
 };

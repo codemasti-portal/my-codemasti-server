@@ -4,6 +4,8 @@ const crypto = require("crypto");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
+const Assignment = require("../models/Assignment");
+const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const ArenaQuestion = require("../models/ArenaQuestion");
@@ -17,6 +19,11 @@ const {
   augmentStudentCatalogFieldsFromEnrollment,
   applyEnrollmentDerivedFieldsToStudentDocument,
 } = require("../utils/enrollment");
+const {
+  assignmentPublishedVisibleToCatalogBatch,
+  assignmentDocMatchesCatalogBatch,
+  assignmentDocIsPublished,
+} = require("../utils/assignmentBatchFilter");
 const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
@@ -101,15 +108,16 @@ async function arenaProgressMapsForStudentRows(studentRows) {
 
   const byBatch = new Map();
   for (const s of studentRows) {
-    const sid = String(s._id);
-    const bk = String(s.batch_id || s.batch || "").trim().toLowerCase();
+    const enriched = augmentStudentCatalogFieldsFromEnrollment(s);
+    const sid = String(enriched._id);
+    const bk = String(enriched.batch_id || enriched.batch || "").trim().toLowerCase();
     if (!bk) {
       solvedMap.set(sid, 0);
       totalMap.set(sid, 0);
       continue;
     }
     if (!byBatch.has(bk)) byBatch.set(bk, []);
-    byBatch.get(bk).push({ sid, oid: s._id });
+    byBatch.get(bk).push({ sid, oid: enriched._id });
   }
 
   const batchKeys = [...byBatch.keys()];
@@ -137,13 +145,158 @@ async function arenaProgressMapsForStudentRows(studentRows) {
       { $group: { _id: { sid: "$student_id", qid: "$question_id" } } },
       { $group: { _id: "$_id.sid", n: { $sum: 1 } } },
     ]);
-    const counts = new Map(agg.map((r) => [String(r._id), Number(r.n || 0)]));
+    const counts = new Map();
+    for (const r of agg) {
+      const raw = r._id;
+      const key = raw != null && typeof raw.toString === "function" ? raw.toString() : String(raw);
+      counts.set(key, Number(r.n || 0));
+    }
     for (const { sid } of pairs) {
-      solvedMap.set(sid, counts.get(sid) || 0);
+      const key = String(sid);
+      solvedMap.set(key, counts.get(key) ?? 0);
     }
   }
 
   return { solvedMap, totalMap };
+}
+
+const ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY = "__cm_all_batches__";
+
+function mongoEntityKey(id) {
+  if (id == null) return "";
+  return typeof id.toString === "function" ? id.toString() : String(id);
+}
+
+/**
+ * Per student: assignments fully solved (every question has an Accepted submission) /
+ * total published assignments that have at least one question for their batch.
+ */
+async function assignmentProgressMapsForStudentRows(studentRows, now = new Date()) {
+  const solvedMap = new Map();
+  const totalMap = new Map();
+  const byBatch = new Map();
+
+  for (const s of studentRows) {
+    const enriched = augmentStudentCatalogFieldsFromEnrollment(s);
+    const sid = mongoEntityKey(enriched._id);
+    const bk = String(enriched.batch_id || enriched.batch || "").trim().toLowerCase();
+    const groupKey = bk || ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY;
+    if (!byBatch.has(groupKey)) byBatch.set(groupKey, []);
+    byBatch.get(groupKey).push({ sid, oid: enriched._id });
+  }
+
+  for (const [bk, pairs] of byBatch.entries()) {
+    const filter =
+      bk === ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY
+        ? assignmentPublishedVisibleToCatalogBatch("", now)
+        : assignmentPublishedVisibleToCatalogBatch(bk, now);
+    const assignmentsFromQuery = await Assignment.find(filter).select("_id batch_id batch_ids release_date").lean();
+
+    const idSet = new Set(assignmentsFromQuery.map((a) => String(a._id)));
+    const studObjectIds = pairs.map((p) => p.oid);
+    const acceptedSubs =
+      studObjectIds.length > 0
+        ? await AssignmentSubmission.find({
+            student_id: { $in: studObjectIds },
+            status: "Accepted",
+          })
+            .select("question_id")
+            .lean()
+        : [];
+    const qidsFromSubs = [...new Set(acceptedSubs.map((r) => r.question_id).filter(Boolean))];
+    if (qidsFromSubs.length > 0) {
+      const qMeta = await AssignmentQuestion.find({ _id: { $in: qidsFromSubs } })
+        .select("assignment_id")
+        .lean();
+      for (const q of qMeta) {
+        if (q.assignment_id != null) idSet.add(String(q.assignment_id));
+      }
+    }
+
+    const mergedIdList = [...idSet];
+    const batchKeyForJs = bk === ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY ? "" : bk;
+    let aidList = [];
+    if (mergedIdList.length > 0) {
+      const mergedDocs = await Assignment.find({ _id: { $in: mergedIdList } })
+        .select("_id batch_id batch_ids release_date")
+        .lean();
+      aidList = mergedDocs
+        .filter((a) => assignmentDocIsPublished(a, now) && assignmentDocMatchesCatalogBatch(a, batchKeyForJs))
+        .map((a) => a._id);
+    }
+    if (!aidList.length) {
+      for (const { sid } of pairs) {
+        solvedMap.set(sid, 0);
+        totalMap.set(sid, 0);
+      }
+      continue;
+    }
+
+    const questions = await AssignmentQuestion.find({ assignment_id: { $in: aidList } })
+      .select("_id assignment_id")
+      .lean();
+
+    const qsByAssignment = new Map();
+    for (const q of questions) {
+      const aid = String(q.assignment_id);
+      if (!qsByAssignment.has(aid)) qsByAssignment.set(aid, []);
+      qsByAssignment.get(aid).push(String(q._id));
+    }
+
+    const assignmentIdsWithQs = [...qsByAssignment.entries()]
+      .filter(([, qids]) => qids.length > 0)
+      .map(([aid]) => aid);
+    const totalAssignments = assignmentIdsWithQs.length;
+
+    const allQids = questions.map((q) => q._id);
+
+    const accepted =
+      allQids.length && studObjectIds.length
+        ? await AssignmentSubmission.find({
+            student_id: { $in: studObjectIds },
+            status: "Accepted",
+            question_id: { $in: allQids },
+          })
+            .select("student_id question_id")
+            .lean()
+        : [];
+
+    const solvedQsByStudent = new Map();
+    for (const row of accepted) {
+      const st = mongoEntityKey(row.student_id);
+      const qid = String(row.question_id);
+      if (!solvedQsByStudent.has(st)) solvedQsByStudent.set(st, new Set());
+      solvedQsByStudent.get(st).add(qid);
+    }
+
+    for (const { sid, oid } of pairs) {
+      totalMap.set(sid, totalAssignments);
+      const stKey = mongoEntityKey(oid);
+      const solvedSet = solvedQsByStudent.get(stKey) || new Set();
+      let solvedAssignmentCount = 0;
+      for (const aid of assignmentIdsWithQs) {
+        const qids = qsByAssignment.get(aid) || [];
+        if (qids.length && qids.every((qid) => solvedSet.has(qid))) {
+          solvedAssignmentCount += 1;
+        }
+      }
+      solvedMap.set(sid, solvedAssignmentCount);
+    }
+  }
+
+  return { solvedMap, totalMap };
+}
+
+async function assignmentProgressForStudentId(studentId, batchKey, now = new Date()) {
+  const maps = await assignmentProgressMapsForStudentRows(
+    [{ _id: studentId, batch_id: batchKey, batch: batchKey }],
+    now
+  );
+  const sid = mongoEntityKey(studentId);
+  return {
+    assignments_solved_count: maps.solvedMap.get(sid) ?? 0,
+    assignments_total_count: maps.totalMap.get(sid) ?? 0,
+  };
 }
 
 async function createStudent(req, res) {
@@ -479,19 +632,38 @@ async function listStudents(req, res) {
     arenaTotalMap = maps.totalMap;
   }
 
+  let assignmentSolvedMap = new Map();
+  let assignmentTotalMap = new Map();
+  if (items.length) {
+    const am = await assignmentProgressMapsForStudentRows(items, new Date());
+    assignmentSolvedMap = am.solvedMap;
+    assignmentTotalMap = am.totalMap;
+  }
+
   const data = items.map((s) => {
     const base = studentResponse(s);
     const verified = verifiedByReferrer.get(String(s._id)) || 0;
     const bonus = base.referral_bonus_count ?? 0;
-    const sid = String(s._id);
+    const sid = mongoEntityKey(s._id);
+    const arenaSolved = arenaSolvedMap.get(sid) ?? arenaSolvedMap.get(String(base.id)) ?? 0;
+    const arenaTotal = arenaTotalMap.get(sid) ?? arenaTotalMap.get(String(base.id)) ?? 0;
+    const assignSolved = assignmentSolvedMap.get(sid) ?? assignmentSolvedMap.get(String(base.id)) ?? 0;
+    const assignTotal = assignmentTotalMap.get(sid) ?? assignmentTotalMap.get(String(base.id)) ?? 0;
     return {
       ...base,
       referrals_made_count: verified,
       referrals_total: verified + bonus,
       total_xp: Math.max(0, Number(totalXpByStudent.get(sid) || 0)),
       batch_rank: Number(batchRankByStudent.get(sid) || 0) || null,
-      arena_solved_count: arenaSolvedMap.get(sid) ?? 0,
-      arena_questions_total: arenaTotalMap.get(sid) ?? 0,
+      arena_solved_count: arenaSolved,
+      arena_questions_total: arenaTotal,
+      /** Alias for clients that expect camelCase */
+      arenaSolvedCount: arenaSolved,
+      arenaQuestionsTotal: arenaTotal,
+      assignments_solved_count: assignSolved,
+      assignments_total_count: assignTotal,
+      assignmentsSolvedCount: assignSolved,
+      assignmentsTotalCount: assignTotal,
     };
   });
   return sendSuccess(res, data, "", { page, limit, total });
@@ -574,13 +746,23 @@ async function getStudent(req, res) {
   const data = studentResponse(doc);
   const refCount = await Student.countDocuments({ referred_by: doc._id });
   const bonus = data.referral_bonus_count ?? 0;
-  const batchKey = String(doc.batch_id || doc.batch || "").trim().toLowerCase();
+  const batchKey = String(data.batch_id || data.batch || "").trim().toLowerCase();
   const arenaProgress = await arenaProgressForStudentId(doc._id, batchKey);
+  const assignmentProgress = await assignmentProgressForStudentId(doc._id, batchKey, new Date());
+  const solved = arenaProgress.arena_solved_count ?? 0;
+  const totalQ = arenaProgress.arena_questions_total ?? 0;
+  const asolved = assignmentProgress.assignments_solved_count ?? 0;
+  const atotal = assignmentProgress.assignments_total_count ?? 0;
   return sendSuccess(res, {
     ...data,
     referrals_made_count: refCount,
     referrals_total: refCount + bonus,
     ...arenaProgress,
+    ...assignmentProgress,
+    arenaSolvedCount: solved,
+    arenaQuestionsTotal: totalQ,
+    assignmentsSolvedCount: asolved,
+    assignmentsTotalCount: atotal,
   });
 }
 

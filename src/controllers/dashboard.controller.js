@@ -3,34 +3,21 @@ const Student = require("../models/Student");
 const Assignment = require("../models/Assignment");
 const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { assignmentPublishedVisibleToCatalogBatch } = require("../utils/assignmentBatchFilter");
 
 function visibleAssignmentsQueryForStudent(student, now = new Date()) {
-  const published = { release_date: { $lte: now } };
-  const sbatch = String(student?.batch_id || "").toLowerCase().trim();
-  if (!sbatch) return published;
-  return {
-    $and: [
-      published,
-      {
-        $or: [
-          { batch_id: { $exists: false } },
-          { batch_id: "" },
-          {
-            $expr: {
-              $eq: [{ $toLower: { $trim: { input: { $ifNull: ["$batch_id", ""] } } } }, sbatch],
-            },
-          },
-        ],
-      },
-    ],
-  };
+  const enriched = augmentStudentCatalogFieldsFromEnrollment(student);
+  const sbatch = String(enriched?.batch_id || "").toLowerCase().trim();
+  return assignmentPublishedVisibleToCatalogBatch(sbatch, now);
 }
 
 async function summary(req, res) {
   const studentId = req.user.sub;
 
-  const student = await Student.findById(studentId).lean();
-  if (!student) {
+  const rawStudent = await Student.findById(studentId).lean();
+  const student = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
+  if (!rawStudent) {
     return sendSuccess(res, {
       latest_releases: 0,
       pending_assignments: 0,

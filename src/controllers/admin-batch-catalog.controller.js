@@ -5,7 +5,7 @@ const Student = require("../models/Student");
 const Assignment = require("../models/Assignment");
 const { assignmentVisibleToCatalogBatchCountFilter } = require("../utils/assignmentBatchFilter");
 const { DEFAULT_BATCHES, DEFAULT_SECTIONS_BY_BATCH } = require("../constants/batchDefaults");
-const { catalogBatchMongoMatch, augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { catalogBatchMongoMatch, augmentStudentCatalogFieldsFromEnrollment, catalogBatchStudentFilter } = require("../utils/enrollment");
 
 function normCatalogSectionId(s) {
   return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "-");
@@ -124,33 +124,7 @@ async function list(req, res) {
 async function listStudentsInBatch(req, res) {
   const batch_id = String(req.params.batch_id || "").trim().toLowerCase();
   const rawSection = req.query.section_id;
-  const membership = catalogBatchMongoMatch(batch_id);
-
-  let filter;
-  if (rawSection !== undefined && String(rawSection).trim() !== "") {
-    const sid = normCatalogSectionId(rawSection);
-    let sectionPart;
-    if (sid === "__unassigned__") {
-      sectionPart = { $or: [{ section_id: "" }, { section_id: { $exists: false } }] };
-    } else {
-      sectionPart = {
-        $or: [
-          { section_id: sid },
-          {
-            $and: [
-              {
-                $or: [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: null }],
-              },
-              { enrollment_section: sid },
-            ],
-          },
-        ],
-      };
-    }
-    filter = { role: "student", $and: [membership, sectionPart] };
-  } else {
-    filter = { role: "student", ...membership };
-  }
+  const filter = catalogBatchStudentFilter(batch_id, rawSection);
 
   const limit = Math.min(Number(req.query.limit) || 2000, 5000);
   const [students, total] = await Promise.all([
