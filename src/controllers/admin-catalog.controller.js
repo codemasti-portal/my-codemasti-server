@@ -26,6 +26,7 @@ const {
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 const googleMeetCal = require("../services/google-calendar-meet.service");
+const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
 const { ROLES } = require("../utils/rbac");
 
 const starterCodeSchema = z
@@ -96,44 +97,6 @@ async function fanoutTimetableSlotNotification(slot, action) {
     read_at: null,
     ref_id: refId,
   }));
-  await Notification.insertMany(docs, { ordered: false });
-}
-
-/**
- * When an assignment is created for a catalog batch (and optional section),
- * notify all matching students in-app.
- */
-async function fanoutAssignmentCreatedNotification(assignment) {
-  const batchId = String(assignment?.batch_id || "").trim().toLowerCase();
-  if (!batchId) return;
-  const sectionId = String(assignment?.section_id || "").trim().toLowerCase();
-  const subject = String(assignment?.subject || "").trim();
-  const moduleLabel = String(assignment?.module || "").trim();
-  const explicitTitle = String(assignment?.title || "").trim();
-  const headline = explicitTitle || moduleLabel || subject || "New assignment";
-  const deadline = assignment?.deadline_date ? new Date(assignment.deadline_date) : null;
-  const deadlineText = deadline && !Number.isNaN(deadline.getTime()) ? deadline.toLocaleString() : "See portal";
-
-  const title = "New assignment";
-  const body = `${headline}${subject && headline !== subject ? ` · ${subject}` : ""}. Deadline: ${deadlineText}.`;
-  const refId = `assignment:${String(assignment._id)}`;
-  const deepLink = `/assignments/${String(assignment._id)}`;
-
-  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
-
-  const students = await Student.find(studentFilter).select("_id").lean();
-  if (!students.length) return;
-
-  const docs = students.map((s) => ({
-    student_id: s._id,
-    type: "system",
-    title,
-    body,
-    read_at: null,
-    ref_id: refId,
-    deep_link: deepLink,
-  }));
-
   await Notification.insertMany(docs, { ordered: false });
 }
 
@@ -354,7 +317,7 @@ async function createAssignment(req, res) {
     }
 
     try {
-      await fanoutAssignmentCreatedNotification(created.toObject ? created.toObject() : created);
+      await notifyAssignmentReleasedIfEligible(created.toObject());
     } catch (e) {
       console.warn("[ASSIGNMENT_NOTIFY_FANOUT]", e?.message || e);
     }
@@ -421,6 +384,11 @@ async function updateAssignment(req, res) {
     );
   }
   await doc.save();
+  try {
+    await notifyAssignmentReleasedIfEligible(doc.toObject());
+  } catch (e) {
+    console.warn("[ASSIGNMENT_NOTIFY_FANOUT_UPDATE]", e?.message || e);
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
 }
 
@@ -818,8 +786,11 @@ async function createTimetableSlot(req, res) {
     recording_link: z.string().optional().default(""),
     notes_link: z.string().optional().default(""),
     is_taken: z.boolean().optional().default(false),
+    /** When true, also email students and instructors for recording/notes uploads; in-app notices always go out. */
+    notify_resource_by_email: z.boolean().optional().default(false),
   });
   const body = schema.parse(req.body);
+  const notifyResourceByEmail = body.notify_resource_by_email === true;
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
@@ -858,7 +829,9 @@ async function createTimetableSlot(req, res) {
         body: `Recording is available for ${slot.subject} (${whenText}).`,
         deep_link: "/lectures",
         dedupePrefix: "recordingUploaded",
-        email: null, // keep creation quiet; usually added after class ends
+        email: notifyResourceByEmail
+          ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "recording" })
+          : null,
       });
     }
     if (String(slot.notes_link || "").trim()) {
@@ -870,7 +843,9 @@ async function createTimetableSlot(req, res) {
         body: `Notes are available for ${slot.subject} (${whenText}).`,
         deep_link: "/lectures",
         dedupePrefix: "notesUploaded",
-        email: null,
+        email: notifyResourceByEmail
+          ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "notes" })
+          : null,
       });
     }
   }
@@ -891,8 +866,10 @@ async function updateTimetableSlot(req, res) {
     recording_link: z.string().optional(),
     notes_link: z.string().optional(),
     is_taken: z.boolean().optional(),
+    notify_resource_by_email: z.boolean().optional().default(false),
   });
   const body = schema.parse(req.body);
+  const notifyResourceByEmail = body.notify_resource_by_email === true;
   const doc = await TimetableSlot.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
   const prevClassDate = String(doc.class_date || "").trim();
@@ -914,7 +891,7 @@ async function updateTimetableSlot(req, res) {
     if (!d) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
     doc.day = d;
   }
-  const { batch_id: _b, section_id: _s, ...rest } = body;
+  const { notify_resource_by_email: _notifyEmail, batch_id: _b, section_id: _s, ...rest } = body;
   Object.assign(doc, rest);
   if (body.time !== undefined) doc.time = body.time.trim();
   if (body.subject !== undefined) doc.subject = body.subject.trim();
@@ -951,7 +928,9 @@ async function updateTimetableSlot(req, res) {
       body: `Recording is available for ${slot.subject} (${whenText}).`,
       deep_link: "/lectures",
       dedupePrefix: "recordingUploaded",
-      email: ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "recording" }),
+      email: notifyResourceByEmail
+        ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "recording" })
+        : null,
     });
 
     await notifyInstructorsForSlot({
@@ -959,8 +938,9 @@ async function updateTimetableSlot(req, res) {
       event_type: "timetable_recording_uploaded",
       title: "Recording uploaded",
       message: `Recording link added for ${slot.subject} (${whenText}).`,
-      emailBuilder: ({ staff }) =>
-        buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "recording" }),
+      emailBuilder: notifyResourceByEmail
+        ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "recording" })
+        : undefined,
     });
   }
   if (!prevNotes && nextNotes) {
@@ -971,7 +951,9 @@ async function updateTimetableSlot(req, res) {
       body: `Notes are available for ${slot.subject} (${whenText}).`,
       deep_link: "/lectures",
       dedupePrefix: "notesUploaded",
-      email: ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "notes" }),
+      email: notifyResourceByEmail
+        ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "notes" })
+        : null,
     });
 
     await notifyInstructorsForSlot({
@@ -979,8 +961,9 @@ async function updateTimetableSlot(req, res) {
       event_type: "timetable_notes_uploaded",
       title: "Notes uploaded",
       message: `Notes link added for ${slot.subject} (${whenText}).`,
-      emailBuilder: ({ staff }) =>
-        buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "notes" }),
+      emailBuilder: notifyResourceByEmail
+        ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "notes" })
+        : undefined,
     });
   }
 

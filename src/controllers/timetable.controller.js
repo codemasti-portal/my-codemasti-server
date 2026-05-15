@@ -29,14 +29,16 @@ async function weekly(req, res) {
     ];
   }
 
-  // Default window: last 30 days + next 60 days, to support both weekly & monthly views.
+  // Default window: generous range when the client omits from/to. Notifications are sent for
+  // any new slot, but this query used to cap at +60 days — classes further out never appeared on
+  // the student timetable. Widen defaults; prefer clients to pass from/to for the visible calendar.
   const now = new Date();
   const pad2 = (n) => String(n).padStart(2, "0");
   const fmt = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const fromDefault = new Date(now);
-  fromDefault.setDate(fromDefault.getDate() - 30);
+  fromDefault.setDate(fromDefault.getDate() - 365);
   const toDefault = new Date(now);
-  toDefault.setDate(toDefault.getDate() + 60);
+  toDefault.setDate(toDefault.getDate() + 730);
 
   const from = String(query.from || "").trim() || fmt(fromDefault);
   const to = String(query.to || "").trim() || fmt(toDefault);

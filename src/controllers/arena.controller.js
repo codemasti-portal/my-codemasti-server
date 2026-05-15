@@ -3,6 +3,14 @@ const { sendSuccess, sendError } = require("../utils/response");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const Student = require("../models/Student");
+const achievementSvc = require("../services/student-achievement.service");
+const badgeProgramSvc = require("../services/badge-program.service");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+
+function catalogBatchIdFromStudentLean(lean) {
+  const s = augmentStudentCatalogFieldsFromEnrollment(lean || {});
+  return String(s.batch_id || s.batch || "").toLowerCase().trim();
+}
 
 /**
  * Calendar YYYY-MM-DD in the client's timezone, matching browser Date.getTimezoneOffset().
@@ -25,11 +33,10 @@ async function list(req, res) {
   const difficulty = String(req.query.difficulty || "").trim().toLowerCase();
   const statusFilter = String(req.query.status || "").trim().toLowerCase();
 
-  // Get student's batch
-  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  const student = await Student.findById(req.user.sub).select("batch batch_id enrollment_number").lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
 
-  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
+  const batchId = catalogBatchIdFromStudentLean(student);
 
   // Build filter conditions as an array for $and
   const filterConditions = [
@@ -96,11 +103,10 @@ async function list(req, res) {
 }
 
 async function detail(req, res) {
-  // Get student's batch
-  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  const student = await Student.findById(req.user.sub).select("batch batch_id enrollment_number").lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
 
-  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
+  const batchId = catalogBatchIdFromStudentLean(student);
 
   // Find question and check if it's assigned to this batch
   const question = await ArenaQuestion.findOne({
@@ -238,6 +244,13 @@ async function submit(req, res) {
       await Student.findByIdAndUpdate(req.user.sub, { $inc: { xp: xpAwarded } });
       await ArenaSubmission.updateOne({ _id: submission._id }, { $set: { xp_credited: xpAwarded } });
     }
+
+    setImmediate(() => {
+      Promise.all([
+        achievementSvc.ensureMilestoneBadges(req.user.sub),
+        badgeProgramSvc.ensurePublishedProgramBadgesForStudent(req.user.sub),
+      ]).catch(() => {});
+    });
   }
 
   return sendSuccess(res, {
@@ -311,23 +324,17 @@ async function activity(req, res) {
 }
 
 async function solved(req, res) {
-  const student = await Student.findById(req.user.sub).select("batch batch_id").lean();
+  const student = await Student.findById(req.user.sub).select("_id").lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
 
-  const batchId = String(student.batch_id || student.batch || "").toLowerCase().trim();
-
-  // Support both old single batch_id and new batch_ids array format
-  const questions = await ArenaQuestion.find({
-    $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
-  })
-    .select("_id")
-    .lean();
-  const qIds = questions.map((q) => q._id);
+  /* Same eligible question IDs as badges / milestones (batch from enrollment overlay + excludes disabled). */
+  const qIds = await achievementSvc.batchArenaQuestionIdsForStudent(req.user.sub);
+  if (!qIds.length) return sendSuccess(res, []);
 
   const acceptedSubs = await ArenaSubmission.find({
     question_id: { $in: qIds },
     student_id: req.user.sub,
-    status: "Accepted",
+    status: { $regex: /^accepted$/i },
   })
     .select("question_id")
     .lean();

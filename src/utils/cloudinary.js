@@ -182,6 +182,15 @@ function uploadAssignmentBuffer(buffer, opts) {
   });
 }
 
+function buildBadgeProgramUploadFolder(resourceType) {
+  return buildDatedSubfolder(
+    "codemasti/badge-programs",
+    "CLOUDINARY_BADGE_PROGRAMS_FOLDER",
+    "CLOUDINARY_BADGE_PROGRAMS_USE_DATE",
+    resourceType
+  );
+}
+
 module.exports = {
   cloudinary,
   isCloudinaryConfigured,
@@ -192,6 +201,7 @@ module.exports = {
   buildNotesUploadFolder,
   buildAssignmentUploadFolder,
   buildAssignmentQuestionUploadFolder,
+  buildBadgeProgramUploadFolder,
   buildCommunityUploadFolder,
   buildDoubtsUploadFolder,
   buildStudentAvatarFolder,

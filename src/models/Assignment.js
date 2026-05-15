@@ -23,6 +23,8 @@ const assignmentSchema = new mongoose.Schema(
     },
     release_date: { type: Date, required: true, index: true },
     deadline_date: { type: Date, required: true, index: true },
+    /** Set when students received the “New assignment” in-app notify (immediate or via scheduler); prevents duplicates. */
+    release_notification_sent_at: { type: Date, default: null, index: true },
     /** Optional PDF / image / external link (e.g. handout, brief) — same pattern as notes. */
     resource_url: { type: String, default: "", trim: true },
     resource_size: { type: String, default: "", trim: true },

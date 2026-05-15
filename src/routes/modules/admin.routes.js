@@ -9,6 +9,10 @@ const adminUpload = require("../../controllers/admin-upload.controller");
 const adminScorecard = require("../../controllers/admin-scorecard.controller");
 const adminSupport = require("../../controllers/admin-support.controller");
 const adminTodo = require("../../controllers/admin-todo.controller");
+const adminMonthlyLeaderboard = require("../../controllers/admin-monthly-leaderboard.controller");
+const adminStudentAchievements = require("../../controllers/admin-student-achievement.controller");
+const adminBadgeDefinitions = require("../../controllers/admin-badge-definition.controller");
+const adminBadgeProgram = require("../../controllers/admin-badge-program.controller");
 const uploadMw = require("../../middlewares/upload.middleware");
 
 const router = express.Router();
@@ -57,6 +61,12 @@ router.post(
   ...manageAssignments,
   uploadMw.assignmentAssetUpload,
   adminUpload.uploadAssignmentQuestionAsset
+);
+router.post(
+  "/uploads/badge-program-art",
+  ...manageContent,
+  uploadMw.badgeProgramArtUpload,
+  adminUpload.uploadBadgeProgramArt
 );
 
 router.get(
@@ -150,6 +160,25 @@ router.delete("/scorecard/tests/:id", ...adminOnly, adminScorecard.deleteTest);
 router.get("/support/conversations", ...staffPanelRead, adminSupport.listConversations);
 router.get("/support/conversations/:conversationId/messages", ...staffPanelRead, adminSupport.getConversationMessages);
 router.patch("/support/messages/:messageId/status", ...manageContent, adminSupport.updateMessageStatus);
+
+/** Student-of-the-month (IST) — instructors read badges; admins run finalize jobs */
+router.get("/leaderboard-monthly-badges", ...staffPanelRead, adminMonthlyLeaderboard.listMonthlyBadges);
+router.post("/leaderboard-monthly-badges/finalize-recent", ...manageContent, adminMonthlyLeaderboard.finalizeRecentMonthlyBadges);
+
+/** Arena quest / IST streak milestones (distinct accepted questions per batch catalog) */
+router.get("/student-milestone-badges", ...staffPanelRead, adminStudentAchievements.listMilestoneAchievementBadges);
+
+/** Admin-authored achievement badges (draft / publish + auto-award Arena rules) */
+router.get("/badge-programs", ...staffPanelRead, adminBadgeProgram.list);
+router.get("/badge-programs/:id", ...staffPanelRead, adminBadgeProgram.getOne);
+router.post("/badge-programs", ...manageContent, adminBadgeProgram.create);
+router.patch("/badge-programs/:id", ...manageContent, adminBadgeProgram.patch);
+router.delete("/badge-programs/:id", ...manageContent, adminBadgeProgram.remove);
+router.post("/badge-programs/:id/reaward", ...manageContent, adminBadgeProgram.reawardPublished);
+
+/** Legacy styling catalog for built-in milestone codes */
+router.get("/badge-definitions/catalog", ...staffPanelRead, adminBadgeDefinitions.listCatalog);
+router.patch("/badge-definitions/:badgeCode", ...manageContent, adminBadgeDefinitions.patchDefinition);
 
 router.get("/todos", ...adminOnly, adminTodo.listTasks);
 router.post("/todos", ...adminOnly, adminTodo.createTask);

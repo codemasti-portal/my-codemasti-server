@@ -99,6 +99,18 @@ exports.noteAssetUpload = adminCloudinaryFile;
 /** Assignment handouts → Cloudinary under codemasti/assignments/... Field name: file */
 exports.assignmentAssetUpload = adminCloudinaryFile;
 
+const badgeProgramArtUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error("Only jpeg, png, webp, or gif images are allowed for badge art"));
+  },
+}).single("file");
+
+/** Badge program custom artwork → Cloudinary. Field name: file */
+exports.badgeProgramArtUpload = badgeProgramArtUpload;
+
 const communityMediaUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
