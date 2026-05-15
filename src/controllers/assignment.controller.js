@@ -10,6 +10,8 @@ const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { executePythonCode } = require("../services/python-executor-local");
+const achievementSvc = require("../services/student-achievement.service");
+const badgeProgramSvc = require("../services/badge-program.service");
 
 function normalizeExpectedOutput(testRow) {
   if (!testRow || typeof testRow !== "object") return "";
@@ -734,6 +736,15 @@ async function submit(req, res) {
       },
       { $set: { source_submission_id: submission._id } }
     );
+  }
+
+  if (status === "Accepted") {
+    setImmediate(() => {
+      Promise.all([
+        achievementSvc.ensureMilestoneBadges(req.user.sub),
+        badgeProgramSvc.ensurePublishedProgramBadgesForStudent(req.user.sub),
+      ]).catch(() => {});
+    });
   }
 
   return sendSuccess(res, {

@@ -7,6 +7,12 @@ const {
   augmentStudentCatalogFieldsFromEnrollment,
   catalogBatchMongoMatch,
 } = require("../utils/enrollment");
+const {
+  indiaThisYearSubmittedMatch,
+  indiaThisMonthSubmittedMatch,
+  indiaThisWeekSubmittedMatch,
+  submittedAtIndiaCalendarMonth,
+} = require("../utils/india-time");
 
 function escapeRegex(text) {
   return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -43,33 +49,15 @@ async function getScopedStudentIdSet(studentId) {
 }
 
 function submittedAtMatch(timeFilter) {
+  const now = new Date();
   if (timeFilter === "all_time") return {};
-  if (timeFilter === "this_year") {
-    const s = new Date();
-    s.setUTCMonth(0, 1);
-    s.setUTCHours(0, 0, 0, 0);
-    return { submitted_at: { $gte: s } };
-  }
-  if (timeFilter === "this_month") {
-    const s = new Date();
-    s.setUTCDate(1);
-    s.setUTCHours(0, 0, 0, 0);
-    return { submitted_at: { $gte: s } };
-  }
-  if (timeFilter === "this_week") {
-    const s = new Date();
-    const day = s.getUTCDay();
-    const diff = (day + 6) % 7;
-    s.setUTCDate(s.getUTCDate() - diff);
-    s.setUTCHours(0, 0, 0, 0);
-    return { submitted_at: { $gte: s } };
-  }
+  if (timeFilter === "this_year") return indiaThisYearSubmittedMatch(now);
+  if (timeFilter === "this_month") return indiaThisMonthSubmittedMatch(now);
+  if (timeFilter === "this_week") return indiaThisWeekSubmittedMatch(now);
   return {};
 }
 
-async function buildRows(timeFilter) {
-  const t = submittedAtMatch(timeFilter);
-
+async function buildRowsForSubmittedFilter(t) {
   const assignPipe = [
     { $match: { status: "Accepted", ...t } },
     {
@@ -200,8 +188,11 @@ async function buildRows(timeFilter) {
   return merged;
 }
 
-async function buildLatestSubmissionMap(timeFilter) {
-  const t = submittedAtMatch(timeFilter);
+async function buildRows(timeFilter) {
+  return buildRowsForSubmittedFilter(submittedAtMatch(timeFilter));
+}
+
+async function buildLatestSubmissionMapForFilter(t) {
   const [assignmentLatest, arenaLatest] = await Promise.all([
     AssignmentSubmission.aggregate([
       { $match: { status: "Accepted", ...t } },
@@ -224,6 +215,10 @@ async function buildLatestSubmissionMap(timeFilter) {
     latestMap.set(id, current > prev ? current : prev);
   }
   return latestMap;
+}
+
+async function buildLatestSubmissionMap(timeFilter) {
+  return buildLatestSubmissionMapForFilter(submittedAtMatch(timeFilter));
 }
 
 async function list(req, res) {
@@ -306,4 +301,10 @@ async function me(req, res) {
   });
 }
 
-module.exports = { list, me };
+module.exports = {
+  list,
+  me,
+  buildRowsForSubmittedFilter,
+  submittedAtIndiaCalendarMonth,
+  buildLatestSubmissionMapForFilter,
+};
