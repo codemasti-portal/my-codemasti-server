@@ -18,6 +18,7 @@ const {
   catalogBatchMongoMatch,
   augmentStudentCatalogFieldsFromEnrollment,
   applyEnrollmentDerivedFieldsToStudentDocument,
+  studentsInCatalogBatchesFilter,
 } = require("../utils/enrollment");
 const {
   assignmentPublishedVisibleToCatalogBatch,
@@ -30,6 +31,7 @@ const {
   buildStudentAvatarFolder,
 } = require("../utils/cloudinary");
 const { getUploadsRoot } = require("../utils/upload-paths");
+const { getInstructorAssignedBatchIds, studentInAnyAssignedBatch } = require("../utils/instructorBatchScope");
 
 const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
@@ -456,19 +458,35 @@ async function listStudents(req, res) {
   const pageNum = query.page || 1;
   const limitNum = query.limit || 50;
 
-  const filter = { role: "student" };
   const andParts = [];
-  if (query.batch_id) {
-    andParts.push(catalogBatchMongoMatch(String(query.batch_id).trim().toLowerCase()));
-  }
-  if (query.batch) {
-    const batchRx = new RegExp("^" + query.batch.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
-    andParts.push({ batch: batchRx });
+  const batchKey = query.batch_id
+    ? String(query.batch_id).trim().toLowerCase()
+    : query.batch
+      ? String(query.batch).trim().toLowerCase()
+      : "";
+  if (batchKey) {
+    andParts.push(catalogBatchMongoMatch(batchKey));
   }
   if (query.q?.trim()) {
     const rx = new RegExp(query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     andParts.push({ $or: [{ name: rx }, { email: rx }] });
   }
+
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page: pageNum, limit: limitNum, total: 0 });
+    }
+    if (batchKey) {
+      if (!instructorBatches.includes(batchKey)) {
+        return sendSuccess(res, [], "", { page: pageNum, limit: limitNum, total: 0 });
+      }
+    }
+    const scoped = studentsInCatalogBatchesFilter(instructorBatches);
+    andParts.push({ $or: scoped.$or });
+  }
+
+  const filter = { role: "student" };
   if (andParts.length === 1) {
     Object.assign(filter, andParts[0]);
   } else if (andParts.length > 1) {
@@ -743,6 +761,12 @@ async function getStudent(req, res) {
     .populate("referred_by", "name enrollment_number referral_code")
     .lean();
   if (!doc) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !studentInAnyAssignedBatch(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Student is not in your assigned batches");
+  }
+
   const data = studentResponse(doc);
   const refCount = await Student.countDocuments({ referred_by: doc._id });
   const bonus = data.referral_bonus_count ?? 0;

@@ -19,7 +19,14 @@ const router = express.Router();
 
 /** Admins (+ super_admin) only — destructive / catalog-owner actions */
 const manageContent = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
-/** Instructors see the same admin pages but read-only where routes use this only for GETs */
+/** Announcements: admins full access; instructors batch-scoped writes (enforced in controller). */
+const manageAnnouncements = [
+  requireStaffAuth,
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR]),
+];
+/** Admins only — ops modules not exposed to instructors (support, mentor slots, badge studio reads, batch hub detail) */
+const adminPanelRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
+/** Instructors share read access for teaching modules only (announcements, arena reads, etc.) */
 const staffPanelRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageNotes = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageLiveClasses = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
@@ -27,15 +34,21 @@ const manageAssignments = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMI
 const readTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
 const readScorecard = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
-const batchCatalogRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
+/** Batch list only — instructors need this for timetable / assignment batch dropdowns (no batch hub UI) */
+const batchListRead = [
+  requireStaffAuth,
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR, ROLES.MENTOR]),
+];
+/** Batch hub: single batch + roster — admin panel only */
+const batchHubRead = adminPanelRead;
 const viewStudents = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const adminOnly = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
 
 router.get("/announcements", ...staffPanelRead, content.listAnnouncements);
-router.post("/announcements", ...manageContent, content.createAnnouncement);
+router.post("/announcements", ...manageAnnouncements, content.createAnnouncement);
 router.get("/announcements/:id", ...staffPanelRead, content.getAnnouncement);
-router.patch("/announcements/:id", ...manageContent, content.updateAnnouncement);
-router.delete("/announcements/:id", ...manageContent, content.deleteAnnouncement);
+router.patch("/announcements/:id", ...manageAnnouncements, content.updateAnnouncement);
+router.delete("/announcements/:id", ...manageAnnouncements, content.deleteAnnouncement);
 
 router.get("/notes", ...manageNotes, content.listNotes);
 router.post("/notes", ...manageNotes, content.createNote);
@@ -119,16 +132,16 @@ router.get("/timetable/events/:id", ...readTimetable, catalog.getTimetableEvent)
 router.patch("/timetable/events/:id", ...manageTimetable, catalog.updateTimetableEvent);
 router.delete("/timetable/events/:id", ...manageTimetable, catalog.deleteTimetableEvent);
 
-router.get("/mentor-slots", ...staffPanelRead, catalog.listMentorSlotsAdmin);
+router.get("/mentor-slots", ...adminPanelRead, catalog.listMentorSlotsAdmin);
 router.post("/mentor-slots", ...manageContent, catalog.createMentorSlot);
-router.get("/mentor-slots/:id", ...staffPanelRead, catalog.getMentorSlot);
+router.get("/mentor-slots/:id", ...adminPanelRead, catalog.getMentorSlot);
 router.patch("/mentor-slots/:id", ...manageContent, catalog.updateMentorSlot);
 router.delete("/mentor-slots/:id", ...manageContent, catalog.deleteMentorSlot);
 
-router.get("/batches", ...batchCatalogRead, batchCatalog.list);
+router.get("/batches", ...batchListRead, batchCatalog.list);
 router.post("/batches", ...manageContent, batchCatalog.create);
-router.get("/batches/:batch_id/students", ...batchCatalogRead, batchCatalog.listStudentsInBatch);
-router.get("/batches/:batch_id", ...batchCatalogRead, batchCatalog.getOne);
+router.get("/batches/:batch_id/students", ...batchHubRead, batchCatalog.listStudentsInBatch);
+router.get("/batches/:batch_id", ...batchHubRead, batchCatalog.getOne);
 router.patch("/batches/:batch_id", ...manageContent, batchCatalog.update);
 router.delete("/batches/:batch_id", ...manageContent, batchCatalog.remove);
 
@@ -157,27 +170,27 @@ router.post("/scorecard/tests", ...adminOnly, adminScorecard.createTest);
 router.patch("/scorecard/tests/:id", ...adminOnly, adminScorecard.patchTest);
 router.delete("/scorecard/tests/:id", ...adminOnly, adminScorecard.deleteTest);
 
-router.get("/support/conversations", ...staffPanelRead, adminSupport.listConversations);
-router.get("/support/conversations/:conversationId/messages", ...staffPanelRead, adminSupport.getConversationMessages);
+router.get("/support/conversations", ...adminPanelRead, adminSupport.listConversations);
+router.get("/support/conversations/:conversationId/messages", ...adminPanelRead, adminSupport.getConversationMessages);
 router.patch("/support/messages/:messageId/status", ...manageContent, adminSupport.updateMessageStatus);
 
-/** Student-of-the-month (IST) — instructors read badges; admins run finalize jobs */
-router.get("/leaderboard-monthly-badges", ...staffPanelRead, adminMonthlyLeaderboard.listMonthlyBadges);
+/** Student-of-the-month (IST) — admin / super_admin only (badge studio UI is not on instructor shell) */
+router.get("/leaderboard-monthly-badges", ...adminPanelRead, adminMonthlyLeaderboard.listMonthlyBadges);
 router.post("/leaderboard-monthly-badges/finalize-recent", ...manageContent, adminMonthlyLeaderboard.finalizeRecentMonthlyBadges);
 
 /** Arena quest / IST streak milestones (distinct accepted questions per batch catalog) */
-router.get("/student-milestone-badges", ...staffPanelRead, adminStudentAchievements.listMilestoneAchievementBadges);
+router.get("/student-milestone-badges", ...adminPanelRead, adminStudentAchievements.listMilestoneAchievementBadges);
 
 /** Admin-authored achievement badges (draft / publish + auto-award Arena rules) */
-router.get("/badge-programs", ...staffPanelRead, adminBadgeProgram.list);
-router.get("/badge-programs/:id", ...staffPanelRead, adminBadgeProgram.getOne);
+router.get("/badge-programs", ...adminPanelRead, adminBadgeProgram.list);
+router.get("/badge-programs/:id", ...adminPanelRead, adminBadgeProgram.getOne);
 router.post("/badge-programs", ...manageContent, adminBadgeProgram.create);
 router.patch("/badge-programs/:id", ...manageContent, adminBadgeProgram.patch);
 router.delete("/badge-programs/:id", ...manageContent, adminBadgeProgram.remove);
 router.post("/badge-programs/:id/reaward", ...manageContent, adminBadgeProgram.reawardPublished);
 
 /** Legacy styling catalog for built-in milestone codes */
-router.get("/badge-definitions/catalog", ...staffPanelRead, adminBadgeDefinitions.listCatalog);
+router.get("/badge-definitions/catalog", ...adminPanelRead, adminBadgeDefinitions.listCatalog);
 router.patch("/badge-definitions/:badgeCode", ...manageContent, adminBadgeDefinitions.patchDefinition);
 
 router.get("/todos", ...adminOnly, adminTodo.listTasks);

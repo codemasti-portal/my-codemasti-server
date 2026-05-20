@@ -2,6 +2,7 @@ const { sendSuccess } = require("../utils/response");
 const Announcement = require("../models/Announcement");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { postedByStudentLabel } = require("../utils/announcementAuthor");
 
 function normSid(v) {
   return String(v ?? "")
@@ -69,6 +70,12 @@ async function list(req, res) {
     title: item.title,
     description: item.description,
     date: item.date,
+    scope: item.scope === "global" ? "global" : "batch",
+    batch_name:
+      item.scope === "global"
+        ? ""
+        : String(item.batch || "").trim() || String(item.batch_id || "").trim(),
+    posted_by_label: postedByStudentLabel(item.created_by_role),
   }));
 
   return sendSuccess(res, data, "", {

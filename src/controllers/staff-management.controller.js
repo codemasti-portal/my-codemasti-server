@@ -22,6 +22,20 @@ function parseCsvArray(value) {
     .filter(Boolean);
 }
 
+/** Non-empty batch ids after trim (instructor teaching scope). */
+function instructorHasNonEmptyBatches(doc) {
+  return (doc.batches_assigned || []).some((x) => String(x || "").trim());
+}
+
+function sendInstructorBatchesRequired(res) {
+  return sendError(
+    res,
+    400,
+    "BATCHES_REQUIRED",
+    "Instructors must have at least one program batch assigned."
+  );
+}
+
 function calcProfileCompletion(doc) {
   const commonChecks = [
     Boolean(doc.name),
@@ -175,11 +189,22 @@ async function createStaff(req, res) {
     name: z.string().min(2).trim(),
     role: z.enum(["admin", "instructor", "mentor"]),
     password: z.string().min(8).optional(),
+    batches_assigned: z.union([z.array(z.string()), z.string()]).optional(),
   });
   const body = schema.parse(req.body);
 
   if (!canCreateRole(actorRole, body.role)) {
     return sendError(res, 403, "FORBIDDEN", "You cannot create this role");
+  }
+
+  const batchesForCreate = body.role === ROLES.INSTRUCTOR ? parseCsvArray(body.batches_assigned) : [];
+  if (body.role === ROLES.INSTRUCTOR && !batchesForCreate.length) {
+    return sendError(
+      res,
+      400,
+      "BATCHES_REQUIRED",
+      "Instructors must be assigned at least one program batch (batches_assigned)."
+    );
   }
 
   const exists = await Staff.findOne({ email: body.email }).lean();
@@ -194,6 +219,7 @@ async function createStaff(req, res) {
     password_set_by_user: Boolean(body.password),
     account_status: "active",
     is_active: true,
+    batches_assigned: body.role === ROLES.INSTRUCTOR ? batchesForCreate : [],
   });
   await syncCompletion(created);
 
@@ -250,7 +276,16 @@ async function updateStaff(req, res) {
     if (target.role === ROLES.SUPER_ADMIN) {
       return sendError(res, 403, "FORBIDDEN", "Cannot reassign super admin role");
     }
-    target.role = body.role;
+    const nextRole = body.role;
+    if (nextRole === ROLES.INSTRUCTOR && target.role !== ROLES.INSTRUCTOR && !instructorHasNonEmptyBatches(target)) {
+      return sendError(
+        res,
+        400,
+        "BATCHES_REQUIRED",
+        "Assign at least one program batch on the full profile before changing this account to instructor."
+      );
+    }
+    target.role = nextRole;
   }
 
   if (body.email !== undefined) {
@@ -375,6 +410,10 @@ async function updateMyProfile(req, res) {
   if (body.expertise_area !== undefined) doc.expertise_area = body.expertise_area.trim();
   if (body.availability !== undefined) doc.availability = body.availability.trim();
 
+  if (doc.role === ROLES.INSTRUCTOR && !instructorHasNonEmptyBatches(doc)) {
+    return sendInstructorBatchesRequired(res);
+  }
+
   await syncCompletion(doc);
   emitEventNotification({
     audience: "individual",
@@ -461,6 +500,11 @@ async function adminOverrideProfile(req, res) {
   if (body.account_status !== undefined) doc.is_active = body.account_status === "active";
 
   doc.last_updated_by_admin = req.staff.sub;
+
+  if (doc.role === ROLES.INSTRUCTOR && !instructorHasNonEmptyBatches(doc)) {
+    return sendInstructorBatchesRequired(res);
+  }
+
   await syncCompletion(doc);
 
   const nextBatches = JSON.stringify(doc.batches_assigned || []);
@@ -668,6 +712,10 @@ async function bulkUpdateProfiles(req, res) {
     if (patch.account_status !== undefined) {
       doc.account_status = patch.account_status;
       doc.is_active = patch.account_status === "active";
+    }
+    if (doc.role === ROLES.INSTRUCTOR && !instructorHasNonEmptyBatches(doc)) {
+      results.push({ id: String(doc._id), error: "BATCHES_REQUIRED", skipped: true });
+      continue;
     }
     doc.last_updated_by_admin = req.staff.sub;
     await syncCompletion(doc);

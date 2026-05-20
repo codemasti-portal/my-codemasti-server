@@ -2,10 +2,23 @@ const { z } = require("zod");
 const mongoose = require("mongoose");
 const { sendSuccess, sendError } = require("../utils/response");
 const Announcement = require("../models/Announcement");
+const {
+  announcementCreatorFields,
+  postedByStaffRoleLabel,
+  postedByStudentLabel,
+} = require("../utils/announcementAuthor");
 const Note = require("../models/Note");
 const Student = require("../models/Student");
 const Notification = require("../models/Notification");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const {
+  getInstructorAssignedBatchIds,
+  announcementFilterForInstructorBatches,
+  announcementVisibleToInstructor,
+  announcementIsBatchScopedToAllowed,
+  noteVisibleToInstructorFilter,
+  noteMatchesInstructorScope,
+} = require("../utils/instructorBatchScope");
 
 const INSERT_CHUNK = 500;
 
@@ -139,9 +152,50 @@ async function fanoutAnnouncementNotification(annDoc) {
   }
 }
 
+function normCatalogBatchId(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+/** @returns {{ isInstructor: boolean, allowed: string[] }} */
+async function instructorAnnouncementContext(req) {
+  const allowed = await getInstructorAssignedBatchIds(req);
+  return { isInstructor: allowed !== null, allowed: allowed || [] };
+}
+
+function assertInstructorHasAssignments(res, ctx) {
+  if (!ctx.isInstructor) return true;
+  if (ctx.allowed.length) return true;
+  sendError(res, 403, "FORBIDDEN", "No programs assigned to your instructor profile");
+  return false;
+}
+
+function assertInstructorBatchTarget(res, ctx, batchId) {
+  if (!ctx.isInstructor) return true;
+  const bid = normCatalogBatchId(batchId);
+  if (bid && ctx.allowed.includes(bid)) return true;
+  sendError(res, 403, "FORBIDDEN", "Announcement must target one of your assigned programs");
+  return false;
+}
+
+function assertInstructorCanMutateDoc(res, ctx, doc) {
+  if (!ctx.isInstructor) return true;
+  if (!doc) return true;
+  if (doc.scope === "global") {
+    sendError(res, 403, "FORBIDDEN", "Instructors cannot change institute-wide announcements");
+    return false;
+  }
+  if (!announcementIsBatchScopedToAllowed(doc, ctx.allowed)) {
+    sendError(res, 403, "FORBIDDEN", "Announcement is not in one of your assigned programs");
+    return false;
+  }
+  return true;
+}
+
 function mapAnnouncementDoc(a) {
   const t = a.date ? new Date(a.date).getTime() : NaN;
   const is_scheduled = Number.isFinite(t) && t > Date.now();
+  const role = String(a.created_by_role || "").trim().toLowerCase();
+  const name = String(a.created_by_name || "").trim();
   return {
     id: String(a._id),
     title: a.title,
@@ -152,6 +206,11 @@ function mapAnnouncementDoc(a) {
     section_ids: Array.isArray(a.section_ids) ? a.section_ids : [],
     date: a.date,
     is_scheduled,
+    created_by_staff_id: a.created_by_staff_id ? String(a.created_by_staff_id) : "",
+    created_by_name: name,
+    created_by_role: role,
+    posted_by_role_label: postedByStaffRoleLabel(role),
+    posted_by_student_label: postedByStudentLabel(role),
   };
 }
 
@@ -173,6 +232,19 @@ async function listAnnouncements(req, res) {
       : { batch_id: batchIdFilter };
   }
 
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (batchIdFilter && !instructorBatches.includes(batchIdFilter) && !includeGlobal) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    const instScope = announcementFilterForInstructorBatches(instructorBatches);
+    mongoFilter =
+      mongoFilter && Object.keys(mongoFilter).length > 0 ? { $and: [mongoFilter, instScope] } : instScope;
+  }
+
   const [items, total] = await Promise.all([
     Announcement.find(mongoFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
     Announcement.countDocuments(mongoFilter),
@@ -185,10 +257,19 @@ async function listAnnouncements(req, res) {
 async function getAnnouncement(req, res) {
   const doc = await Announcement.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Announcement not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length || !announcementVisibleToInstructor(doc, instructorBatches)) {
+      return sendError(res, 403, "FORBIDDEN", "Announcement is not visible for your assigned batches");
+    }
+  }
   return sendSuccess(res, mapAnnouncementDoc(doc));
 }
 
 async function createAnnouncement(req, res) {
+  const ctx = await instructorAnnouncementContext(req);
+  if (!assertInstructorHasAssignments(res, ctx)) return;
+
   const batchTargetSchema = z.object({
     batch: z.string().min(1).trim(),
     batch_id: z.string().optional().default(""),
@@ -215,10 +296,12 @@ async function createAnnouncement(req, res) {
 
   const raw = req.body || {};
   let createdDocs = [];
+  const creator = await announcementCreatorFields(req);
 
   if (raw.audience === "batches" && Array.isArray(raw.batches)) {
     const body = multiSchema.parse(raw);
     for (const t of body.batches) {
+      if (!assertInstructorBatchTarget(res, ctx, t.batch_id)) return;
       const section_ids = (t.section_ids || []).map(normSectionId).filter(Boolean);
       const doc = await Announcement.create({
         title: body.title,
@@ -228,6 +311,7 @@ async function createAnnouncement(req, res) {
         batch_id: String(t.batch_id || "").trim(),
         section_ids,
         date: body.date || new Date(),
+        ...creator,
       });
       createdDocs.push(doc);
       await fanoutAnnouncementNotification(doc.toObject ? doc.toObject() : doc);
@@ -243,6 +327,9 @@ async function createAnnouncement(req, res) {
   }
 
   if (raw.audience === "global") {
+    if (ctx.isInstructor) {
+      return sendError(res, 403, "FORBIDDEN", "Instructors cannot create institute-wide announcements");
+    }
     const title = String(raw.title || "").trim();
     const description = String(raw.description || "").trim();
     if (title.length < 2 || !description) {
@@ -256,12 +343,19 @@ async function createAnnouncement(req, res) {
       batch_id: "",
       section_ids: [],
       date: raw.date ? new Date(raw.date) : new Date(),
+      ...creator,
     });
     await fanoutAnnouncementNotification(created.toObject ? created.toObject() : created);
     return sendSuccess(res, mapAnnouncementDoc(created.toObject()), "Announcement created");
   }
 
   const body = legacySchema.parse(raw);
+  if (ctx.isInstructor) {
+    if (body.scope === "global") {
+      return sendError(res, 403, "FORBIDDEN", "Instructors cannot create institute-wide announcements");
+    }
+    if (!assertInstructorBatchTarget(res, ctx, body.batch_id)) return;
+  }
   if (body.scope === "batch" && !body.batch?.trim()) {
     return sendError(res, 400, "VALIDATION_ERROR", "batch is required when scope is batch");
   }
@@ -274,12 +368,16 @@ async function createAnnouncement(req, res) {
     batch_id: body.scope === "batch" ? String(body.batch_id || "").trim() : "",
     section_ids: body.scope === "batch" ? section_ids : [],
     date: body.date || new Date(),
+    ...creator,
   });
   await fanoutAnnouncementNotification(created.toObject ? created.toObject() : created);
   return sendSuccess(res, mapAnnouncementDoc(created.toObject()), "Announcement created");
 }
 
 async function updateAnnouncement(req, res) {
+  const ctx = await instructorAnnouncementContext(req);
+  if (!assertInstructorHasAssignments(res, ctx)) return;
+
   const schema = z.object({
     title: z.string().min(2).trim().optional(),
     description: z.string().min(1).trim().optional(),
@@ -292,6 +390,20 @@ async function updateAnnouncement(req, res) {
   const body = schema.parse(req.body);
   const doc = await Announcement.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Announcement not found");
+  if (!assertInstructorCanMutateDoc(res, ctx, doc)) return;
+
+  if (ctx.isInstructor) {
+    if (body.scope === "global") {
+      return sendError(res, 403, "FORBIDDEN", "Instructors cannot set institute-wide scope");
+    }
+    if (body.batch_id !== undefined && !assertInstructorBatchTarget(res, ctx, body.batch_id)) return;
+    const nextScope = body.scope !== undefined ? body.scope : doc.scope;
+    const nextBatchId = body.batch_id !== undefined ? body.batch_id : doc.batch_id;
+    if (nextScope === "global") {
+      return sendError(res, 403, "FORBIDDEN", "Instructors cannot set institute-wide scope");
+    }
+    if (!assertInstructorBatchTarget(res, ctx, nextBatchId)) return;
+  }
 
   if (body.title !== undefined) doc.title = body.title;
   if (body.description !== undefined) doc.description = body.description;
@@ -310,6 +422,13 @@ async function updateAnnouncement(req, res) {
 }
 
 async function deleteAnnouncement(req, res) {
+  const ctx = await instructorAnnouncementContext(req);
+  if (!assertInstructorHasAssignments(res, ctx)) return;
+
+  const doc = await Announcement.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Announcement not found");
+  if (!assertInstructorCanMutateDoc(res, ctx, doc)) return;
+
   const r = await Announcement.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Announcement not found");
   return sendSuccess(res, { id: req.params.id }, "Announcement deleted");
@@ -354,7 +473,15 @@ async function listNotes(req, res) {
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
   const skip = (page - 1) * limit;
-  const filter = buildNotesListFilter(req.query);
+  let filter = buildNotesListFilter(req.query);
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    const inst = noteVisibleToInstructorFilter(instructorBatches);
+    filter = filter && Object.keys(filter).length > 0 ? { $and: [filter, inst] } : inst;
+  }
   const [items, total] = await Promise.all([
     Note.find(filter).sort({ updated_date: -1 }).skip(skip).limit(limit).lean(),
     Note.countDocuments(filter),
@@ -381,6 +508,12 @@ async function listNotes(req, res) {
 async function getNote(req, res) {
   const doc = await Note.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Note not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length || !noteMatchesInstructorScope(doc, instructorBatches)) {
+      return sendError(res, 403, "FORBIDDEN", "Note is not visible for your assigned batches");
+    }
+  }
   return sendSuccess(res, {
     id: String(doc._id),
     subject: doc.subject,

@@ -28,6 +28,11 @@ const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFil
 const googleMeetCal = require("../services/google-calendar-meet.service");
 const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
 const { ROLES } = require("../utils/rbac");
+const {
+  getInstructorAssignedBatchIds,
+  assignmentDocTouchesAllowedBatches,
+  arenaDocTouchesAllowedBatches,
+} = require("../utils/instructorBatchScope");
 
 const starterCodeSchema = z
   .object({
@@ -218,6 +223,18 @@ async function listAssignments(req, res) {
   const batchClause = batchNorm ? assignmentMatchesCatalogBatchId(batchNorm) : null;
   if (batchClause) clauses.push(batchClause);
 
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (batchNorm && !instructorBatches.includes(batchNorm)) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    const ors = instructorBatches.map((bid) => assignmentMatchesCatalogBatchId(bid)).filter(Boolean);
+    if (ors.length) clauses.push({ $or: ors });
+  }
+
   const filter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
 
   const [items, total] = await Promise.all([
@@ -235,6 +252,10 @@ async function listAssignments(req, res) {
 async function getAssignment(req, res) {
   const doc = await Assignment.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 
@@ -260,6 +281,13 @@ async function createAssignment(req, res) {
     });
   const body = schema.parse(req.body);
   
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+    }
+  }
+
   // Support both batch_ids (array) and batch_id (legacy single)
   let batchIds = body.batch_ids && body.batch_ids.length > 0 ? body.batch_ids : [];
   if (!batchIds.length && body.batch_id) {
@@ -267,6 +295,16 @@ async function createAssignment(req, res) {
   }
   if (!batchIds.length) {
     return sendError(res, 400, "BATCH_REQUIRED", "At least one batch must be selected.");
+  }
+
+  if (instructorBatches !== null) {
+    const allow = new Set(instructorBatches);
+    for (const batchId of batchIds) {
+      const norm = String(batchId || "").trim().toLowerCase();
+      if (!allow.has(norm)) {
+        return sendError(res, 403, "FORBIDDEN", "You can only create assignments for your assigned batches");
+      }
+    }
   }
 
   // Create one assignment record per batch
@@ -358,6 +396,30 @@ async function updateAssignment(req, res) {
   const body = schema.parse(req.body);
   const doc = await Assignment.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+    }
+    if (!assignmentDocTouchesAllowedBatches(doc, instructorBatches)) {
+      return sendError(res, 403, "FORBIDDEN", "You can only update assignments for your assigned batches");
+    }
+    if (body.batch_ids !== undefined && body.batch_ids.length > 0) {
+      const allow = new Set(instructorBatches);
+      for (const x of body.batch_ids) {
+        const norm = String(x || "").trim().toLowerCase();
+        if (!allow.has(norm)) {
+          return sendError(res, 403, "FORBIDDEN", "You can only assign to your assigned batches");
+        }
+      }
+    } else if (body.batch_id !== undefined && body.batch_id) {
+      const norm = String(body.batch_id).trim().toLowerCase();
+      if (!instructorBatches.includes(norm)) {
+        return sendError(res, 403, "FORBIDDEN", "You can only assign to your assigned batches");
+      }
+    }
+  }
   
   // Handle batch_ids array (for future multi-batch support) — keep batch_id + batch_ids in sync
   if (body.batch_ids !== undefined && body.batch_ids.length > 0) {
@@ -396,6 +458,10 @@ async function deleteAssignment(req, res) {
   const id = req.params.id;
   const a = await Assignment.findById(id);
   if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "You can only delete assignments for your assigned batches");
+  }
   const qRows = await AssignmentQuestion.find({ assignment_id: id }).select("_id").lean();
   const qIds = qRows.map((r) => r._id);
   await AssignmentSubmission.deleteMany({ question_id: { $in: qIds } });
@@ -409,6 +475,10 @@ async function listAssignmentQuestions(req, res) {
   const { assignmentId } = req.params;
   const a = await Assignment.findById(assignmentId).lean();
   if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   const items = await AssignmentQuestion.find({ assignment_id: assignmentId }).sort({ name: 1 }).lean();
   return sendSuccess(
     res,
@@ -457,6 +527,10 @@ async function createAssignmentQuestion(req, res) {
   const { assignmentId } = req.params;
   const a = await Assignment.findById(assignmentId);
   if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   const body = questionBodySchema.parse(req.body);
   const computedName = slugifyQuestionName(body.name || body.title);
   const created = await AssignmentQuestion.create({
@@ -471,6 +545,12 @@ async function createAssignmentQuestion(req, res) {
 
 async function getAssignmentQuestion(req, res) {
   const { assignmentId, questionId } = req.params;
+  const a = await Assignment.findById(assignmentId).lean();
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId }).lean();
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
   return sendSuccess(res, { id: String(q._id), ...q, assignment_id: String(q.assignment_id) });
@@ -479,6 +559,12 @@ async function getAssignmentQuestion(req, res) {
 async function updateAssignmentQuestion(req, res) {
   const { assignmentId, questionId } = req.params;
   const body = questionBodySchema.partial().parse(req.body);
+  const a = await Assignment.findById(assignmentId).lean();
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
   const { starter_code: starterPatch, ...rest } = body;
@@ -493,6 +579,12 @@ async function updateAssignmentQuestion(req, res) {
 
 async function deleteAssignmentQuestion(req, res) {
   const { assignmentId, questionId } = req.params;
+  const a = await Assignment.findById(assignmentId).lean();
+  if (!a) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(a, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
   const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
   await AssignmentSubmission.deleteMany({ question_id: questionId });
@@ -514,10 +606,35 @@ async function listArenaQuestions(req, res) {
         ],
       }
     : {};
-  
+
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  let mergedFilter = filter;
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(
+        res,
+        [],
+        "",
+        { page, limit, total: 0 }
+      );
+    }
+    if (batch_id && !instructorBatches.includes(batch_id)) {
+      return sendSuccess(
+        res,
+        [],
+        "",
+        { page, limit, total: 0 }
+      );
+    }
+    const scopeOr = {
+      $or: [{ batch_id: { $in: instructorBatches } }, { batch_ids: { $in: instructorBatches } }],
+    };
+    mergedFilter = Object.keys(filter).length ? { $and: [filter, scopeOr] } : scopeOr;
+  }
+
   const [items, total] = await Promise.all([
-    ArenaQuestion.find(filter).sort({ number: 1 }).skip(skip).limit(limit).lean(),
-    ArenaQuestion.countDocuments(filter),
+    ArenaQuestion.find(mergedFilter).sort({ number: 1 }).skip(skip).limit(limit).lean(),
+    ArenaQuestion.countDocuments(mergedFilter),
   ]);
   return sendSuccess(
     res,
@@ -564,6 +681,10 @@ const arenaBodySchema = z.object({
 async function getArenaQuestion(req, res) {
   const doc = await ArenaQuestion.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !arenaDocTouchesAllowedBatches(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Arena question is not for your assigned batches");
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 
@@ -577,6 +698,20 @@ async function createArenaQuestion(req, res) {
     
     if (!hasBatchId && !hasBatchIds) {
       return sendError(res, 400, "VALIDATION_ERROR", "batch_id or batch_ids is required");
+    }
+
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    if (instructorBatches !== null) {
+      if (!instructorBatches.length) {
+        return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+      }
+      const targets = hasBatchIds ? body.batch_ids : [body.batch_id];
+      const allow = new Set(instructorBatches);
+      for (const t of targets) {
+        if (!allow.has(String(t || "").trim().toLowerCase())) {
+          return sendError(res, 403, "FORBIDDEN", "You can only create arena content for your assigned batches");
+        }
+      }
     }
     
     const created = await ArenaQuestion.create({
@@ -602,6 +737,29 @@ async function updateArenaQuestion(req, res) {
     const body = arenaBodySchema.partial().parse(req.body);
     const doc = await ArenaQuestion.findById(req.params.id);
     if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    if (instructorBatches !== null) {
+      if (!instructorBatches.length) {
+        return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+      }
+      if (!arenaDocTouchesAllowedBatches(doc, instructorBatches)) {
+        return sendError(res, 403, "FORBIDDEN", "Arena question is not for your assigned batches");
+      }
+      if (body.batch_id !== undefined && String(body.batch_id || "").trim()) {
+        const nb = String(body.batch_id).trim().toLowerCase();
+        if (!instructorBatches.includes(nb)) {
+          return sendError(res, 403, "FORBIDDEN", "You can only assign to your assigned batches");
+        }
+      }
+      if (body.batch_ids !== undefined && Array.isArray(body.batch_ids) && body.batch_ids.length > 0) {
+        const allow = new Set(instructorBatches);
+        for (const x of body.batch_ids) {
+          if (!allow.has(String(x || "").trim().toLowerCase())) {
+            return sendError(res, 403, "FORBIDDEN", "You can only assign to your assigned batches");
+          }
+        }
+      }
+    }
     Object.assign(doc, body);
     await doc.save();
     return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
@@ -621,6 +779,10 @@ async function deleteArenaQuestion(req, res) {
   const id = req.params.id;
   const doc = await ArenaQuestion.findById(id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Arena question not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !arenaDocTouchesAllowedBatches(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Arena question is not for your assigned batches");
+  }
   await ArenaSubmission.deleteMany({ question_id: id });
   await ArenaQuestion.deleteOne({ _id: id });
   return sendSuccess(res, { id }, "Deleted");
@@ -629,12 +791,23 @@ async function deleteArenaQuestion(req, res) {
 /** —— Live classes —— */
 async function listLiveClasses(req, res) {
   const { page, limit, skip } = paginate(req);
-  const batch_id = String(req.query.batch_id || "").trim();
-  const filter = batch_id ? { batch_id } : {};
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendSuccess(res, [], "", { page, limit, total: 0 });
-    filter.instructor = new RegExp(`^${escapeRegex(ownName)}$`, "i");
+  const batch_id_q = String(req.query.batch_id || "").trim().toLowerCase();
+  const filter = {};
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (batch_id_q) {
+      if (!instructorBatches.includes(batch_id_q)) {
+        return sendSuccess(res, [], "", { page, limit, total: 0 });
+      }
+      filter.batch_id = batch_id_q;
+    } else {
+      filter.batch_id = { $in: instructorBatches };
+    }
+  } else if (batch_id_q) {
+    filter.batch_id = batch_id_q;
   }
   const [items, total] = await Promise.all([
     LiveClass.find(filter).sort({ date: 1, start_time: 1 }).skip(skip).limit(limit).lean(),
@@ -651,10 +824,11 @@ async function listLiveClasses(req, res) {
 async function getLiveClass(req, res) {
   const doc = await LiveClass.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName || String(doc.instructor || "").trim().toLowerCase() !== ownName.toLowerCase()) {
-      return sendError(res, 403, "FORBIDDEN", "You can access only your own classes");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    const bid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!bid || !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "Live class is not for your assigned batches");
     }
   }
   return sendSuccess(res, { id: String(doc._id), ...doc });
@@ -677,6 +851,14 @@ async function createLiveClass(req, res) {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
     body.instructor = ownName;
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const bid = String(body.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length) {
+      return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+    }
+    if (!instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "Live class must be in one of your assigned batches");
+    }
   }
   const created = await LiveClass.create(body);
   return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
@@ -699,8 +881,17 @@ async function updateLiveClass(req, res) {
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
-    if (!ownName || String(doc.instructor || "").trim().toLowerCase() !== ownName.toLowerCase()) {
-      return sendError(res, 403, "FORBIDDEN", "You can update only your own classes");
+    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const curBid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length || !curBid || !instructorBatches.includes(curBid)) {
+      return sendError(res, 403, "FORBIDDEN", "You can only update classes in your assigned batches");
+    }
+    if (body.batch_id !== undefined && body.batch_id) {
+      const nb = String(body.batch_id).trim().toLowerCase();
+      if (!instructorBatches.includes(nb)) {
+        return sendError(res, 403, "FORBIDDEN", "You can only move classes within your assigned batches");
+      }
     }
     body.instructor = ownName;
   }
@@ -710,14 +901,14 @@ async function updateLiveClass(req, res) {
 }
 
 async function deleteLiveClass(req, res) {
+  const doc = await LiveClass.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
   if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
-    const mine = await LiveClass.findOne({
-      _id: req.params.id,
-      instructor: new RegExp(`^${escapeRegex(ownName)}$`, "i"),
-    }).lean();
-    if (!mine) return sendError(res, 403, "FORBIDDEN", "You can delete only your own classes");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const bid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length || !bid || !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "You can only delete classes in your assigned batches");
+    }
   }
   const r = await LiveClass.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Live class not found");
@@ -730,14 +921,28 @@ async function listTimetableSlots(req, res) {
   const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
   const section_id = String(req.query.section_id || "").trim().toLowerCase();
   const month = Number(req.query.month || 0);
-  const year = Number(req.query.year || 0);
-  const filter = {};
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendSuccess(res, [], "", { page, limit, total: 0 });
-    filter.teacher = new RegExp(`^${escapeRegex(ownName)}$`, "i");
+  let year = Number(req.query.year || 0);
+  // Month filter uses class_date (YYYY-MM-DD). If month is set without a valid year, default to current year.
+  if (month >= 1 && month <= 12 && !(year >= 1900 && year <= 9999)) {
+    year = new Date().getFullYear();
   }
-  if (batch_id) filter.batch_id = batch_id;
+  const filter = {};
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (batch_id) {
+      if (!instructorBatches.includes(batch_id)) {
+        return sendSuccess(res, [], "", { page, limit, total: 0 });
+      }
+      filter.batch_id = batch_id;
+    } else {
+      filter.batch_id = { $in: instructorBatches };
+    }
+  } else if (batch_id) {
+    filter.batch_id = batch_id;
+  }
   if (batch_id && section_id) {
     filter.$or = [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: section_id }];
   }
@@ -764,10 +969,11 @@ async function listTimetableSlots(req, res) {
 async function getTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
-      return sendError(res, 403, "FORBIDDEN", "You can access only your own timetable slots");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    const bid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches.length || !bid || !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "Timetable slot is not for your assigned batches");
     }
   }
   return sendSuccess(res, { id: String(doc._id), ...doc });
@@ -794,6 +1000,11 @@ async function createTimetableSlot(req, res) {
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const bid = String(body.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length || !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "Timetable slot must be in one of your assigned batches");
+    }
     body.teacher = ownName;
   }
   const derivedDay = weekdayFromDateString(body.class_date);
@@ -878,8 +1089,17 @@ async function updateTimetableSlot(req, res) {
   const prevNotes = String(doc.notes_link || "").trim();
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
-    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
-      return sendError(res, 403, "FORBIDDEN", "You can update only your own timetable slots");
+    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const curBid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length || !curBid || !instructorBatches.includes(curBid)) {
+      return sendError(res, 403, "FORBIDDEN", "You can only update slots in your assigned batches");
+    }
+    if (body.batch_id !== undefined && body.batch_id) {
+      const nb = String(body.batch_id).trim().toLowerCase();
+      if (!instructorBatches.includes(nb)) {
+        return sendError(res, 403, "FORBIDDEN", "You can only move slots within your assigned batches");
+      }
     }
     body.teacher = ownName;
   }
@@ -974,9 +1194,10 @@ async function deleteTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
   if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName || String(doc.teacher || "").trim().toLowerCase() !== ownName.toLowerCase()) {
-      return sendError(res, 403, "FORBIDDEN", "You can delete only your own timetable slots");
+    const instructorBatches = await getInstructorAssignedBatchIds(req);
+    const bid = String(doc.batch_id || "").trim().toLowerCase();
+    if (!instructorBatches?.length || !bid || !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "You can only delete slots in your assigned batches");
     }
   }
   const r = await TimetableSlot.deleteOne({ _id: req.params.id });
@@ -988,9 +1209,22 @@ async function deleteTimetableSlot(req, res) {
 /** —— Timetable events —— */
 async function listTimetableEvents(req, res) {
   const { page, limit, skip } = paginate(req);
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  const evFilter =
+    instructorBatches !== null
+      ? !instructorBatches.length
+        ? { _id: null }
+        : {
+            $or: [
+              { batch_id: { $in: instructorBatches } },
+              { batch_id: "" },
+              { batch_id: { $exists: false } },
+            ],
+          }
+      : {};
   const [items, total] = await Promise.all([
-    TimetableEvent.find({}).sort({ date: -1 }).skip(skip).limit(limit).lean(),
-    TimetableEvent.countDocuments({}),
+    TimetableEvent.find(evFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
+    TimetableEvent.countDocuments(evFilter),
   ]);
   return sendSuccess(
     res,
@@ -1003,6 +1237,15 @@ async function listTimetableEvents(req, res) {
 async function getTimetableEvent(req, res) {
   const doc = await TimetableEvent.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Event not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && instructorBatches.length) {
+    const bid = String(doc.batch_id || "").trim().toLowerCase();
+    if (bid && !instructorBatches.includes(bid)) {
+      return sendError(res, 403, "FORBIDDEN", "Event is not for your assigned batches");
+    }
+  } else if (instructorBatches !== null && !instructorBatches.length) {
+    return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 

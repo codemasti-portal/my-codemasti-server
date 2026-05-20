@@ -42,7 +42,14 @@ app.use(
     crossOriginResourcePolicy: { policy: "cross-origin" },
   })
 );
-app.use(morgan("dev"));
+app.use(
+  morgan("dev", {
+    skip(req) {
+      const path = req.originalUrl || req.url || "";
+      return path.includes("/staff/panel-notifications/me/unread-count");
+    },
+  })
+);
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());

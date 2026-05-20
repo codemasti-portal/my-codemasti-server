@@ -35,7 +35,7 @@ const ROLE_PERMISSIONS = {
     "live_classes:create",
     "doubt_sessions:schedule",
     "assignments:upload",
-    "course:manage",
+    "batch_catalog:list",
     "students:view_course",
     "dashboard:view",
   ],

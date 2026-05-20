@@ -2,6 +2,10 @@
 
 Backend scaffold for the CodeMasti frontend handoff contract.
 
+## Cross-repo docs
+
+- [Announcements — instructor phases](../docs/ANNOUNCEMENTS_INSTRUCTOR_PHASES.md) — phased API/UI work (instructor batch-scoped publish, student visibility)
+
 ## Tech Stack
 
 - Node.js + Express
