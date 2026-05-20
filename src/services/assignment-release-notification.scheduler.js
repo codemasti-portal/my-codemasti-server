@@ -12,7 +12,8 @@ async function backfillReleaseNotificationFlag() {
         release_date: { $lte: now },
         $or: [{ release_notification_sent_at: { $exists: false } }, { release_notification_sent_at: null }],
       },
-      [{ $set: { release_notification_sent_at: "$release_date" } }]
+      [{ $set: { release_notification_sent_at: "$release_date" } }],
+      { updatePipeline: true }
     );
     if (r.modifiedCount > 0) {
       console.log("[ASSIGNMENT_NOTIFY_BACKFILL]", { modifiedCount: r.modifiedCount });
@@ -23,6 +24,7 @@ async function backfillReleaseNotificationFlag() {
 }
 
 async function runTick() {
+  const now = new Date();
   const candidates = await Assignment.find({
     release_date: { $lte: now },
     release_notification_sent_at: null,

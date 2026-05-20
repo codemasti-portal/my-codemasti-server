@@ -28,6 +28,10 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+const verifyMyPasswordSchema = z.object({
+  password: z.string().min(1),
+});
+
 const verifyOtpOnlySchema = z.object({
   otp: z.string().length(6),
   otp_request_id: z.string(),
@@ -452,6 +456,28 @@ async function me(req, res) {
   });
 }
 
+/** Re-enter login password before sensitive admin actions (client-side gate). */
+async function verifyMyPassword(req, res) {
+  const body = verifyMyPasswordSchema.parse(req.body);
+  const staffDoc = await Staff.findById(req.staff.sub);
+  if (!staffDoc || !staffDoc.is_active) {
+    return sendError(res, 404, "STAFF_NOT_FOUND", "Staff not found");
+  }
+  if (!staffDoc.password_set_by_user || !String(staffDoc.password_hash || "").trim()) {
+    return sendError(
+      res,
+      400,
+      "PASSWORD_NOT_SET",
+      "Set your login password in Profile before confirming sensitive actions."
+    );
+  }
+  const ok = bcrypt.compareSync(body.password, staffDoc.password_hash);
+  if (!ok) {
+    return sendError(res, 401, "INVALID_PASSWORD", "Incorrect password.");
+  }
+  return sendSuccess(res, { verified: true }, "Password verified");
+}
+
 module.exports = {
   sendOtp,
   sendForgotPasswordOtp,
@@ -467,4 +493,5 @@ module.exports = {
   refreshToken,
   logout,
   me,
+  verifyMyPassword,
 };

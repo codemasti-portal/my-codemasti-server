@@ -6,6 +6,7 @@ const Assignment = require("../models/Assignment");
 const { assignmentVisibleToCatalogBatchCountFilter } = require("../utils/assignmentBatchFilter");
 const { DEFAULT_BATCHES, DEFAULT_SECTIONS_BY_BATCH } = require("../constants/batchDefaults");
 const { catalogBatchMongoMatch, augmentStudentCatalogFieldsFromEnrollment, catalogBatchStudentFilter } = require("../utils/enrollment");
+const { getInstructorAssignedBatchIds } = require("../utils/instructorBatchScope");
 
 function normCatalogSectionId(s) {
   return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "-");
@@ -100,7 +101,14 @@ function serialize(doc) {
 
 async function list(req, res) {
   await ensureDefaultBatches();
-  const rows = await BatchCatalog.find({}).sort({ order: 1, name: 1 }).lean();
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  const batchQuery =
+    instructorBatches !== null
+      ? instructorBatches.length
+        ? { batch_id: { $in: instructorBatches } }
+        : { _id: null }
+      : {};
+  const rows = await BatchCatalog.find(batchQuery).sort({ order: 1, name: 1 }).lean();
   const out = await Promise.all(
     rows.map(async (r) => {
       const base = serialize(r);

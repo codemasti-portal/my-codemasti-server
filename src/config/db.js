@@ -1,8 +1,10 @@
 const mongoose = require("mongoose");
 
 async function connectDb() {
-  const uri = process.env.MONGODB_URI;
-  if (!uri) {
+  const main = (process.env.MONGODB_URI || "").trim();
+  const direct = (process.env.MONGODB_URI_DIRECT || "").trim();
+
+  if (!main) {
     const err = new Error("MONGODB_URI is missing in environment");
     console.error("[ERROR]", JSON.stringify({ context: "DB_CONFIG", message: err.message }));
     throw err;
@@ -16,46 +18,47 @@ async function connectDb() {
     },
   };
 
-  try {
-    await mongoose.connect(uri, mongooseOptions);
-    await mongoose.connection.db.command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-    return;
-  } catch (error) {
-    console.error(
-      "[ERROR]",
-      JSON.stringify({
-        context: "DB_CONNECT_PRIMARY",
-        message: error.message,
-        name: error.name,
-      })
-    );
-    if (error.stack) console.error(error.stack);
-    const isSrvDnsError = String(error.message || "").includes("querySrv");
-    const directUri = process.env.MONGODB_URI_DIRECT;
+  /** Prefer direct host list first when SRV DNS is flaky locally (avoids failed querySrv + noisy ERROR). */
+  const urisToTry = [];
+  if (direct && direct !== main) {
+    urisToTry.push({ uri: direct, label: "MONGODB_URI_DIRECT" });
+  }
+  urisToTry.push({ uri: main, label: "MONGODB_URI" });
 
-    if (!isSrvDnsError || !directUri) {
-      throw error;
-    }
+  let lastError = null;
 
-    console.warn("SRV DNS resolution failed. Retrying with MONGODB_URI_DIRECT...");
+  for (let i = 0; i < urisToTry.length; i++) {
+    const { uri, label } = urisToTry[i];
     try {
-      await mongoose.connect(directUri, mongooseOptions);
+      await mongoose.connect(uri, mongooseOptions);
       await mongoose.connection.db.command({ ping: 1 });
-      console.log("MongoDB connected using direct URI fallback.");
-    } catch (fallbackError) {
-      console.error(
-        "[ERROR]",
-        JSON.stringify({
-          context: "DB_CONNECT_FALLBACK",
-          message: fallbackError.message,
-          name: fallbackError.name,
-        })
-      );
-      if (fallbackError.stack) console.error(fallbackError.stack);
-      throw fallbackError;
+      if (i === 0) {
+        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+      } else {
+        console.log(`MongoDB connected using ${label} after an earlier URI attempt failed.`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      const hasNext = i < urisToTry.length - 1;
+      if (hasNext) {
+        console.warn(`[DB] ${label} failed (${error.message}); trying next URI…`);
+      } else {
+        console.error(
+          "[ERROR]",
+          JSON.stringify({
+            context: "DB_CONNECT_ALL_ATTEMPTS_FAILED",
+            message: error.message,
+            name: error.name,
+          })
+        );
+        if (error.stack) console.error(error.stack);
+        throw error;
+      }
     }
   }
+
+  throw lastError || new Error("MongoDB connection failed");
 }
 
 module.exports = { connectDb };

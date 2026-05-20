@@ -1,10 +1,11 @@
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
-const { catalogBatchMongoMatch } = require("../utils/enrollment");
+const { catalogBatchMongoMatch, studentsInCatalogBatchesFilter } = require("../utils/enrollment");
 const Student = require("../models/Student");
 const ScorecardEntry = require("../models/ScorecardEntry");
 const ScorecardTest = require("../models/ScorecardTest");
+const { getInstructorAssignedBatchIds, studentInAnyAssignedBatch } = require("../utils/instructorBatchScope");
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 const TEST_TYPE_ENUM = z.enum(ScorecardTest.SCORECARD_TEST_TYPES);
@@ -198,6 +199,16 @@ async function listEntries(req, res) {
   const query = parsed.data;
   if (!mongoose.Types.ObjectId.isValid(query.student_id)) {
     return sendError(res, 400, "INVALID_STUDENT", "Invalid student id");
+  }
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, []);
+    }
+    const st = await Student.findOne({ _id: query.student_id, role: "student" }).lean();
+    if (!st || !studentInAnyAssignedBatch(st, instructorBatches)) {
+      return sendError(res, 403, "FORBIDDEN", "Student is not in your assigned batches");
+    }
   }
   const rows = await ScorecardEntry.find({
     student_id: query.student_id,
@@ -450,15 +461,35 @@ async function listRecords(req, res) {
     match.assessment_period = query.assessment_period;
   }
 
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (match.batch_id) {
+      const b = String(match.batch_id).trim().toLowerCase();
+      if (!instructorBatches.includes(b)) {
+        return sendSuccess(res, [], "", { page, limit, total: 0 });
+      }
+    } else {
+      match.batch_id = { $in: instructorBatches };
+    }
+  }
+
   let studentIds = null;
   if (query.q?.trim()) {
     const rx = new RegExp(escapeRegex(query.q.trim()), "i");
-    const studs = await Student.find({
+    const nameFilter = {
       role: "student",
       $or: [{ name: rx }, { email: rx }, { enrollment_number: rx }, { cst_registration_id: rx }],
-    })
-      .select("_id")
-      .lean();
+    };
+    const studQuery =
+      instructorBatches !== null && instructorBatches.length
+        ? { $and: [nameFilter, { $or: studentsInCatalogBatchesFilter(instructorBatches).$or }] }
+        : instructorBatches !== null && !instructorBatches.length
+          ? { _id: null }
+          : nameFilter;
+    const studs = await Student.find(studQuery).select("_id").lean();
     studentIds = studs.map((s) => s._id);
     if (!studentIds.length) {
       return sendSuccess(res, [], "", { page, limit, total: 0 });
@@ -496,10 +527,31 @@ async function listRecords(req, res) {
 }
 
 async function scorecardSummary(req, res) {
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  let instMatch = null;
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      const activeOnly = await ScorecardTest.countDocuments({ is_active: true });
+      return sendSuccess(res, {
+        active_tests: activeOnly,
+        total_score_rows: 0,
+        avg_percentage: null,
+        rows_with_scholarship: 0,
+        by_batch: [],
+        by_exam_type: [],
+      });
+    }
+    instMatch = { batch_id: { $in: instructorBatches } };
+  }
+
+  const pre = instMatch ? [{ $match: instMatch }] : [];
+  const countFilter = instMatch || {};
+
   const [activeTests, totalRows, batchAgg, typeAgg, avgRow] = await Promise.all([
     ScorecardTest.countDocuments({ is_active: true }),
-    ScorecardEntry.countDocuments({}),
+    ScorecardEntry.countDocuments(countFilter),
     ScorecardEntry.aggregate([
+      ...pre,
       {
         $group: {
           _id: "$batch_id",
@@ -517,10 +569,12 @@ async function scorecardSummary(req, res) {
       },
     ]),
     ScorecardEntry.aggregate([
+      ...pre,
       { $match: { exam_type: { $nin: ["", null] } } },
       { $group: { _id: "$exam_type", c: { $sum: 1 } } },
     ]),
     ScorecardEntry.aggregate([
+      ...pre,
       {
         $group: {
           _id: null,

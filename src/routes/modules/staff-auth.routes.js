@@ -1,5 +1,6 @@
 const express = require("express");
-const { requireStaffAuth } = require("../../middlewares/staff.middleware");
+const { requireStaffAuth, requireStaffRoles } = require("../../middlewares/staff.middleware");
+const { ROLES } = require("../../utils/rbac");
 const controller = require("../../controllers/staff-auth.controller");
 
 const router = express.Router();
@@ -15,6 +16,12 @@ router.post("/password/reset", controller.resetPassword);
 router.post("/me/password/otp/send", requireStaffAuth, controller.sendMePasswordUpdateOtp);
 router.post("/me/password/otp/verify", requireStaffAuth, controller.verifyMePasswordUpdateOtp);
 router.post("/me/password/otp/update", requireStaffAuth, controller.updateMyPasswordWithOtp);
+router.post(
+  "/me/password/verify",
+  requireStaffAuth,
+  requireStaffRoles([ROLES.ADMIN, ROLES.SUPER_ADMIN]),
+  controller.verifyMyPassword
+);
 router.post("/refresh", controller.refreshToken);
 router.post("/logout", requireStaffAuth, controller.logout);
 router.get("/me", requireStaffAuth, controller.me);

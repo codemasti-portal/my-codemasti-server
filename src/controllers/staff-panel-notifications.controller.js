@@ -110,19 +110,36 @@ async function adminList(req, res) {
     StaffPanelNotification.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     StaffPanelNotification.countDocuments({}),
   ]);
-  const data = items.map((row) => ({
-    id: String(row._id),
-    title: row.title,
-    message: row.message,
-    category: row.category,
-    audience: row.audience,
-    target_roles: row.target_roles || [],
-    recipient_id: row.recipient_id ? String(row.recipient_id) : "",
-    source: row.source,
-    event_type: row.event_type || "",
-    created_by: row.created_by ? String(row.created_by) : "",
-    created_at: row.createdAt,
-  }));
+  const creatorIds = [
+    ...new Set(items.map((r) => String(r.created_by || "")).filter((id) => mongoose.isValidObjectId(id))),
+  ];
+  const creators = creatorIds.length
+    ? await Staff.find({ _id: { $in: creatorIds } })
+        .select("name role")
+        .lean()
+    : [];
+  const creatorById = new Map(creators.map((c) => [String(c._id), c]));
+
+  const data = items.map((row) => {
+    const cid = row.created_by ? String(row.created_by) : "";
+    const creator = cid ? creatorById.get(cid) : null;
+    const creatorName = String(creator?.name || "").trim();
+    return {
+      id: String(row._id),
+      title: row.title,
+      message: row.message,
+      category: row.category,
+      audience: row.audience,
+      target_roles: row.target_roles || [],
+      recipient_id: row.recipient_id ? String(row.recipient_id) : "",
+      source: row.source,
+      event_type: row.event_type || "",
+      created_by: cid,
+      created_by_name: creatorName || (row.source === "event" ? "System" : "—"),
+      created_by_role: String(creator?.role || "").trim(),
+      created_at: row.createdAt,
+    };
+  });
   return sendSuccess(res, data, "", { page, limit, total });
 }
 
