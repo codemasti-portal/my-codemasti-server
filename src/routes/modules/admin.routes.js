@@ -119,6 +119,7 @@ router.patch("/live-classes/:id", ...manageLiveClasses, catalog.updateLiveClass)
 router.delete("/live-classes/:id", ...manageLiveClasses, catalog.deleteLiveClass);
 
 router.get("/timetable/slots", ...readTimetable, catalog.listTimetableSlots);
+router.get("/timetable/schedule", ...readTimetable, catalog.listTimetableSchedule);
 router.get("/timetable/google-meet/status", ...manageTimetable, catalog.googleMeetCalendarStatus);
 router.post("/timetable/google-meet", ...manageTimetable, catalog.provisionTimetableGoogleMeet);
 router.post("/timetable/slots", ...manageTimetable, catalog.createTimetableSlot);

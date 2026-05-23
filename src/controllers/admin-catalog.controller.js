@@ -966,6 +966,57 @@ async function listTimetableSlots(req, res) {
   );
 }
 
+/** Week/month calendar: date-range slots. Instructors see only their own classes in assigned batches. */
+async function listTimetableSchedule(req, res) {
+  const schema = z.object({
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  });
+  const query = schema.parse(req.query);
+
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const fmt = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const now = new Date();
+  const fromDefault = new Date(now);
+  fromDefault.setDate(fromDefault.getDate() - 14);
+  const toDefault = new Date(now);
+  toDefault.setDate(toDefault.getDate() + 90);
+  const from = query.from || fmt(fromDefault);
+  const to = query.to || fmt(toDefault);
+
+  const filter = { class_date: { $gte: from, $lte: to } };
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+
+  if (req.staff?.role === "instructor") {
+    const ownName = await resolveStaffDisplayName(req);
+    if (!ownName) return sendSuccess(res, []);
+    if (!instructorBatches?.length) return sendSuccess(res, []);
+    filter.batch_id = { $in: instructorBatches };
+    filter.teacher = { $regex: new RegExp(`^${escapeRegex(ownName)}$`, "i") };
+  } else if (instructorBatches !== null) {
+    if (!instructorBatches.length) return sendSuccess(res, []);
+    filter.batch_id = { $in: instructorBatches };
+  }
+
+  const slots = await TimetableSlot.find(filter).sort({ class_date: 1, time: 1 }).lean();
+  const data = slots.map((slot) => ({
+    id: String(slot._id),
+    batch_id: slot.batch_id || "",
+    section_id: slot.section_id || "",
+    day: slot.day,
+    time: slot.time,
+    subject: slot.subject,
+    topic: slot.topic || "",
+    teacher: slot.teacher,
+    class_date: slot.class_date || "",
+    meet_link: slot.meet_link || "",
+    recording_link: slot.recording_link || "",
+    notes_link: slot.notes_link || "",
+    is_taken: Boolean(slot.is_taken),
+  }));
+  return sendSuccess(res, data);
+}
+
 async function getTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
@@ -1208,9 +1259,13 @@ async function deleteTimetableSlot(req, res) {
 
 /** —— Timetable events —— */
 async function listTimetableEvents(req, res) {
-  const { page, limit, skip } = paginate(req);
+  const fromStr = String(req.query.from || "").trim();
+  const toStr = String(req.query.to || "").trim();
+  const rangeMode =
+    /^\d{4}-\d{2}-\d{2}$/.test(fromStr) && /^\d{4}-\d{2}-\d{2}$/.test(toStr);
+
   const instructorBatches = await getInstructorAssignedBatchIds(req);
-  const evFilter =
+  const batchScopeFilter =
     instructorBatches !== null
       ? !instructorBatches.length
         ? { _id: null }
@@ -1222,9 +1277,19 @@ async function listTimetableEvents(req, res) {
             ],
           }
       : {};
+
+  if (rangeMode) {
+    const fromDate = new Date(`${fromStr}T00:00:00.000Z`);
+    const toDate = new Date(`${toStr}T23:59:59.999Z`);
+    const evFilter = { ...batchScopeFilter, date: { $gte: fromDate, $lte: toDate } };
+    const items = await TimetableEvent.find(evFilter).sort({ date: 1 }).limit(500).lean();
+    return sendSuccess(res, items.map((e) => ({ id: String(e._id), ...e })));
+  }
+
+  const { page, limit, skip } = paginate(req);
   const [items, total] = await Promise.all([
-    TimetableEvent.find(evFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
-    TimetableEvent.countDocuments(evFilter),
+    TimetableEvent.find(batchScopeFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
+    TimetableEvent.countDocuments(batchScopeFilter),
   ]);
   return sendSuccess(
     res,
@@ -1551,6 +1616,7 @@ module.exports = {
   updateLiveClass,
   deleteLiveClass,
   listTimetableSlots,
+  listTimetableSchedule,
   getTimetableSlot,
   createTimetableSlot,
   updateTimetableSlot,
