@@ -162,6 +162,9 @@ router.delete("/students/:id", ...adminOnly, controller.deleteStudent);
 router.get("/scorecard/entries", ...readScorecard, adminScorecard.listEntries);
 router.post("/scorecard/entries", ...adminOnly, adminScorecard.createEntry);
 router.post("/scorecard/entries/bulk", ...adminOnly, adminScorecard.bulkCreateEntries);
+router.get("/scorecard/spreadsheet-students", ...readScorecard, adminScorecard.spreadsheetStudents);
+router.post("/scorecard/entries/batch-save", ...adminOnly, adminScorecard.batchSaveEntries);
+router.post("/scorecard/entries/bulk-by-cst", ...adminOnly, adminScorecard.bulkCreateByCst);
 router.patch("/scorecard/entries/:id", ...adminOnly, adminScorecard.patchEntry);
 router.delete("/scorecard/entries/:id", ...adminOnly, adminScorecard.deleteEntry);
 router.get("/scorecard/records", ...readScorecard, adminScorecard.listRecords);
@@ -196,6 +199,7 @@ router.patch("/badge-definitions/:badgeCode", ...manageContent, adminBadgeDefini
 
 router.get("/todos", ...adminOnly, adminTodo.listTasks);
 router.post("/todos", ...adminOnly, adminTodo.createTask);
+router.patch("/todos/reorder", ...adminOnly, adminTodo.reorderTasks);
 router.patch("/todos/:id", ...adminOnly, adminTodo.updateTask);
 router.delete("/todos/:id", ...adminOnly, adminTodo.deleteTask);
 

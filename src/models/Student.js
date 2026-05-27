@@ -76,5 +76,6 @@ const studentSchema = new mongoose.Schema(
 
 // Prevent duplicates only when enrollment_number is provided.
 studentSchema.index({ enrollment_number: 1 }, { unique: true, sparse: true });
+studentSchema.index({ cst_registration_id: 1 }, { sparse: true });
 
 module.exports = mongoose.model("Student", studentSchema);

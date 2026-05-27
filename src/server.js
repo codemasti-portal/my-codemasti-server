@@ -6,7 +6,7 @@ const { startTimetableClassReminderScheduler } = require("./services/timetable-c
 const { startAssignmentReleaseNotificationScheduler } = require("./services/assignment-release-notification.scheduler");
 const { startNotificationCleanupScheduler } = require("./services/notification-cleanup.scheduler");
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 async function bootstrap() {
   try {

@@ -11,11 +11,9 @@ function escapeRegex(s) {
   return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function scholarshipLabel(pct, amt) {
-  if (pct == null && amt == null) return "";
-  if (amt != null && pct != null) return `₹${amt} (${pct}%)`;
-  if (amt != null) return `₹${amt}`;
-  return `${pct}%`;
+function scholarshipLabel(pct) {
+  if (pct != null && pct > 0) return `${pct}%`;
+  return "";
 }
 
 function pctValue(obtained, total) {
@@ -59,7 +57,7 @@ function enrichRecord(entry, student, test) {
     exam_type_display: entry.exam_type || te.test_type || "",
     exam_date_resolved: entry.exam_date || te.exam_date || null,
     percentage: pct,
-    scholarship_awarded: scholarshipLabel(entry.scholarship_percent, entry.scholarship_amount),
+    scholarship_awarded: scholarshipLabel(entry.scholarship_percent),
     test: te.name
       ? {
           id: String(te._id),
