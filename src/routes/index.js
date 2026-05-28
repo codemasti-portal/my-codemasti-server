@@ -18,6 +18,8 @@ const supportRoutes = require("./modules/support.routes");
 const notificationsRoutes = require("./modules/notifications.routes");
 const staffPanelNotificationsRoutes = require("./modules/staff-panel-notifications.routes");
 const referralRoutes = require("./modules/referral.routes");
+const studentBillingRoutes = require("./modules/student-billing.routes");
+const adminBillingRoutes = require("./modules/admin-billing.routes");
 
 const router = express.Router();
 
@@ -25,6 +27,7 @@ router.use("/auth", authRoutes);
 router.use("/staff-auth", staffAuthRoutes);
 router.use("/staff", staffManagementRoutes);
 router.use("/students", studentRoutes);
+router.use("/students", studentBillingRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/announcements", announcementRoutes);
 router.use("/notes", notesRoutes);
@@ -33,6 +36,7 @@ router.use("/arena", arenaRoutes);
 router.use("/timetable", timetableRoutes);
 router.use("/classes", classesRoutes);
 router.use("/admin", adminRoutes);
+router.use("/admin", adminBillingRoutes);
 router.use("/leaderboard", leaderboardRoutes);
 router.use("/mentor-sessions", mentorSessionsRoutes);
 router.use("/doubts", doubtsRoutes);
