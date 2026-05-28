@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
-const { catalogBatchMongoMatch, studentsInCatalogBatchesFilter } = require("../utils/enrollment");
+const { catalogBatchMongoMatch, studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const Student = require("../models/Student");
 const ScorecardEntry = require("../models/ScorecardEntry");
 const ScorecardTest = require("../models/ScorecardTest");
@@ -18,10 +18,19 @@ function normalizeBatchId(v) {
   return String(v || "").trim().toLowerCase();
 }
 
+function derivePeriod(examDate) {
+  if (!examDate) return "";
+  const d = new Date(examDate);
+  if (isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function scholarshipLabel(pct, amt) {
-  if (pct == null && amt == null) return "";
-  if (amt != null && pct != null) return `₹${amt} (${pct}%)`;
-  if (amt != null) return `₹${amt}`;
+  const hasPct = pct != null && pct > 0;
+  const hasAmt = amt != null && amt > 0;
+  if (!hasPct && !hasAmt) return "";
+  if (hasAmt && hasPct) return `₹${amt} (${pct}%)`;
+  if (hasAmt) return `₹${amt}`;
   return `${pct}%`;
 }
 
@@ -174,6 +183,18 @@ async function loadTestForWrite(testId) {
   return ScorecardTest.findById(testId).lean();
 }
 
+function matchScholarshipSlab(rulesStr, percentage) {
+  if (!rulesStr || percentage == null) return null;
+  try {
+    const slabs = JSON.parse(rulesStr);
+    if (!Array.isArray(slabs)) return null;
+    for (const slab of slabs) {
+      if (percentage >= slab.min_pct && percentage <= slab.max_pct) return slab;
+    }
+  } catch {}
+  return null;
+}
+
 /** Apply test defaults to create payload when test_id is present. */
 function applyTestDefaults(body, test) {
   const next = { ...body };
@@ -246,10 +267,26 @@ async function createEntry(req, res) {
     return sendError(res, 400, "VALIDATION_ERROR", "Enter a valid total marks value.");
   }
 
+  const mo = Number(body.marks_obtained);
+  if (tm > 0 && mo > tm) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Marks obtained cannot exceed total marks.");
+  }
+
   const batchId = normalizeBatchId(body.batch_id);
   const ok = await assertStudentInBatch(batchId, body.student_id);
   if (!ok) {
     return sendError(res, 404, "STUDENT_NOT_IN_BATCH", "Student not found in this batch");
+  }
+
+  let schPct = body.scholarship_percent ?? null;
+  let schAmt = body.scholarship_amount ?? null;
+  if (testDoc && schPct == null && schAmt == null) {
+    const pct = pctValue(body.marks_obtained, tm);
+    const slab = matchScholarshipSlab(testDoc.scholarship_rules, pct);
+    if (slab) {
+      schPct = slab.scholarship_percent ?? null;
+      schAmt = slab.scholarship_amount ?? null;
+    }
   }
 
   const createPayload = {
@@ -262,8 +299,8 @@ async function createEntry(req, res) {
     task_label: body.task_label,
     total_marks: tm,
     marks_obtained: body.marks_obtained,
-    scholarship_percent: body.scholarship_percent ?? null,
-    scholarship_amount: body.scholarship_amount ?? null,
+    scholarship_percent: schPct,
+    scholarship_amount: schAmt,
     performance_status: body.performance_status ?? "",
     batch_recommendation: body.batch_recommendation ?? "",
     next_month_fee: body.next_month_fee ?? null,
@@ -327,6 +364,12 @@ async function patchEntry(req, res) {
   if (body.batch_recommendation !== undefined) doc.batch_recommendation = body.batch_recommendation;
   if (body.next_month_fee !== undefined) doc.next_month_fee = body.next_month_fee;
   if (body.exam_date !== undefined) doc.exam_date = body.exam_date;
+
+  const finalTotal = Number(doc.total_marks);
+  const finalObtained = Number(doc.marks_obtained);
+  if (finalTotal > 0 && finalObtained > finalTotal) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Marks obtained cannot exceed total marks.");
+  }
 
   if (req.staff?.sub) doc.updated_by_staff_id = new mongoose.Types.ObjectId(req.staff.sub);
 
@@ -407,6 +450,7 @@ async function patchTest(req, res) {
         exam_type: doc.test_type,
         exam_date: doc.exam_date,
         task_label: doc.name,
+        total_marks: doc.total_marks,
       },
     }
   );
@@ -589,7 +633,7 @@ async function scorecardSummary(req, res) {
           },
           withSch: {
             $sum: {
-              $cond: [{ $or: [{ $ne: ["$scholarship_percent", null] }, { $ne: ["$scholarship_amount", null] }] }, 1, 0],
+              $cond: [{ $or: [{ $gt: ["$scholarship_percent", 0] }, { $gt: ["$scholarship_amount", 0] }] }, 1, 0],
             },
           },
         },
@@ -685,6 +729,23 @@ async function bulkCreateEntries(req, res) {
         continue;
       }
 
+      const bulkMo = Number(body.marks_obtained);
+      if (tm > 0 && bulkMo > tm) {
+        errors.push({ index: i, message: "Marks obtained cannot exceed total marks" });
+        continue;
+      }
+
+      let bulkSchPct = body.scholarship_percent ?? null;
+      let bulkSchAmt = body.scholarship_amount ?? null;
+      if (testDoc && bulkSchPct == null && bulkSchAmt == null) {
+        const bulkPct = pctValue(body.marks_obtained, tm);
+        const slab = matchScholarshipSlab(testDoc.scholarship_rules, bulkPct);
+        if (slab) {
+          bulkSchPct = slab.scholarship_percent ?? null;
+          bulkSchAmt = slab.scholarship_amount ?? null;
+        }
+      }
+
       await ScorecardEntry.create({
         batch_id: batchId,
         student_id: body.student_id,
@@ -695,8 +756,8 @@ async function bulkCreateEntries(req, res) {
         task_label: body.task_label.trim(),
         total_marks: tm,
         marks_obtained: body.marks_obtained,
-        scholarship_percent: body.scholarship_percent ?? null,
-        scholarship_amount: body.scholarship_amount ?? null,
+        scholarship_percent: bulkSchPct,
+        scholarship_amount: bulkSchAmt,
         performance_status: body.performance_status ?? "",
         batch_recommendation: body.batch_recommendation ?? "",
         next_month_fee: body.next_month_fee ?? null,
@@ -719,6 +780,261 @@ async function bulkCreateEntries(req, res) {
   });
 }
 
+async function spreadsheetStudents(req, res) {
+  const schema = z.object({
+    batch_id: z.string().min(1),
+    test_id: z.string().min(1),
+  });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) {
+    const msg = parsed.error?.issues?.[0]?.message || "Invalid query";
+    return sendError(res, 400, "VALIDATION_ERROR", msg);
+  }
+  const { batch_id, test_id } = parsed.data;
+
+  if (!mongoose.Types.ObjectId.isValid(test_id)) {
+    return sendError(res, 400, "INVALID_TEST", "Invalid test id");
+  }
+  const test = await ScorecardTest.findById(test_id).lean();
+  if (!test) return sendError(res, 404, "TEST_NOT_FOUND", "Test not found");
+
+  const assessment_period = derivePeriod(test.exam_date);
+
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length) {
+      return sendSuccess(res, { test: toTestRow(test), assessment_period, students: [] });
+    }
+    const b = normalizeBatchId(batch_id);
+    if (!instructorBatches.includes(b)) {
+      return sendError(res, 403, "FORBIDDEN", "Batch is not in your assigned batches");
+    }
+  }
+
+  const filter = studentsInCatalogBatchesFilter([batch_id]);
+  const students = await Student.find(filter)
+    .select("_id name email enrollment_number cst_registration_id batch_id batch")
+    .sort({ enrollment_number: 1, name: 1 })
+    .lean();
+
+  const studentIds = students.map((s) => s._id);
+
+  const existingEntries = studentIds.length
+    ? await ScorecardEntry.find({
+        test_id: new mongoose.Types.ObjectId(test_id),
+        assessment_period,
+        student_id: { $in: studentIds },
+      }).lean()
+    : [];
+
+  const entryByStudent = new Map(existingEntries.map((e) => [String(e.student_id), e]));
+
+  const data = students.map((s) => {
+    const entry = entryByStudent.get(String(s._id)) || null;
+    return {
+      student_id: String(s._id),
+      name: s.name || "",
+      cst_id: s.cst_registration_id || "",
+      enrollment_number: s.enrollment_number || "",
+      existing_entry: entry
+        ? {
+            id: String(entry._id),
+            marks_obtained: entry.marks_obtained,
+            scholarship_percent: entry.scholarship_percent ?? null,
+            scholarship_amount: entry.scholarship_amount ?? null,
+          }
+        : null,
+    };
+  });
+
+  return sendSuccess(res, {
+    test: {
+      id: String(test._id),
+      name: test.name,
+      test_type: test.test_type,
+      exam_date: test.exam_date,
+      total_marks: test.total_marks,
+      scholarship_rules: test.scholarship_rules || "",
+    },
+    assessment_period,
+    students: data,
+  });
+}
+
+async function batchSaveEntries(req, res) {
+  const bodySchema = z.object({
+    test_id: z.string().min(1),
+    batch_id: z.string().min(1).max(40),
+    rows: z
+      .array(
+        z.object({
+          student_id: z.string().min(1),
+          marks_obtained: z.coerce.number().min(0),
+        })
+      )
+      .min(1)
+      .max(500),
+  });
+  const parsed = bodySchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    const msg = parsed.error?.issues?.[0]?.message || "Invalid body";
+    return sendError(res, 400, "VALIDATION_ERROR", msg);
+  }
+  const { test_id, batch_id, rows } = parsed.data;
+
+  if (!mongoose.Types.ObjectId.isValid(test_id)) {
+    return sendError(res, 400, "INVALID_TEST", "Invalid test id");
+  }
+  const test = await loadTestForWrite(test_id);
+  if (!test) return sendError(res, 404, "TEST_NOT_FOUND", "Test not found");
+
+  const task_label = test.name;
+  const exam_type = test.test_type;
+  const exam_date = test.exam_date;
+  const total_marks = test.total_marks;
+  const assessment_period = derivePeriod(exam_date);
+  const batchNorm = normalizeBatchId(batch_id);
+
+  let created = 0;
+  let updated = 0;
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    try {
+      if (row.marks_obtained > total_marks) {
+        errors.push({ index: i, student_id: row.student_id, message: "Marks obtained cannot exceed total marks" });
+        continue;
+      }
+      const percentage = pctValue(row.marks_obtained, total_marks);
+      const slab = matchScholarshipSlab(test.scholarship_rules, percentage);
+      const scholarship_percent = slab?.scholarship_percent ?? null;
+      const scholarship_amount = slab?.scholarship_amount ?? null;
+
+      const result = await ScorecardEntry.findOneAndUpdate(
+        { student_id: row.student_id, assessment_period, task_label },
+        {
+          $set: {
+            batch_id: batchNorm,
+            test_id: test._id,
+            exam_type,
+            exam_date,
+            total_marks,
+            marks_obtained: row.marks_obtained,
+            scholarship_percent,
+            scholarship_amount,
+            updated_by_staff_id: req.staff?.sub ? new mongoose.Types.ObjectId(req.staff.sub) : null,
+          },
+        },
+        { upsert: true, new: true, rawResult: true }
+      );
+      if (result.lastErrorObject?.updatedExisting) {
+        updated += 1;
+      } else {
+        created += 1;
+      }
+    } catch (e) {
+      errors.push({ index: i, student_id: row.student_id, message: e.message || "Save failed" });
+    }
+  }
+
+  return sendSuccess(res, { created, updated, errors }, created || updated ? "Batch save finished" : "No rows saved");
+}
+
+async function bulkCreateByCst(req, res) {
+  const bodySchema = z.object({
+    test_id: z.string().min(1),
+    rows: z
+      .array(
+        z.object({
+          cst_id: z.string().min(1),
+          marks_obtained: z.coerce.number().min(0),
+        })
+      )
+      .min(1)
+      .max(500),
+  });
+  const parsed = bodySchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    const msg = parsed.error?.issues?.[0]?.message || "Invalid body";
+    return sendError(res, 400, "VALIDATION_ERROR", msg);
+  }
+  const { test_id, rows } = parsed.data;
+
+  if (!mongoose.Types.ObjectId.isValid(test_id)) {
+    return sendError(res, 400, "INVALID_TEST", "Invalid test id");
+  }
+  const test = await loadTestForWrite(test_id);
+  if (!test) return sendError(res, 404, "TEST_NOT_FOUND", "Test not found");
+
+  const task_label = test.name;
+  const exam_type = test.test_type;
+  const exam_date = test.exam_date;
+  const total_marks = test.total_marks;
+  const assessment_period = derivePeriod(exam_date);
+
+  const cstIds = [...new Set(rows.map((r) => r.cst_id))];
+  const students = await Student.find({
+    cst_registration_id: { $in: cstIds },
+    role: "student",
+  })
+    .select("_id cst_registration_id batch_id batch")
+    .lean();
+  const byCst = new Map(students.map((s) => [s.cst_registration_id, s]));
+
+  let created = 0;
+  let updated = 0;
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const student = byCst.get(row.cst_id);
+    if (!student) {
+      errors.push({ index: i, cst_id: row.cst_id, message: "Student not found for this CST ID" });
+      continue;
+    }
+    try {
+      if (row.marks_obtained > total_marks) {
+        errors.push({ index: i, cst_id: row.cst_id, message: "Marks obtained cannot exceed total marks" });
+        continue;
+      }
+      const percentage = pctValue(row.marks_obtained, total_marks);
+      const slab = matchScholarshipSlab(test.scholarship_rules, percentage);
+      const scholarship_percent = slab?.scholarship_percent ?? null;
+      const scholarship_amount = slab?.scholarship_amount ?? null;
+
+      const batchNorm = normalizeBatchId(student.batch_id || student.batch);
+
+      const result = await ScorecardEntry.findOneAndUpdate(
+        { student_id: student._id, assessment_period, task_label },
+        {
+          $set: {
+            batch_id: batchNorm,
+            test_id: test._id,
+            exam_type,
+            exam_date,
+            total_marks,
+            marks_obtained: row.marks_obtained,
+            scholarship_percent,
+            scholarship_amount,
+            updated_by_staff_id: req.staff?.sub ? new mongoose.Types.ObjectId(req.staff.sub) : null,
+          },
+        },
+        { upsert: true, new: true, rawResult: true }
+      );
+      if (result.lastErrorObject?.updatedExisting) {
+        updated += 1;
+      } else {
+        created += 1;
+      }
+    } catch (e) {
+      errors.push({ index: i, cst_id: row.cst_id, message: e.message || "Save failed" });
+    }
+  }
+
+  return sendSuccess(res, { created, updated, errors }, created || updated ? "Bulk CST import finished" : "No rows saved");
+}
+
 module.exports = {
   listEntries,
   createEntry,
@@ -731,4 +1047,7 @@ module.exports = {
   listRecords,
   scorecardSummary,
   bulkCreateEntries,
+  spreadsheetStudents,
+  batchSaveEntries,
+  bulkCreateByCst,
 };
