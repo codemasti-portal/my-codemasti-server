@@ -420,6 +420,23 @@ async function createStudent(req, res) {
     }
   }
 
+  // Auto-create the StudentEnrollment row matching the derived batch_id, so the new student is
+  // immediately picked up by billing (bulk-generate, Fees tab, reconciliation). Best-effort — if
+  // no Course is configured for this batch yet, we surface the reason via the response meta but
+  // don't fail the student creation itself.
+  let enrollmentSync = null;
+  try {
+    const { syncEnrollmentToBatch } = require("../services/enrollment-sync.service");
+    enrollmentSync = await syncEnrollmentToBatch({
+      studentId: created._id,
+      oldBatchId: "",
+      newBatchId: created.batch_id,
+      actorStaffId: req.staff?.sub,
+    });
+  } catch (err) {
+    enrollmentSync = { changed: false, action: "error", error: err.message };
+  }
+
   const out = augmentStudentCatalogFieldsFromEnrollment(created.toObject ? created.toObject() : created);
   return sendSuccess(
     res,
@@ -440,7 +457,8 @@ async function createStudent(req, res) {
       registration_fee_discount_percent: out.registration_fee_discount_percent ?? 0,
       referral_applied: Boolean(referredById),
     },
-    "Student created"
+    "Student created",
+    enrollmentSync ? { enrollment_sync: enrollmentSync } : undefined
   );
 }
 
@@ -850,6 +868,9 @@ async function updateStudent(req, res) {
     doc.email = body.email.toLowerCase().trim();
   }
 
+  // Capture pre-mutation batch_id so we can sync StudentEnrollment after save (see end of fn).
+  const previousBatchId = doc.batch_id || "";
+
   if (body.enrollment_number) {
     let enrollmentParsed;
     try {
@@ -955,7 +976,32 @@ async function updateStudent(req, res) {
 
   applyEnrollmentDerivedFieldsToStudentDocument(doc);
   await doc.save();
-  return sendSuccess(res, studentResponse(doc.toObject()), "Student updated");
+
+  // If batch_id changed (e.g. enrollment_number rename moved them between Spark/Builders/Innovators),
+  // sync their StudentEnrollment so billing follows. Best-effort: failures are surfaced in meta but
+  // don't fail the whole Student update.
+  let enrollmentSync = null;
+  const newBatchId = doc.batch_id || "";
+  if (newBatchId.toLowerCase() !== previousBatchId.toLowerCase()) {
+    try {
+      const { syncEnrollmentToBatch } = require("../services/enrollment-sync.service");
+      enrollmentSync = await syncEnrollmentToBatch({
+        studentId: doc._id,
+        oldBatchId: previousBatchId,
+        newBatchId,
+        actorStaffId: req.staff?.sub,
+      });
+    } catch (err) {
+      enrollmentSync = { changed: false, action: "error", error: err.message };
+    }
+  }
+
+  return sendSuccess(
+    res,
+    studentResponse(doc.toObject()),
+    "Student updated",
+    enrollmentSync ? { enrollment_sync: enrollmentSync } : undefined
+  );
 }
 
 async function uploadStudentAvatar(req, res) {
