@@ -3,6 +3,7 @@ const Note = require("../models/Note");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { cloudinary, ensureCloudinaryConfig } = require("../utils/cloudinary");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function studentBatchCandidates(student) {
   const vals = [
@@ -48,6 +49,7 @@ async function list(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
 
   const filter = {};
   if (subject) filter.subject = subject;
@@ -98,6 +100,7 @@ async function filters(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   const vis = studentNoteVisibilityFilter(student);
   const [subjectsRows, monthsRows] = await Promise.all([
     Note.aggregate([
@@ -168,6 +171,7 @@ async function detail(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   if (!noteVisibleToStudent(note, student)) {
     return sendError(res, 403, "NOTE_FORBIDDEN", "This note is not available for your batch or section");
   }
@@ -197,6 +201,7 @@ async function download(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   if (!noteVisibleToStudent(note, student)) {
     return sendError(res, 403, "NOTE_FORBIDDEN", "This note is not available for your batch or section");
   }

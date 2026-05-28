@@ -4,6 +4,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
 const ScorecardEntry = require("../models/ScorecardEntry");
 const ScorecardTest = require("../models/ScorecardTest");
+const { resolveStudentBatchContext } = require("../utils/student-batch-context");
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 
@@ -117,6 +118,16 @@ async function listMyScorecardRecords(req, res) {
   const skip = (page - 1) * limit;
 
   const match = { student_id: new mongoose.Types.ObjectId(sid) };
+
+  // Course-picker scoping: if the client passed ?batch_id and the student has an active
+  // enrollment for it, narrow scorecard to that batch only. No explicit batch → today's
+  // behavior (all of the student's scorecard records).
+  const studentForCtx = await Student.findById(sid).select("_id batch_id enrollment_number").lean();
+  const ctx = await resolveStudentBatchContext(req, studentForCtx);
+  if (ctx.explicit) {
+    match.batch_id = ctx.batchId;
+  }
+
   if (query.exam_type) {
     match.exam_type = String(query.exam_type).trim().toLowerCase();
   }

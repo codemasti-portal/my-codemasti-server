@@ -5,6 +5,7 @@ const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { assignmentPublishedVisibleToCatalogBatch } = require("../utils/assignmentBatchFilter");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function visibleAssignmentsQueryForStudent(student, now = new Date()) {
   const enriched = augmentStudentCatalogFieldsFromEnrollment(student);
@@ -25,6 +26,7 @@ async function summary(req, res) {
       pending_questions_count: 0,
     });
   }
+  await scopeStudentToBatch(req, student);
   const now = new Date();
   const assignmentQuery = visibleAssignmentsQueryForStudent(student, now);
   const assignments = await Assignment.find(assignmentQuery).lean();

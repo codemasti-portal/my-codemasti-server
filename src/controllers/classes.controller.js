@@ -3,6 +3,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const LiveClass = require("../models/LiveClass");
 const ClassJoinAudit = require("../models/ClassJoinAudit");
 const Student = require("../models/Student");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function parseClassDateTime(date, hhmm) {
   const [hour, minute] = hhmm.split(":").map((v) => Number(v));
@@ -96,6 +97,7 @@ async function live(req, res) {
     if (!student) {
       return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
     }
+    await scopeStudentToBatch(req, student);
     const vis = studentClassVisibilityFilter(student);
     const combined =
       Object.keys(filter).length > 0 ? { $and: [filter, vis] } : vis;
@@ -172,6 +174,7 @@ async function recordings(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
 
   const vis = studentClassVisibilityFilter(student);
   const filter = {
@@ -242,6 +245,7 @@ async function join(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   if (!classVisibleToStudent(classDoc, student)) {
     return sendError(res, 403, "CLASS_FORBIDDEN", "This live class is not available for your batch or section");
   }
