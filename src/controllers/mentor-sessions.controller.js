@@ -2,6 +2,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const MentorSlot = require("../models/MentorSlot");
 const MentorSessionJoin = require("../models/MentorSessionJoin");
 const Student = require("../models/Student");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function getSessionStartMs(slot) {
   const baseDate = new Date(slot?.date);
@@ -24,6 +25,7 @@ function getSessionStartMs(slot) {
 
 async function listSlots(req, res) {
   const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const studentBatchId = String(student?.batch_id || "").trim().toLowerCase();
   const studentSectionId = String(student?.section_id || "").trim().toLowerCase();
   const filter = { publish_date: { $lte: new Date() } };
@@ -109,6 +111,7 @@ async function mySessions(req, res) {
   const tab = String(req.query.tab || "upcoming");
   const nowMs = Date.now();
   const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const studentBatchId = String(student?.batch_id || "").trim().toLowerCase();
   const studentSectionId = String(student?.section_id || "").trim().toLowerCase();
   const batchSectionClauses = [];
@@ -164,6 +167,7 @@ async function mySessions(req, res) {
 
 async function joinSession(req, res) {
   const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const studentBatchId = String(student?.batch_id || "").trim().toLowerCase();
   const studentSectionId = String(student?.section_id || "").trim().toLowerCase();
   const slot = await MentorSlot.findById(req.params.sessionId).lean();

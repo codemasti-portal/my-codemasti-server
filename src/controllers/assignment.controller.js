@@ -8,6 +8,7 @@ const Student = require("../models/Student");
 const BatchCatalog = require("../models/BatchCatalog");
 const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { executePythonCode } = require("../services/python-executor-local");
 const achievementSvc = require("../services/student-achievement.service");
@@ -214,6 +215,7 @@ async function assertStudentAssignmentAccess(req, res, assignmentId) {
     sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
     return null;
   }
+  await scopeStudentToBatch(req, student);
   if (!assignment) {
     sendError(res, 404, "NOT_FOUND", "Assignment not found");
     return null;
@@ -237,6 +239,7 @@ async function list(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   const sbatch = String(student.batch_id || "").toLowerCase().trim();
 
   const catalogs = await BatchCatalog.find({}).lean();
@@ -391,6 +394,7 @@ async function filters(req, res) {
   if (!student) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
+  await scopeStudentToBatch(req, student);
   const sbatch = String(student.batch_id || "").toLowerCase().trim();
   if (!sbatch) {
     return sendSuccess(res, {

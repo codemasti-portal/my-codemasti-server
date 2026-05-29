@@ -173,6 +173,7 @@ router.get("/scorecard/tests", ...readScorecard, adminScorecard.listTests);
 router.post("/scorecard/tests", ...adminOnly, adminScorecard.createTest);
 router.patch("/scorecard/tests/:id", ...adminOnly, adminScorecard.patchTest);
 router.delete("/scorecard/tests/:id", ...adminOnly, adminScorecard.deleteTest);
+router.post("/scorecard/tests/:id/mark-absent-zero", ...adminOnly, adminScorecard.markAbsentAsZero);
 
 router.get("/support/conversations", ...adminPanelRead, adminSupport.listConversations);
 router.get("/support/conversations/:conversationId/messages", ...adminPanelRead, adminSupport.getConversationMessages);

@@ -1035,6 +1035,95 @@ async function bulkCreateByCst(req, res) {
   return sendSuccess(res, { created, updated, errors }, created || updated ? "Bulk CST import finished" : "No rows saved");
 }
 
+/**
+ * POST /admin/scorecard/tests/:id/mark-absent-zero  body: { batch_id }
+ * For every student in `batch_id` who does NOT already have a ScorecardEntry for this test,
+ * create one with marks_obtained = 0, scholarship_percent = 0, scholarship_amount = 0.
+ * Absent students do not earn scholarship from slabs even if a slab would match 0%.
+ */
+async function markAbsentAsZero(req, res) {
+  const bodySchema = z.object({ batch_id: z.string().min(1).max(40) });
+  const parsed = bodySchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return sendError(res, 400, "VALIDATION_ERROR", parsed.error.issues[0]?.message || "Invalid body");
+  }
+  const { batch_id } = parsed.data;
+  const testId = req.params.id;
+  if (!mongoose.Types.ObjectId.isValid(testId)) {
+    return sendError(res, 400, "INVALID_TEST", "Invalid test id");
+  }
+
+  const test = await ScorecardTest.findById(testId).lean();
+  if (!test) return sendError(res, 404, "TEST_NOT_FOUND", "Test not found");
+
+  const batchNorm = normalizeBatchId(batch_id);
+  const assessment_period = derivePeriod(test.exam_date);
+  const task_label = test.name;
+
+  // Instructor-batch scope check (mirrors spreadsheetStudents).
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null) {
+    if (!instructorBatches.length || !instructorBatches.includes(batchNorm)) {
+      return sendError(res, 403, "FORBIDDEN", "Batch is not in your assigned batches");
+    }
+  }
+
+  const students = await Student.find(studentsInCatalogBatchesFilter([batch_id]))
+    .select("_id")
+    .lean();
+  const studentIds = students.map((s) => s._id);
+  if (!studentIds.length) {
+    return sendSuccess(res, { created: 0, already_present: 0, total_students: 0 }, "No students in batch");
+  }
+
+  const existing = await ScorecardEntry.find({
+    test_id: new mongoose.Types.ObjectId(testId),
+    student_id: { $in: studentIds },
+  })
+    .select("student_id")
+    .lean();
+  const have = new Set(existing.map((e) => String(e.student_id)));
+
+  const toCreate = studentIds.filter((sid) => !have.has(String(sid)));
+  if (!toCreate.length) {
+    return sendSuccess(
+      res,
+      { created: 0, already_present: existing.length, total_students: studentIds.length },
+      "All students already have an entry"
+    );
+  }
+
+  const docs = toCreate.map((sid) => ({
+    batch_id: batchNorm,
+    student_id: sid,
+    test_id: test._id,
+    exam_type: test.test_type,
+    exam_date: test.exam_date,
+    assessment_period,
+    task_label,
+    total_marks: test.total_marks,
+    marks_obtained: 0,
+    scholarship_percent: 0,
+    scholarship_amount: 0,
+    updated_by_staff_id: req.staff?.sub ? new mongoose.Types.ObjectId(req.staff.sub) : null,
+  }));
+
+  let created = 0;
+  try {
+    const r = await ScorecardEntry.insertMany(docs, { ordered: false });
+    created = r.length;
+  } catch (err) {
+    // Some inserts may fail due to a race with concurrent saves; report partial success.
+    if (Array.isArray(err.insertedDocs)) created = err.insertedDocs.length;
+  }
+
+  return sendSuccess(
+    res,
+    { created, already_present: existing.length, total_students: studentIds.length },
+    `Marked ${created} student${created === 1 ? "" : "s"} absent (0 marks)`
+  );
+}
+
 module.exports = {
   listEntries,
   createEntry,
@@ -1050,4 +1139,5 @@ module.exports = {
   spreadsheetStudents,
   batchSaveEntries,
   bulkCreateByCst,
+  markAbsentAsZero,
 };

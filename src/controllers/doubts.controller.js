@@ -10,6 +10,7 @@ const {
   buildCommunityUploadFolder,
   buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function mediaResourceType(mimetype) {
   const type = String(mimetype || "");
@@ -78,7 +79,8 @@ async function createPersonal(req, res) {
 }
 
 async function listSubjects(req, res) {
-  const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const batchId = String(student?.batch_id || "").trim().toLowerCase();
   const sectionId = String(student?.section_id || "").trim().toLowerCase();
   if (!batchId) return sendSuccess(res, []);
@@ -126,7 +128,8 @@ async function listPersonal(req, res) {
 }
 
 async function listCommunityMessages(req, res) {
-  const student = await Student.findById(req.user.sub).select("batch_id").lean();
+  const student = await Student.findById(req.user.sub).select("batch_id enrollment_number").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const channelId = String(student?.batch_id || "").trim().toLowerCase();
   if (!channelId) return sendError(res, 400, "BATCH_REQUIRED", "Student batch is required for community doubts");
   const page = Math.max(1, Number(req.query.page || 1));
@@ -181,7 +184,8 @@ async function postCommunityMessage(req, res) {
           : undefined,
   });
 
-  const student = await Student.findById(req.user.sub).select("name batch_id").lean();
+  const student = await Student.findById(req.user.sub).select("name batch_id enrollment_number").lean();
+  if (student) await scopeStudentToBatch(req, student);
   const channelId = String(student?.batch_id || "").trim().toLowerCase();
   if (!channelId) return sendError(res, 400, "BATCH_REQUIRED", "Student batch is required for community doubts");
   const text = String(body.text || "").trim();

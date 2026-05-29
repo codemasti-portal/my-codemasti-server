@@ -6,6 +6,7 @@ const Student = require("../models/Student");
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function catalogBatchIdFromStudentLean(lean) {
   const s = augmentStudentCatalogFieldsFromEnrollment(lean || {});
@@ -35,6 +36,7 @@ async function list(req, res) {
 
   const student = await Student.findById(req.user.sub).select("batch batch_id enrollment_number").lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  await scopeStudentToBatch(req, student);
 
   const batchId = catalogBatchIdFromStudentLean(student);
 
@@ -105,6 +107,7 @@ async function list(req, res) {
 async function detail(req, res) {
   const student = await Student.findById(req.user.sub).select("batch batch_id enrollment_number").lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  await scopeStudentToBatch(req, student);
 
   const batchId = catalogBatchIdFromStudentLean(student);
 

@@ -3,6 +3,7 @@ const { sendSuccess } = require("../utils/response");
 const TimetableSlot = require("../models/TimetableSlot");
 const TimetableEvent = require("../models/TimetableEvent");
 const Student = require("../models/Student");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 const { catalogBatchIdsFromStudentLean } = require("../utils/enrollment");
 
 async function weekly(req, res) {
@@ -13,6 +14,7 @@ async function weekly(req, res) {
   const query = schema.parse(req.query);
 
   const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  await scopeStudentToBatch(req, student);
   const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
 
@@ -76,6 +78,7 @@ async function recordings(req, res) {
   const query = schema.parse(req.query);
 
   const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  await scopeStudentToBatch(req, student);
   const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
   if (!batchKeys.length) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
@@ -145,6 +148,7 @@ async function notes(req, res) {
   const query = schema.parse(req.query);
 
   const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  await scopeStudentToBatch(req, student);
   const batchKeys = catalogBatchIdsFromStudentLean(student);
   const section_id = String(student?.section_id || "").trim().toLowerCase();
   if (!batchKeys.length) return sendSuccess(res, [], "", { page: 1, limit: 20, total: 0 });
@@ -208,6 +212,7 @@ async function events(req, res) {
   });
   const query = schema.parse(req.query);
   const student = await Student.findById(req.user.sub).select("batch_id enrollment_number").lean();
+  await scopeStudentToBatch(req, student);
   const batchKeys = catalogBatchIdsFromStudentLean(student);
 
   const fromDate = new Date(`${query.from}T00:00:00.000Z`);

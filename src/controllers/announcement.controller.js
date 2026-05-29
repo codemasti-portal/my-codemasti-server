@@ -3,6 +3,7 @@ const Announcement = require("../models/Announcement");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { postedByStudentLabel } = require("../utils/announcementAuthor");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
 
 function normSid(v) {
   return String(v ?? "")
@@ -55,6 +56,7 @@ async function list(req, res) {
   const scope = req.query.scope;
 
   const student = await Student.findById(req.user.sub).lean();
+  if (student) await scopeStudentToBatch(req, student);
   const all = await Announcement.find({}).sort({ date: -1 }).lean();
 
   let visible = all.filter((a) => isAnnouncementVisible(student, a) && isAnnouncementPublished(a));

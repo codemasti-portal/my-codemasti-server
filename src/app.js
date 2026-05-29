@@ -50,6 +50,18 @@ app.use(
     },
   })
 );
+
+// PhonePe webhook must read the raw body for base64 decoding + signature verification.
+// It is mounted BEFORE express.json() so the global JSON parser doesn't consume the body first.
+{
+  const { handlePhonepeWebhook } = require("./controllers/payments-webhook.controller");
+  app.post(
+    "/v1/payments/webhook/phonepe",
+    express.raw({ type: "*/*", limit: "1mb" }),
+    handlePhonepeWebhook
+  );
+}
+
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
