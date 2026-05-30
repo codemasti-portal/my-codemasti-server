@@ -7,6 +7,7 @@ const catalog = require("../../controllers/admin-catalog.controller");
 const batchCatalog = require("../../controllers/admin-batch-catalog.controller");
 const adminUpload = require("../../controllers/admin-upload.controller");
 const adminScorecard = require("../../controllers/admin-scorecard.controller");
+const adminContest = require("../../controllers/admin-contest.controller");
 const adminSupport = require("../../controllers/admin-support.controller");
 const adminTodo = require("../../controllers/admin-todo.controller");
 const adminMonthlyLeaderboard = require("../../controllers/admin-monthly-leaderboard.controller");
@@ -174,6 +175,13 @@ router.post("/scorecard/tests", ...adminOnly, adminScorecard.createTest);
 router.patch("/scorecard/tests/:id", ...adminOnly, adminScorecard.patchTest);
 router.delete("/scorecard/tests/:id", ...adminOnly, adminScorecard.deleteTest);
 router.post("/scorecard/tests/:id/mark-absent-zero", ...adminOnly, adminScorecard.markAbsentAsZero);
+
+router.get("/contests", ...readScorecard, adminContest.listContests);
+router.post("/contests", ...adminOnly, adminContest.createContest);
+router.post("/contests/bulk", ...adminOnly, adminContest.bulkCreateContests);
+router.get("/contests/:id", ...readScorecard, adminContest.getContest);
+router.patch("/contests/:id", ...adminOnly, adminContest.patchContest);
+router.delete("/contests/:id", ...adminOnly, adminContest.deleteContest);
 
 router.get("/support/conversations", ...adminPanelRead, adminSupport.listConversations);
 router.get("/support/conversations/:conversationId/messages", ...adminPanelRead, adminSupport.getConversationMessages);

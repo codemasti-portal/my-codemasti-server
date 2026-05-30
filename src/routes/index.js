@@ -20,6 +20,7 @@ const staffPanelNotificationsRoutes = require("./modules/staff-panel-notificatio
 const referralRoutes = require("./modules/referral.routes");
 const studentBillingRoutes = require("./modules/student-billing.routes");
 const adminBillingRoutes = require("./modules/admin-billing.routes");
+const contestRoutes = require("./modules/contest.routes");
 
 const router = express.Router();
 
@@ -33,6 +34,7 @@ router.use("/announcements", announcementRoutes);
 router.use("/notes", notesRoutes);
 router.use("/assignments", assignmentRoutes);
 router.use("/arena", arenaRoutes);
+router.use("/contests", contestRoutes);
 router.use("/timetable", timetableRoutes);
 router.use("/classes", classesRoutes);
 router.use("/admin", adminRoutes);

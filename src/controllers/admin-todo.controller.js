@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const AdminTodoTask = require("../models/AdminTodoTask");
@@ -101,38 +102,31 @@ async function deleteTask(req, res) {
   return sendSuccess(res, { id: req.params.id }, "Task deleted");
 }
 
+/** Silent order-only updates — does not bump updatedAt (drag reorder within a column). */
 const reorderSchema = z.object({
   updates: z.array(z.object({
     id: z.string(),
-    status: z.enum(["pending", "in_progress", "resolved"]).optional(),
-    priority: z.enum(["low", "mid", "high"]).optional(),
     order: z.number(),
-  })),
+  })).min(1),
 });
 
 async function reorderTasks(req, res) {
   const { updates } = reorderSchema.parse(req.body || {});
 
-  const bulkOps = updates.map((update) => {
-    const $set = { order: update.order, updated_by: req.staff.sub };
-    if (update.priority !== undefined) $set.priority = update.priority;
-    if (update.status !== undefined) {
-      $set.status = update.status;
-      $set.resolved_at = update.status === "resolved" ? new Date() : null;
+  for (const update of updates) {
+    if (!mongoose.Types.ObjectId.isValid(String(update.id))) {
+      return sendError(res, 400, "VALIDATION_ERROR", `Invalid task id: ${update.id}`);
     }
-    return {
-      updateOne: {
-        filter: { _id: update.id },
-        update: { $set },
-      },
-    };
-  });
-
-  if (bulkOps.length > 0) {
-    await AdminTodoTask.bulkWrite(bulkOps);
+    const result = await AdminTodoTask.updateOne(
+      { _id: update.id },
+      { $set: { order: update.order, updated_by: req.staff.sub } }
+    );
+    if (result.matchedCount === 0) {
+      return sendError(res, 404, "NOT_FOUND", `Task not found: ${update.id}`);
+    }
   }
 
-  return sendSuccess(res, null, "Tasks reordered");
+  return sendSuccess(res, { count: updates.length }, "Order saved");
 }
 
 module.exports = { listTasks, createTask, updateTask, deleteTask, reorderTasks };
