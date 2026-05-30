@@ -482,6 +482,8 @@ async function questionDetail(req, res) {
     execution_mode: String(question.execution_mode || "full_program"),
     starter_code: question.starter_code || {},
     question_image_url: question.question_image_url || "",
+    code: question.code || "",
+    code_language: question.code_language || "",
     quiz_options: Array.isArray(question.quiz_options) ? question.quiz_options : [],
   });
 }

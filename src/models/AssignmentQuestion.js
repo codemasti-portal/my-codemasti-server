@@ -44,6 +44,10 @@ const assignmentQuestionSchema = new mongoose.Schema(
     starter_code: { type: starterCodeSchema, default: () => ({}) },
     hidden_tests: [{ type: mongoose.Schema.Types.Mixed }],
     question_image_url: { type: String, default: "", trim: true },
+    /** Optional code snippet rendered as a highlighted block. We add the ``` fences at render time —
+     * LLMs are unreliable at producing backticks inside JSON, so authors/LLMs supply plain code + language. */
+    code: { type: String, default: "" },
+    code_language: { type: String, default: "", trim: true },
     quiz_options: { type: [quizOptionSchema], default: [] },
   },
   { timestamps: true, versionKey: false }

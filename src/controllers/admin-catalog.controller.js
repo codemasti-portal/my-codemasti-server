@@ -512,6 +512,8 @@ const questionBodySchema = z.object({
   starter_code: starterCodeSchema,
   hidden_tests: z.array(z.any()).optional(),
   question_image_url: z.string().trim().optional(),
+  code: z.string().optional(),
+  code_language: z.string().trim().optional(),
   quiz_options: z
     .array(
       z.object({
