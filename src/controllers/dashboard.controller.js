@@ -6,6 +6,7 @@ const AssignmentSubmission = require("../models/AssignmentSubmission");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { assignmentPublishedVisibleToCatalogBatch } = require("../utils/assignmentBatchFilter");
 const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { pickDashboardContestCard, loadStudent } = require("../controllers/contest.controller");
 
 function visibleAssignmentsQueryForStudent(student, now = new Date()) {
   const enriched = augmentStudentCatalogFieldsFromEnrollment(student);
@@ -67,4 +68,32 @@ async function summary(req, res) {
   });
 }
 
-module.exports = { summary };
+async function home(req, res) {
+  const student = await loadStudent(req);
+  if (!student) {
+    return sendSuccess(res, {
+      latest_releases: [],
+      pending_assignments: [],
+      pending_questions_count: 0,
+      performance_score: 0,
+      contest_card: null,
+      counters: { latest_releases: 0, pending_assignments: 0 },
+    });
+  }
+
+  const contest_card = await pickDashboardContestCard(student, new Date());
+
+  return sendSuccess(res, {
+    latest_releases: [],
+    pending_assignments: [],
+    pending_questions_count: 0,
+    performance_score: student?.progress ?? 0,
+    contest_card,
+    counters: {
+      latest_releases: 0,
+      pending_assignments: 0,
+    },
+  });
+}
+
+module.exports = { summary, home };
