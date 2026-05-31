@@ -10,14 +10,6 @@ const urlSchema = z.string().trim().url().max(2000).refine((u) => /^https:\/\//i
   message: "URL must use https://",
 });
 
-const optionalUrlSchema = z
-  .string()
-  .trim()
-  .max(2000)
-  .optional()
-  .transform((v) => v || "")
-  .refine((u) => !u || /^https:\/\//i.test(u), { message: "URL must use https://" });
-
 function parseDate(v) {
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return null;
@@ -47,8 +39,6 @@ const createSchema = z.object({
   start_at: z.union([z.string(), z.date()]),
   end_at: z.union([z.string(), z.date()]),
   platform_url: urlSchema,
-  results_url: optionalUrlSchema.optional(),
-  results_until: z.union([z.string(), z.date(), z.null()]).optional(),
   event_group_id: z.string().trim().optional(),
   is_published: z.boolean().optional().default(false),
 });
@@ -69,8 +59,6 @@ const bulkSchema = z.object({
         start_at: z.union([z.string(), z.date()]),
         end_at: z.union([z.string(), z.date()]),
         platform_url: urlSchema,
-        results_url: optionalUrlSchema.optional(),
-        results_until: z.union([z.string(), z.date(), z.null()]).optional(),
       })
     )
     .min(1)
@@ -141,8 +129,6 @@ async function createContest(req, res) {
     start_at: sched.dates.start_at,
     end_at: sched.dates.end_at,
     platform_url: body.platform_url.trim(),
-    results_url: body.results_url || "",
-    results_until: body.results_until ? parseDate(body.results_until) : null,
     event_group_id: body.event_group_id || crypto.randomUUID(),
     is_published: isPublished,
     published_at: isPublished ? new Date() : null,
@@ -186,8 +172,6 @@ async function bulkCreateContests(req, res) {
       start_at: sched.dates.start_at,
       end_at: sched.dates.end_at,
       platform_url: row.platform_url.trim(),
-      results_url: row.results_url || "",
-      results_until: row.results_until ? parseDate(row.results_until) : null,
       event_group_id: groupId,
       is_published: isPublished,
       published_at: isPublished ? now : null,
@@ -236,10 +220,6 @@ async function patchContest(req, res) {
   doc.start_at = sched.dates.start_at;
   doc.end_at = sched.dates.end_at;
   if (body.platform_url !== undefined) doc.platform_url = body.platform_url.trim();
-  if (body.results_url !== undefined) doc.results_url = body.results_url || "";
-  if (body.results_until !== undefined) {
-    doc.results_until = body.results_until ? parseDate(body.results_until) : null;
-  }
   if (body.event_group_id !== undefined) doc.event_group_id = body.event_group_id;
   if (body.is_published !== undefined) {
     const wasPublished = doc.is_published;

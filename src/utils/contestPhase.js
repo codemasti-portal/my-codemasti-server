@@ -29,15 +29,7 @@ function getContestPhase(contest, now = new Date()) {
     return { phase: "live", highlight: true, cta: "join" };
   }
 
-  const resultsUrl = String(contest.results_url || "").trim();
-  if (resultsUrl) {
-    const until = contest.results_until ? new Date(contest.results_until).getTime() : Infinity;
-    if (Number.isNaN(until) || nowT < until) {
-      return { phase: "results", highlight: false, cta: "results" };
-    }
-  }
-
-  return { phase: "ended", highlight: false, cta: resultsUrl ? "results" : null };
+  return { phase: "results", highlight: false, cta: "results" };
 }
 
 function countdownSeconds(contest, now = new Date()) {

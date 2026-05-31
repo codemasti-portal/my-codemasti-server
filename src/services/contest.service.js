@@ -1,6 +1,7 @@
 const Contest = require("../models/Contest");
 const ScorecardTest = require("../models/ScorecardTest");
 const { getContestPhase, countdownSeconds } = require("../utils/contestPhase");
+const { buildContestResultsUrl } = require("../utils/contestResultsUrl");
 
 function normSectionId(v) {
   return String(v ?? "")
@@ -39,9 +40,12 @@ function isContestVisibleToStudent(student, contest, now = new Date()) {
 
 function sanitizeUrlsForPhase(contest, phase) {
   const platform_url = phase === "live" ? String(contest.platform_url || "").trim() : "";
-  const results_url =
-    phase === "results" || phase === "ended" ? String(contest.results_url || "").trim() : "";
-  return { platform_url: platform_url || null, results_url: results_url || null };
+  return { platform_url: platform_url || null };
+}
+
+function studentResultsUrl(phase, student) {
+  if (phase !== "results") return null;
+  return buildContestResultsUrl(student?.cst_registration_id);
 }
 
 function ctaLabel(cta, phase) {
@@ -52,9 +56,12 @@ function ctaLabel(cta, phase) {
   return null;
 }
 
-function toStudentContestRow(contest, test, now = new Date()) {
+function toStudentContestRow(contest, test, now = new Date(), student = null) {
   const { phase, highlight, cta } = getContestPhase(contest, now);
   const urls = sanitizeUrlsForPhase(contest, phase);
+  const cstId = String(student?.cst_registration_id || "").trim();
+  const has_cst_id = Boolean(cstId);
+  const pastContest = phase === "results";
   const te = test || {};
   return {
     id: String(contest._id),
@@ -69,7 +76,9 @@ function toStudentContestRow(contest, test, now = new Date()) {
     cta_kind: cta,
     countdown_seconds: countdownSeconds(contest, now),
     platform_url: urls.platform_url,
-    results_url: urls.results_url,
+    results_url: studentResultsUrl(phase, student),
+    has_cst_id,
+    missing_cst: pastContest && !has_cst_id,
     test: te.name
       ? {
           id: String(te._id),
@@ -95,8 +104,6 @@ function toAdminContestRow(contest, test, now = new Date()) {
     start_at: contest.start_at,
     end_at: contest.end_at,
     platform_url: contest.platform_url,
-    results_url: contest.results_url || "",
-    results_until: contest.results_until || null,
     event_group_id: contest.event_group_id || "",
     is_published: Boolean(contest.is_published),
     published_at: contest.published_at || null,
@@ -140,7 +147,7 @@ async function listContestsForStudent(student, { now = new Date(), includeEndedD
 
   const visible = rows.filter((c) => isContestVisibleToStudent(student, c, now));
   const tests = await loadTestsMap(visible.map((c) => c.test_id));
-  return visible.map((c) => toStudentContestRow(c, tests.get(String(c.test_id)), now));
+  return visible.map((c) => toStudentContestRow(c, tests.get(String(c.test_id)), now, student));
 }
 
 async function pickDashboardContestCard(student, now = new Date()) {
@@ -160,7 +167,7 @@ async function pickDashboardContestCard(student, now = new Date()) {
   if (!match) return null;
 
   const tests = await loadTestsMap([match.test_id]);
-  return toStudentContestRow(match, tests.get(String(match.test_id)), now);
+  return toStudentContestRow(match, tests.get(String(match.test_id)), now, student);
 }
 
 module.exports = {
