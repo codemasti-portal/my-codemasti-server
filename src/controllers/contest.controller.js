@@ -42,7 +42,7 @@ async function getMyContest(req, res) {
   }
 
   const tests = await loadTestsMap([row.test_id]);
-  return sendSuccess(res, toStudentContestRow(row, tests.get(String(row.test_id)), new Date()));
+  return sendSuccess(res, toStudentContestRow(row, tests.get(String(row.test_id)), new Date(), student));
 }
 
 module.exports = { listMyContests, getMyContest, pickDashboardContestCard, loadStudent };
