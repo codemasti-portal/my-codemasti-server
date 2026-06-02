@@ -5,6 +5,7 @@ const courses = require("../../controllers/admin-courses.controller");
 const enrollments = require("../../controllers/admin-enrollments.controller");
 const invoices = require("../../controllers/admin-invoices.controller");
 const payments = require("../../controllers/admin-payments.controller");
+const manualPayments = require("../../controllers/admin-manual-payments.controller");
 
 const router = express.Router();
 
@@ -42,5 +43,11 @@ router.get("/payments", ...adminOnly, payments.listPayments);
 router.get("/payments/reconciliation", ...adminOnly, payments.reconciliation);
 router.post("/payments/:id/refund", ...adminOnly, payments.refundPayment);
 router.get("/refunds", ...adminOnly, payments.listRefunds);
+
+// Manual UPI payment proofs (review queue)
+router.get("/manual-payments", ...adminOnly, manualPayments.listManualPayments);
+router.patch("/manual-payments/:id", ...adminOnly, manualPayments.patchManualPaymentNote);
+router.post("/manual-payments/:id/approve", ...adminOnly, manualPayments.approveManualPayment);
+router.post("/manual-payments/:id/reject", ...adminOnly, manualPayments.rejectManualPayment);
 
 module.exports = router;

@@ -1,13 +1,36 @@
 // Student-facing payment endpoints.
-//   POST /students/payments/initiate          → create Payment + return PhonePe redirect URL
-//   GET  /students/payments/status/:txnId     → poll PhonePe + sync DB; used by /checkout/return page
+//   GET  /students/payments/config             → active mode + UPI payee details
+//   POST /students/payments/initiate           → create Payment + return PhonePe redirect URL
+//   GET  /students/payments/status/:txnId      → poll PhonePe + sync DB; used by /checkout/return page
+//   POST /students/payments/manual             → submit a UPI screenshot proof (awaits admin review)
 
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const Invoice = require("../models/Invoice");
 const Payment = require("../models/Payment");
+const ManualPayment = require("../models/ManualPayment");
 const phonepe = require("../services/phonepe-gateway.service");
+const { getPaymentsMode, getUpiConfig } = require("../utils/paymentsConfig");
+const {
+  isCloudinaryConfigured,
+  uploadBufferToFolder,
+  buildPaymentProofUploadFolder,
+} = require("../utils/cloudinary");
+
+function manualPaymentOut(mp) {
+  return {
+    id: String(mp._id),
+    invoice_id: String(mp.invoice_id),
+    amount_paise: mp.amount_paise,
+    utr_reference: mp.utr_reference || "",
+    screenshot_url: mp.screenshot_url,
+    status: mp.status,
+    review_note: mp.review_note || "",
+    reviewed_at: mp.reviewed_at,
+    created_at: mp.createdAt,
+  };
+}
 
 function genMerchantTxnId(invoiceId) {
   const shortInv = String(invoiceId).slice(-8);
@@ -171,4 +194,90 @@ async function getPaymentStatus(req, res) {
   });
 }
 
-module.exports = { initiatePayment, getPaymentStatus };
+/** GET /students/payments/config — which flow is active + UPI payee details for the manual flow. */
+async function getPaymentConfig(req, res) {
+  const mode = getPaymentsMode();
+  const payload = { mode };
+  if (mode === "manual_upi") {
+    payload.upi = getUpiConfig();
+  }
+  return sendSuccess(res, payload);
+}
+
+const manualSubmitSchema = z.object({
+  invoice_id: z.string().min(1),
+  utr_reference: z.string().trim().max(64).optional(),
+});
+
+/**
+ * POST /students/payments/manual — student uploads a UPI payment screenshot.
+ * This does NOT mark the invoice paid. It creates a `submitted` ManualPayment that a super_admin
+ * must verify against the actual bank credit and approve. Screenshots are not trusted as proof.
+ * Multipart: field `screenshot` (image) + body { invoice_id, utr_reference? }.
+ */
+async function submitManualPayment(req, res) {
+  const sid = req.user?.sub;
+  if (!mongoose.Types.ObjectId.isValid(sid)) {
+    return sendError(res, 400, "INVALID_USER", "Invalid session");
+  }
+  const parsed = manualSubmitSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return sendError(res, 400, "VALIDATION_ERROR", parsed.error.issues[0]?.message || "Invalid body");
+  }
+  const { invoice_id, utr_reference } = parsed.data;
+  if (!mongoose.Types.ObjectId.isValid(invoice_id)) {
+    return sendError(res, 400, "INVALID_ID", "Invalid invoice id");
+  }
+  if (!req.file?.buffer) {
+    return sendError(res, 400, "SCREENSHOT_REQUIRED", "A payment screenshot is required");
+  }
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", "File uploads are not configured");
+  }
+
+  const invoice = await Invoice.findOne({ _id: invoice_id, student_id: sid });
+  if (!invoice) return sendError(res, 404, "NOT_FOUND", "Invoice not found");
+  if (invoice.status !== "pending") {
+    return sendError(res, 409, "INVOICE_NOT_PAYABLE", `Invoice is ${invoice.status}`);
+  }
+  if (!Number.isFinite(invoice.total_due_paise) || invoice.total_due_paise <= 0) {
+    return sendError(res, 400, "ZERO_DUE", "Invoice has no outstanding amount");
+  }
+
+  // Block a second submission while one is already awaiting review (avoids duplicate claims).
+  const existing = await ManualPayment.findOne({ invoice_id: invoice._id, status: "submitted" });
+  if (existing) {
+    return sendError(res, 409, "ALREADY_SUBMITTED", "A payment proof is already under review for this invoice");
+  }
+
+  let uploaded;
+  try {
+    const folder = buildPaymentProofUploadFolder("image");
+    uploaded = await uploadBufferToFolder(req.file.buffer, "image", folder, {
+      filenameOverride: req.file.originalname || `proof-${invoice.invoice_number}`,
+    });
+  } catch (err) {
+    return sendError(res, 502, "UPLOAD_FAILED", err.message || "Could not upload screenshot");
+  }
+
+  const { vpa } = getUpiConfig();
+  const mp = await ManualPayment.create({
+    invoice_id: invoice._id,
+    student_id: sid,
+    amount_paise: invoice.total_due_paise,
+    payee_vpa: vpa,
+    utr_reference: (utr_reference || "").trim(),
+    screenshot_url: uploaded.secure_url || uploaded.url || "",
+    screenshot_public_id: uploaded.public_id || "",
+    status: "submitted",
+  });
+
+  return sendSuccess(res, manualPaymentOut(mp), "Payment proof submitted for review");
+}
+
+module.exports = {
+  initiatePayment,
+  getPaymentStatus,
+  getPaymentConfig,
+  submitManualPayment,
+};
