@@ -191,6 +191,19 @@ function buildBadgeProgramUploadFolder(resourceType) {
   );
 }
 
+/**
+ * Manual UPI payment proof screenshots: {root}/images/YYYY/MM
+ * CLOUDINARY_PAYMENT_PROOFS_FOLDER (default codemasti/payments/proofs), CLOUDINARY_PAYMENT_PROOFS_USE_DATE
+ */
+function buildPaymentProofUploadFolder(resourceType) {
+  return buildDatedSubfolder(
+    "codemasti/payments/proofs",
+    "CLOUDINARY_PAYMENT_PROOFS_FOLDER",
+    "CLOUDINARY_PAYMENT_PROOFS_USE_DATE",
+    resourceType
+  );
+}
+
 module.exports = {
   cloudinary,
   isCloudinaryConfigured,
@@ -202,6 +215,7 @@ module.exports = {
   buildAssignmentUploadFolder,
   buildAssignmentQuestionUploadFolder,
   buildBadgeProgramUploadFolder,
+  buildPaymentProofUploadFolder,
   buildCommunityUploadFolder,
   buildDoubtsUploadFolder,
   buildStudentAvatarFolder,

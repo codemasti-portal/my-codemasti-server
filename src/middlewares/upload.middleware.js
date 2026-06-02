@@ -66,6 +66,16 @@ exports.staffProfileImageUpload = multer({
   },
 }).single("file");
 
+/** Manual UPI payment proof screenshot → memory → Cloudinary. Field name: screenshot */
+exports.paymentProofUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error("Only jpeg, png, webp, or gif screenshots are allowed"));
+  },
+}).single("screenshot");
+
 exports.staffResumeUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },

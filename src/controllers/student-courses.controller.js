@@ -7,6 +7,7 @@ const StudentEnrollment = require("../models/StudentEnrollment");
 const Course = require("../models/Course");
 const Invoice = require("../models/Invoice");
 const Payment = require("../models/Payment");
+const ManualPayment = require("../models/ManualPayment");
 
 const STATUS_RANK = { active: 0, completed: 1, cancelled: 2 };
 
@@ -165,6 +166,27 @@ async function getMyCourseDetail(req, res) {
     paymentsByInvoice.get(key).push(paymentRow(p));
   }
 
+  // Latest manual-UPI proof per invoice, so the Fees tab can show "Under review" / "Rejected".
+  const manualByInvoice = new Map();
+  if (invoiceIds.length) {
+    const manuals = await ManualPayment.find({ invoice_id: { $in: invoiceIds }, student_id: sid })
+      .sort({ createdAt: -1 })
+      .lean();
+    for (const m of manuals) {
+      const key = String(m.invoice_id);
+      if (!manualByInvoice.has(key)) {
+        manualByInvoice.set(key, {
+          id: String(m._id),
+          status: m.status,
+          review_note: m.review_note || "",
+          utr_reference: m.utr_reference || "",
+          screenshot_url: m.screenshot_url || "",
+          created_at: m.createdAt,
+        });
+      }
+    }
+  }
+
   const totalOutstandingPaise = invoices
     .filter((i) => i.status === "pending")
     .reduce((s, i) => s + (i.total_due_paise || 0), 0);
@@ -182,6 +204,7 @@ async function getMyCourseDetail(req, res) {
     invoices: invoices.map((i) => ({
       ...invoiceRow(i),
       payments: paymentsByInvoice.get(String(i._id)) || [],
+      manual_payment: manualByInvoice.get(String(i._id)) || null,
     })),
     total_outstanding_paise: totalOutstandingPaise,
   });
