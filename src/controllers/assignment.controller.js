@@ -10,6 +10,7 @@ const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
+const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
 const { executePythonCode } = require("../services/python-executor-local");
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
@@ -402,9 +403,11 @@ async function filters(req, res) {
   }
   await scopeStudentToBatch(req, student);
   const batchIds = membershipKeysOr(student, [String(student.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  // Subjects come from the batch catalog (single source of truth), independent of what content exists.
+  const subjects = batchIds.length ? await catalogSubjectsForBatches(batchIds) : [];
   if (!batchIds.length) {
     return sendSuccess(res, {
-      subjects: [],
+      subjects,
       difficulties: [],
       assignment_types: [],
       statuses: ["pending", "attempted", "solved"],
@@ -415,20 +418,15 @@ async function filters(req, res) {
   const assignmentIds = (await Assignment.find(assignmentFilter).select("_id").lean()).map((x) => x._id);
   if (!assignmentIds.length) {
     return sendSuccess(res, {
-      subjects: [],
+      subjects,
       difficulties: [],
       assignment_types: [],
       statuses: ["pending", "attempted", "solved"],
     });
   }
 
-  const [subjectsRows, difficultiesRows, assignmentTypesRows] = await Promise.all([
-    Assignment.aggregate([
-      { $match: { _id: { $in: assignmentIds } } },
-      { $group: { _id: "$subject" } },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { _id: 1 } },
-    ]),
+  // Difficulty + assignment_type stay content-derived (they are not catalog-managed).
+  const [difficultiesRows, assignmentTypesRows] = await Promise.all([
     AssignmentQuestion.aggregate([
       { $match: { assignment_id: { $in: assignmentIds } } },
       { $group: { _id: "$difficulty" } },
@@ -443,7 +441,7 @@ async function filters(req, res) {
     ]),
   ]);
   return sendSuccess(res, {
-    subjects: subjectsRows.map((r) => r._id).filter(Boolean),
+    subjects,
     difficulties: difficultiesRows.map((r) => String(r._id || "").toLowerCase()).filter(Boolean),
     assignment_types: assignmentTypesRows.map((r) => String(r._id || "").toLowerCase()).filter(Boolean),
     statuses: ["pending", "attempted", "solved"],

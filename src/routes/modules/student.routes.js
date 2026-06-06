@@ -18,6 +18,7 @@ router.post("/me/password/otp/verify", requireAuth, controller.verifyPasswordUpd
 router.post("/me/password/otp/update", requireAuth, controller.updatePasswordWithOtp);
 router.get("/me", requireAuth, controller.getMe);
 router.patch("/me", requireAuth, controller.patchMe);
+router.get("/subjects", requireAuth, controller.subjects);
 
 router.get("/scorecard/tests", requireAuth, scorecard.listActiveScorecardTests);
 router.get("/scorecard/records", requireAuth, scorecard.listMyScorecardRecords);

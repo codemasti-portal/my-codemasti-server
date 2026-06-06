@@ -3,7 +3,6 @@ const { sendSuccess, sendError } = require("../utils/response");
 const PersonalDoubt = require("../models/PersonalDoubt");
 const CommunityMessage = require("../models/CommunityMessage");
 const Student = require("../models/Student");
-const BatchCatalog = require("../models/BatchCatalog");
 const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
@@ -11,6 +10,7 @@ const {
   buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
 const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { catalogSubjects } = require("../utils/catalog-subjects");
 
 function mediaResourceType(mimetype) {
   const type = String(mimetype || "");
@@ -82,24 +82,9 @@ async function listSubjects(req, res) {
   const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
   if (student) await scopeStudentToBatch(req, student);
   const batchId = String(student?.batch_id || "").trim().toLowerCase();
-  const sectionId = String(student?.section_id || "").trim().toLowerCase();
   if (!batchId) return sendSuccess(res, []);
-
-  const batch = await BatchCatalog.findOne({ batch_id: batchId }).lean();
-  if (!batch) return sendSuccess(res, []);
-
-  const sections = Array.isArray(batch.sections) ? batch.sections : [];
-  const subjectSet = new Set();
-  for (const section of sections) {
-    const sid = String(section?.section_id || "").trim().toLowerCase();
-    if (sectionId && sid && sid !== sectionId) continue;
-    for (const subject of section?.subjects || []) {
-      const s = String(subject || "").trim();
-      if (s) subjectSet.add(s);
-    }
-  }
-
-  return sendSuccess(res, [...subjectSet].sort((a, b) => a.localeCompare(b)));
+  // Subjects come from the batch catalog (single source of truth).
+  return sendSuccess(res, await catalogSubjects(batchId));
 }
 
 async function listPersonal(req, res) {

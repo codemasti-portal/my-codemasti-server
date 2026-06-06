@@ -34,6 +34,19 @@ const {
   assignmentDocTouchesAllowedBatches,
   arenaDocTouchesAllowedBatches,
 } = require("../utils/instructorBatchScope");
+const { validateBatchSubject, invalidSubjectMessage } = require("../utils/catalog-subjects");
+
+/**
+ * Single-source-of-truth subject guard: a provided subject must match the targeted batch(es) catalog
+ * (case-insensitive). Returns { ok, value } where value is the canonical casing to store. An empty /
+ * omitted subject is allowed (untagged content). On mismatch it sends a 400 and returns { ok: false }.
+ */
+async function resolveCatalogSubjectOrError(res, batchIds, subject) {
+  const r = await validateBatchSubject(batchIds, subject);
+  if (r.ok) return { ok: true, value: r.value };
+  sendError(res, 400, "INVALID_SUBJECT", invalidSubjectMessage(r.allowed));
+  return { ok: false };
+}
 
 const starterCodeSchema = z
   .object({
@@ -308,6 +321,10 @@ async function createAssignment(req, res) {
     }
   }
 
+  const subjCheck = await resolveCatalogSubjectOrError(res, batchIds, body.subject);
+  if (!subjCheck.ok) return;
+  body.subject = subjCheck.value;
+
   // Create one assignment record per batch
   const createdAssignments = [];
   for (const batchId of batchIds) {
@@ -433,9 +450,15 @@ async function updateAssignment(req, res) {
     doc.batch_ids = one ? [one] : [];
   }
   
+  if (body.subject !== undefined) {
+    const subjCheck = await resolveCatalogSubjectOrError(res, doc.batch_ids, body.subject);
+    if (!subjCheck.ok) return;
+    body.subject = subjCheck.value;
+  }
+
   const { batch_id: _b, batch_ids: _bs, ...rest } = body;
   Object.assign(doc, rest);
-  
+
   const rel = doc.release_date;
   const due = doc.deadline_date;
   if (rel && due && new Date(due).getTime() < new Date(rel).getTime()) {
@@ -716,7 +739,12 @@ async function createArenaQuestion(req, res) {
         }
       }
     }
-    
+
+    const arenaBatchIds = hasBatchIds ? body.batch_ids : [body.batch_id];
+    const subjCheck = await resolveCatalogSubjectOrError(res, arenaBatchIds, body.subject);
+    if (!subjCheck.ok) return;
+    if (subjCheck.value !== undefined) body.subject = subjCheck.value;
+
     const created = await ArenaQuestion.create({
       ...body,
       starter_code: body.starter_code || {},
@@ -762,6 +790,19 @@ async function updateArenaQuestion(req, res) {
           }
         }
       }
+    }
+    if (body.subject !== undefined) {
+      const effBatchIds =
+        body.batch_ids && body.batch_ids.length
+          ? body.batch_ids
+          : body.batch_id
+            ? [body.batch_id]
+            : doc.batch_ids && doc.batch_ids.length
+              ? doc.batch_ids
+              : [doc.batch_id];
+      const subjCheck = await resolveCatalogSubjectOrError(res, effBatchIds, body.subject);
+      if (!subjCheck.ok) return;
+      body.subject = subjCheck.value;
     }
     Object.assign(doc, body);
     await doc.save();
@@ -863,6 +904,9 @@ async function createLiveClass(req, res) {
       return sendError(res, 403, "FORBIDDEN", "Live class must be in one of your assigned batches");
     }
   }
+  const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id], body.subject);
+  if (!subjCheck.ok) return;
+  body.subject = subjCheck.value;
   const created = await LiveClass.create(body);
   return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
 }
@@ -897,6 +941,11 @@ async function updateLiveClass(req, res) {
       }
     }
     body.instructor = ownName;
+  }
+  if (body.subject !== undefined) {
+    const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id || doc.batch_id], body.subject);
+    if (!subjCheck.ok) return;
+    body.subject = subjCheck.value;
   }
   Object.assign(doc, body);
   await doc.save();
@@ -1061,6 +1110,9 @@ async function createTimetableSlot(req, res) {
     }
     body.teacher = ownName;
   }
+  const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id], body.subject);
+  if (!subjCheck.ok) return;
+  body.subject = subjCheck.value;
   const derivedDay = weekdayFromDateString(body.class_date);
   if (!derivedDay) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
 
@@ -1164,6 +1216,11 @@ async function updateTimetableSlot(req, res) {
     const d = weekdayFromDateString(doc.class_date);
     if (!d) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
     doc.day = d;
+  }
+  if (body.subject !== undefined) {
+    const subjCheck = await resolveCatalogSubjectOrError(res, [doc.batch_id], body.subject);
+    if (!subjCheck.ok) return;
+    body.subject = subjCheck.value;
   }
   const { notify_resource_by_email: _notifyEmail, batch_id: _b, section_id: _s, ...rest } = body;
   Object.assign(doc, rest);

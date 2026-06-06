@@ -15,6 +15,8 @@ const {
   buildStudentAvatarFolder,
 } = require("../utils/cloudinary");
 const { getUploadsRoot } = require("../utils/upload-paths");
+const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { catalogSubjects } = require("../utils/catalog-subjects");
 
 const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
@@ -260,9 +262,23 @@ async function updatePasswordWithOtp(req, res) {
   return sendSuccess(res, {}, "Password updated successfully.");
 }
 
+/**
+ * GET /v1/students/subjects — the batch catalog's subjects for the student's selected/primary batch.
+ * Single source of truth for every student-facing subject list (arena/recordings/class-notes/lectures
+ * read this instead of deriving subjects from content). Honors the ?batch_id header switch.
+ */
+async function subjects(req, res) {
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
+  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
+  await scopeStudentToBatch(req, student);
+  const batchId = String(student.batch_id || "").trim().toLowerCase();
+  return sendSuccess(res, batchId ? await catalogSubjects(batchId) : []);
+}
+
 module.exports = {
   getMe,
   patchMe,
+  subjects,
   uploadAvatar,
   changePassword,
   sendPasswordUpdateOtp,

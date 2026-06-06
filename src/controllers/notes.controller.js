@@ -4,6 +4,7 @@ const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { cloudinary, ensureCloudinaryConfig } = require("../utils/cloudinary");
 const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { catalogSubjects } = require("../utils/catalog-subjects");
 
 function studentBatchCandidates(student) {
   const vals = [
@@ -102,13 +103,9 @@ async function filters(req, res) {
   }
   await scopeStudentToBatch(req, student);
   const vis = studentNoteVisibilityFilter(student);
-  const [subjectsRows, monthsRows] = await Promise.all([
-    Note.aggregate([
-      { $match: vis },
-      { $group: { _id: "$subject" } },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { _id: 1 } },
-    ]),
+  // Subjects come from the batch catalog (single source of truth), NOT from distinct note tags.
+  const [subjects, monthsRows] = await Promise.all([
+    catalogSubjects(String(student.batch_id || "")),
     Note.aggregate([
       { $match: vis },
       {
@@ -122,10 +119,7 @@ async function filters(req, res) {
     ]),
   ]);
   return sendSuccess(res, {
-    subjects: subjectsRows
-      .map((r) => r._id)
-      .filter(Boolean)
-      .sort((a, b) => String(a).localeCompare(String(b))),
+    subjects,
     months: monthsRows.map((r) => r._id).filter(Boolean),
   });
 }
