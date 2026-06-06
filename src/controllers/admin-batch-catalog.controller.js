@@ -6,7 +6,9 @@ const Assignment = require("../models/Assignment");
 const { assignmentVisibleToCatalogBatchCountFilter } = require("../utils/assignmentBatchFilter");
 const { DEFAULT_BATCHES, DEFAULT_SECTIONS_BY_BATCH } = require("../constants/batchDefaults");
 const { catalogBatchMongoMatch, augmentStudentCatalogFieldsFromEnrollment, catalogBatchStudentFilter } = require("../utils/enrollment");
+const { catalogBatchMongoMatchResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { getInstructorAssignedBatchIds } = require("../utils/instructorBatchScope");
+const registry = require("../utils/batch-catalog-registry");
 
 function normCatalogSectionId(s) {
   return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "-");
@@ -16,7 +18,18 @@ async function ensureDefaultBatches() {
   for (const d of DEFAULT_BATCHES) {
     await BatchCatalog.updateOne(
       { batch_id: d.batch_id },
-      { $setOnInsert: { name: d.name, order: d.order, sections: [] } },
+      {
+        $setOnInsert: {
+          name: d.name,
+          order: d.order,
+          sections: [],
+          enrollment_prefix: d.enrollment_prefix || "",
+          tier_label: d.tier_label || "",
+          is_protected: d.is_protected === true,
+          is_active: true,
+          include_in_default_views: d.include_in_default_views !== false,
+        },
+      },
       { upsert: true }
     );
   }
@@ -56,13 +69,39 @@ const createBody = z.object({
   name: z.string().min(1).trim(),
   order: z.number().int().optional(),
   sections: z.array(sectionSchema).optional().default([]),
+  enrollment_prefix: z.string().trim().max(2).optional(),
+  tier_label: z.string().trim().max(80).optional(),
+  include_in_default_views: z.boolean().optional(),
 });
 
 const updateBody = z.object({
   name: z.string().min(1).trim().optional(),
   order: z.number().int().optional(),
   sections: z.array(sectionSchema).optional(),
+  enrollment_prefix: z.string().trim().max(2).optional(),
+  tier_label: z.string().trim().max(80).optional(),
+  include_in_default_views: z.boolean().optional(),
 });
+
+/** Validate + normalize an enrollment prefix; ensure no other batch already uses it. */
+async function validateUniquePrefix(rawPrefix, exceptBatchId = "") {
+  const prefix = String(rawPrefix || "").trim().toUpperCase();
+  if (!prefix) return { prefix: "" };
+  if (!/^[A-Z]{1,2}$/.test(prefix)) {
+    return { error: "enrollment_prefix must be 1–2 letters (e.g. S, B, I, WK)" };
+  }
+  // Check the registry seed too — it owns S/B/I even before they're backfilled into the DB,
+  // so a new batch can't claim a seeded prefix while the partial-unique DB index can't see it yet.
+  const regOwner = registry.prefixToBatchIdSync(prefix);
+  if (regOwner && regOwner !== exceptBatchId) {
+    return { error: `Enrollment prefix "${prefix}" is already used by batch "${regOwner}"` };
+  }
+  const clash = await BatchCatalog.findOne({ enrollment_prefix: prefix }).lean();
+  if (clash && clash.batch_id !== exceptBatchId) {
+    return { error: `Enrollment prefix "${prefix}" is already used by batch "${clash.batch_id}"` };
+  }
+  return { prefix };
+}
 
 function normalizeSections(sections) {
   const seen = new Set();
@@ -94,6 +133,12 @@ function serialize(doc) {
       name: s.name,
       subjects: s.subjects || [],
     })),
+    // Registry fallback so the three seeded batches show correct values even before backfill.
+    enrollment_prefix: o.enrollment_prefix || registry.batchIdToPrefixSync(o.batch_id) || "",
+    tier_label: o.tier_label || registry.tierLabelSync(o.batch_id) || "",
+    is_protected: o.is_protected !== undefined ? !!o.is_protected : registry.isProtectedSync(o.batch_id),
+    is_active: o.is_active !== false,
+    include_in_default_views: o.include_in_default_views !== false,
     updatedAt: o.updatedAt,
     createdAt: o.createdAt,
   };
@@ -108,11 +153,14 @@ async function list(req, res) {
         ? { batch_id: { $in: instructorBatches } }
         : { _id: null }
       : {};
+  // Hide soft-retired batches (is_active:false). Existing rows have no is_active field, so
+  // `$ne:false` keeps them visible — only explicitly retired batches drop off.
+  batchQuery.is_active = { $ne: false };
   const rows = await BatchCatalog.find(batchQuery).sort({ order: 1, name: 1 }).lean();
   const out = await Promise.all(
     rows.map(async (r) => {
       const base = serialize(r);
-      const filter = { role: "student", ...catalogBatchMongoMatch(r.batch_id) };
+      const filter = { role: "student", ...(await catalogBatchMongoMatchResolved(r.batch_id)) };
       const assignFilter = assignmentVisibleToCatalogBatchCountFilter(r.batch_id);
       const [student_count, assignment_count] = await Promise.all([
         Student.countDocuments(filter),
@@ -132,7 +180,7 @@ async function list(req, res) {
 async function listStudentsInBatch(req, res) {
   const batch_id = String(req.params.batch_id || "").trim().toLowerCase();
   const rawSection = req.query.section_id;
-  const filter = catalogBatchStudentFilter(batch_id, rawSection);
+  const filter = await catalogBatchStudentFilterResolved(batch_id, rawSection);
 
   const limit = Math.min(Number(req.query.limit) || 2000, 5000);
   const [students, total] = await Promise.all([
@@ -178,12 +226,19 @@ async function create(req, res) {
   } catch (e) {
     return sendError(res, 400, "VALIDATION_ERROR", e.message || "Invalid sections");
   }
+  const { prefix, error: prefixErr } = await validateUniquePrefix(body.enrollment_prefix);
+  if (prefixErr) return sendError(res, 400, "VALIDATION_ERROR", prefixErr);
   const doc = await BatchCatalog.create({
     batch_id,
     name: body.name,
     order: body.order ?? 0,
     sections,
+    enrollment_prefix: prefix,
+    tier_label: body.tier_label || "",
+    is_active: true,
+    include_in_default_views: body.include_in_default_views !== false,
   });
+  await registry.refresh(true);
   return sendSuccess(res, serialize(doc), "Batch created");
 }
 
@@ -201,18 +256,46 @@ async function update(req, res) {
       return sendError(res, 400, "VALIDATION_ERROR", e.message || "Invalid sections");
     }
   }
+  if (body.enrollment_prefix !== undefined) {
+    const { prefix, error: prefixErr } = await validateUniquePrefix(body.enrollment_prefix, batch_id);
+    if (prefixErr) return sendError(res, 400, "VALIDATION_ERROR", prefixErr);
+    doc.enrollment_prefix = prefix;
+  }
+  if (body.tier_label !== undefined) doc.tier_label = body.tier_label;
+  if (body.include_in_default_views !== undefined) doc.include_in_default_views = !!body.include_in_default_views;
   await doc.save();
+  await registry.refresh(true);
   return sendSuccess(res, serialize(doc), "Batch updated");
 }
 
 async function remove(req, res) {
   const batch_id = String(req.params.batch_id || "").trim().toLowerCase();
-  if (DEFAULT_BATCHES.some((d) => d.batch_id === batch_id)) {
-    return sendError(res, 400, "FORBIDDEN", "Cannot delete a default batch (Spark, Builders, Innovators)");
+  if (DEFAULT_BATCHES.some((d) => d.batch_id === batch_id) || registry.isProtectedSync(batch_id)) {
+    return sendError(res, 400, "FORBIDDEN", "Cannot delete a protected batch (Spark, Builders, Innovators)");
   }
-  const r = await BatchCatalog.deleteOne({ batch_id });
-  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Batch not found");
-  return sendSuccess(res, {}, "Batch deleted");
+  // Pre-flight: don't strand students. A batch with active members would leave them in a retired
+  // batch (still billed, hidden from add/remove). Block unless ?force=1. Checks both the enrollment
+  // membership (M:N) and the legacy batch_id/enrollment-letter membership.
+  const StudentEnrollment = require("../models/StudentEnrollment");
+  const [enrolledActive, legacyMembers] = await Promise.all([
+    StudentEnrollment.countDocuments({ batch_id, status: "active" }),
+    Student.countDocuments({ role: "student", ...catalogBatchMongoMatch(batch_id) }),
+  ]);
+  const memberCount = Math.max(enrolledActive, legacyMembers);
+  if (memberCount > 0 && String(req.query.force || "") !== "1") {
+    return sendError(
+      res,
+      409,
+      "BATCH_HAS_ACTIVE_STUDENTS",
+      `~${memberCount} student(s) are still in "${batch_id}". Move/complete them first, or retry with ?force=1.`
+    );
+  }
+  // Soft-retire instead of hard delete: preserve historical data and avoid orphaning
+  // enrollments / content that reference this batch_id. Retired batches are hidden from lists.
+  const r = await BatchCatalog.updateOne({ batch_id }, { $set: { is_active: false } });
+  if (r.matchedCount === 0) return sendError(res, 404, "NOT_FOUND", "Batch not found");
+  await registry.refresh(true);
+  return sendSuccess(res, {}, "Batch retired");
 }
 
 module.exports = { list, getOne, create, update, remove, listStudentsInBatch };

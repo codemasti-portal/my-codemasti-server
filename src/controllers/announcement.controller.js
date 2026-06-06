@@ -3,7 +3,7 @@ const Announcement = require("../models/Announcement");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { postedByStudentLabel } = require("../utils/announcementAuthor");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr, membershipMode, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 
 function normSid(v) {
   return String(v ?? "")
@@ -16,12 +16,14 @@ function programMatches(rawStudent, ann) {
   if (ann.scope !== "batch") return false;
   const student = augmentStudentCatalogFieldsFromEnrollment(rawStudent || {});
   const annBid = String(ann.batch_id || "").trim().toLowerCase();
-  const stBid = String(student.batch_id || "").trim().toLowerCase();
   const annB = String(ann.batch || "").trim().toLowerCase();
+  // Read-switch: legacy = [primary batch_id]; non-legacy = full attached membership set.
+  const stBids = membershipKeysOr(rawStudent, [String(student.batch_id || "").trim().toLowerCase()].filter(Boolean));
   const stB = String(student.batch || "").trim().toLowerCase();
   if (annBid) {
-    if (stBid && annBid === stBid) return true;
-    if (!stBid && stB && annB && stB === annB) return true;
+    if (stBids.includes(annBid)) return true;
+    // Legacy label fallback: student with no batch_id but a display label matching the announcement.
+    if (!stBids.length && stB && annB && stB === annB) return true;
     return false;
   }
   return annB === stB && Boolean(annB);
@@ -30,7 +32,10 @@ function programMatches(rawStudent, ann) {
 function sectionAllows(student, ann) {
   const ids = Array.isArray(ann.section_ids) ? ann.section_ids.map(normSid).filter(Boolean) : [];
   if (ids.length === 0) return true;
-  const eff = normSid(student.section_id || student.enrollment_section || "");
+  // Per-batch section when available (non-legacy): the student's section IN the announcement's batch.
+  const annBid = String(ann.batch_id || "").trim().toLowerCase();
+  const perBatch = student?.__sectionByBatch && annBid ? student.__sectionByBatch[annBid] : undefined;
+  const eff = normSid(perBatch != null ? perBatch : student.section_id || student.enrollment_section || "");
   if (!eff) return false;
   return ids.includes(eff);
 }
@@ -56,7 +61,14 @@ async function list(req, res) {
   const scope = req.query.scope;
 
   const student = await Student.findById(req.user.sub).lean();
-  if (student) await scopeStudentToBatch(req, student);
+  if (student) {
+    await scopeStudentToBatch(req, student);
+    if (membershipMode() !== "legacy") {
+      // Per-batch section map so section-scoped announcements match the student's section IN that batch.
+      const { sectionByBatch } = await enrollmentBatchIdsForStudent(student._id);
+      student.__sectionByBatch = sectionByBatch;
+    }
+  }
   const all = await Announcement.find({}).sort({ date: -1 }).lean();
 
   let visible = all.filter((a) => isAnnouncementVisible(student, a) && isAnnouncementPublished(a));

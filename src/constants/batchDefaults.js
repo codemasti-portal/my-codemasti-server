@@ -4,9 +4,9 @@
  * or are added in admin. No placeholder “core” section.
  */
 const DEFAULT_BATCHES = [
-  { batch_id: "spark", name: "Spark", order: 0 },
-  { batch_id: "builders", name: "Builders", order: 1 },
-  { batch_id: "innovators", name: "Innovators", order: 2 },
+  { batch_id: "spark", name: "Spark", order: 0, enrollment_prefix: "S", tier_label: "Beginner", is_protected: true, include_in_default_views: true },
+  { batch_id: "builders", name: "Builders", order: 1, enrollment_prefix: "B", tier_label: "Intermediate", is_protected: true, include_in_default_views: true },
+  { batch_id: "innovators", name: "Innovators", order: 2, enrollment_prefix: "I", tier_label: "Advanced", is_protected: true, include_in_default_views: true },
 ];
 
 /** Empty defaults — catalog sections are created in admin or implied from student enrollment_section. */

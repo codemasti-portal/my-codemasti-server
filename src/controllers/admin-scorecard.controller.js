@@ -2,10 +2,12 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const { catalogBatchMongoMatch, studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
+const { studentsInBatchesFilterResolved, catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
 const Student = require("../models/Student");
 const ScorecardEntry = require("../models/ScorecardEntry");
 const ScorecardTest = require("../models/ScorecardTest");
-const { getInstructorAssignedBatchIds, studentInAnyAssignedBatch } = require("../utils/instructorBatchScope");
+const { getInstructorAssignedBatchIds, studentInAnyAssignedBatchResolved } = require("../utils/instructorBatchScope");
+const registry = require("../utils/batch-catalog-registry");
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 const TEST_TYPE_ENUM = z.enum(ScorecardTest.SCORECARD_TEST_TYPES);
@@ -89,8 +91,11 @@ function enrichRecord(entry, student, test) {
     student_name: st.name || "",
     cst_id: st.cst_registration_id || "",
     enrollment_number: st.enrollment_number || "",
-    student_batch_id: String(st.batch_id || "").toLowerCase() || String(st.batch || "").toLowerCase() || "",
-    student_batch_label: st.batch || st.batch_id || "",
+    // The batch this SCORE belongs to is the entry's own batch context (the test was scored under this
+    // batch), not the student's primary batch — which differs for a multi-batch student.
+    student_batch_id: String(entry.batch_id || st.batch_id || "").toLowerCase() || String(st.batch || "").toLowerCase() || "",
+    student_batch_label:
+      registry.displayNameSync(String(entry.batch_id || "").toLowerCase()) || entry.batch_id || st.batch || st.batch_id || "",
     test_name: te.name || null,
     exam_type_display: entry.exam_type || te.test_type || "",
     exam_date_resolved: entry.exam_date || te.exam_date || null,
@@ -168,10 +173,19 @@ async function assertStudentInBatch(batchId, studentId) {
   if (!mongoose.Types.ObjectId.isValid(studentId)) {
     return null;
   }
+  // Read-switch: legacy spreads the batch_id/enrollment partial; non-legacy resolves the batch's
+  // enrolled student-id set and checks membership (avoids a double-_id key collision in the filter).
+  const scope = await catalogBatchMongoMatchResolved(batchId);
+  if (scope && scope._id && Array.isArray(scope._id.$in)) {
+    const inSet = scope._id.$in.some((x) => String(x) === String(studentId));
+    if (!inSet) return null;
+    const student = await Student.findOne({ _id: studentId, role: "student" }).select("_id").lean();
+    return student || null;
+  }
   const student = await Student.findOne({
     _id: studentId,
     role: "student",
-    ...catalogBatchMongoMatch(batchId),
+    ...scope,
   })
     .select("_id")
     .lean();
@@ -227,7 +241,7 @@ async function listEntries(req, res) {
       return sendSuccess(res, []);
     }
     const st = await Student.findOne({ _id: query.student_id, role: "student" }).lean();
-    if (!st || !studentInAnyAssignedBatch(st, instructorBatches)) {
+    if (!st || !(await studentInAnyAssignedBatchResolved(st, instructorBatches))) {
       return sendError(res, 403, "FORBIDDEN", "Student is not in your assigned batches");
     }
   }
@@ -811,7 +825,7 @@ async function spreadsheetStudents(req, res) {
     }
   }
 
-  const filter = studentsInCatalogBatchesFilter([batch_id]);
+  const filter = await studentsInBatchesFilterResolved([batch_id]);
   const students = await Student.find(filter)
     .select("_id name email enrollment_number cst_registration_id batch_id batch")
     .sort({ enrollment_number: 1, name: 1 })
@@ -944,6 +958,7 @@ async function batchSaveEntries(req, res) {
 async function bulkCreateByCst(req, res) {
   const bodySchema = z.object({
     test_id: z.string().min(1),
+    batch_id: z.string().min(1).max(40),
     rows: z
       .array(
         z.object({
@@ -967,6 +982,10 @@ async function bulkCreateByCst(req, res) {
   const test = await loadTestForWrite(test_id);
   if (!test) return sendError(res, 404, "TEST_NOT_FOUND", "Test not found");
 
+  // Import is scoped to ONE batch: each score is attributed to THIS batch (correct for multi-batch
+  // students), and CSV rows for students not active in this batch are reported rather than mis-filed.
+  const batchNorm = normalizeBatchId(parsed.data.batch_id);
+
   const task_label = test.name;
   const exam_type = test.test_type;
   const exam_date = test.exam_date;
@@ -974,11 +993,9 @@ async function bulkCreateByCst(req, res) {
   const assessment_period = derivePeriod(exam_date);
 
   const cstIds = [...new Set(rows.map((r) => r.cst_id))];
-  const students = await Student.find({
-    cst_registration_id: { $in: cstIds },
-    role: "student",
-  })
-    .select("_id cst_registration_id batch_id batch")
+  const batchFilter = await studentsInBatchesFilterResolved([batchNorm]);
+  const students = await Student.find({ ...batchFilter, cst_registration_id: { $in: cstIds } })
+    .select("_id cst_registration_id")
     .lean();
   const byCst = new Map(students.map((s) => [s.cst_registration_id, s]));
 
@@ -990,7 +1007,7 @@ async function bulkCreateByCst(req, res) {
     const row = rows[i];
     const student = byCst.get(row.cst_id);
     if (!student) {
-      errors.push({ index: i, cst_id: row.cst_id, message: "Student not found for this CST ID" });
+      errors.push({ index: i, cst_id: row.cst_id, message: "No student in this batch with this CST ID" });
       continue;
     }
     try {
@@ -1003,7 +1020,6 @@ async function bulkCreateByCst(req, res) {
       const scholarship_percent = slab?.scholarship_percent ?? null;
       const scholarship_amount = slab?.scholarship_amount ?? null;
 
-      const batchNorm = normalizeBatchId(student.batch_id || student.batch);
 
       const result = await ScorecardEntry.findOneAndUpdate(
         { student_id: student._id, assessment_period, task_label },
@@ -1068,7 +1084,7 @@ async function markAbsentAsZero(req, res) {
     }
   }
 
-  const students = await Student.find(studentsInCatalogBatchesFilter([batch_id]))
+  const students = await Student.find(await studentsInBatchesFilterResolved([batch_id]))
     .select("_id")
     .lean();
   const studentIds = students.map((s) => s._id);

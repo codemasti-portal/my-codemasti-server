@@ -151,7 +151,9 @@ router.get("/students", ...viewStudents, controller.listStudents);
 router.post("/students", ...adminOnly, controller.createStudent);
 router.get("/students/:id", ...viewStudents, controller.getStudent);
 router.patch("/students/:id", ...adminOnly, controller.updateStudent);
-router.patch("/students/:id/program-batch", ...adminOnly, controller.reassignStudentProgramBatch);
+// Multi-batch membership (additive): add to / remove from a batch without affecting other batches.
+router.post("/students/:id/batches", ...adminOnly, controller.addStudentBatch);
+router.delete("/students/:id/batches/:batch_id", ...adminOnly, controller.removeStudentBatch);
 router.post(
   "/students/:id/avatar",
   ...adminOnly,

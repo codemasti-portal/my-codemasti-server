@@ -8,7 +8,7 @@ const Student = require("../models/Student");
 const BatchCatalog = require("../models/BatchCatalog");
 const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { executePythonCode } = require("../services/python-executor-local");
 const achievementSvc = require("../services/student-achievement.service");
@@ -109,11 +109,13 @@ function assignmentScopeBatchKeys(assignment) {
 /** Matches student list visibility: published + batch scope (batch_id and/or batch_ids, legacy global when unscoped). */
 function isAssignmentVisibleToStudent(assignment, student, now = new Date()) {
   if (!isAssignmentReleased(assignment, now)) return false;
-  const sbatch = String(student?.batch_id || "").toLowerCase().trim();
   const scopes = assignmentScopeBatchKeys(assignment);
   if (scopes.length === 0) return true;
-  if (!sbatch) return false;
-  return scopes.includes(sbatch);
+  // Read-switch: in legacy mode this is [batch_id] (byte-identical to scopes.includes(sbatch));
+  // in non-legacy mode it's the student's full attached membership set.
+  const studentBatches = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  if (studentBatches.length === 0) return false;
+  return studentBatches.some((b) => scopes.includes(b));
 }
 
 function normCatalogSectionId(s) {
@@ -240,7 +242,8 @@ async function list(req, res) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
   await scopeStudentToBatch(req, student);
-  const sbatch = String(student.batch_id || "").toLowerCase().trim();
+  const attached = student && Array.isArray(student.__membershipBatchIds);
+  const batchIds = membershipKeysOr(student, [String(student.batch_id || "").toLowerCase().trim()].filter(Boolean));
 
   const catalogs = await BatchCatalog.find({}).lean();
   const catalogById = new Map(catalogs.map((c) => [String(c.batch_id || "").toLowerCase(), c]));
@@ -248,8 +251,11 @@ async function list(req, res) {
   const parts = [];
   if (subject) parts.push({ subject });
   if (assignmentType) parts.push({ assignment_type: assignmentType });
-  if (sbatch) {
-    parts.push({ $or: assignmentCatalogBatchScopeOr(sbatch) });
+  if (batchIds.length) {
+    parts.push({ $or: batchIds.flatMap((b) => assignmentCatalogBatchScopeOr(b)) });
+  } else if (attached) {
+    // Non-legacy student in zero batches: no batch-scoped assignments.
+    parts.push({ _id: null });
   }
 
   const baseFilter =
@@ -395,8 +401,8 @@ async function filters(req, res) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
   await scopeStudentToBatch(req, student);
-  const sbatch = String(student.batch_id || "").toLowerCase().trim();
-  if (!sbatch) {
+  const batchIds = membershipKeysOr(student, [String(student.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  if (!batchIds.length) {
     return sendSuccess(res, {
       subjects: [],
       difficulties: [],
@@ -405,7 +411,7 @@ async function filters(req, res) {
     });
   }
 
-  const assignmentFilter = mergePublishedIntoFilter(sbatch ? { $or: assignmentCatalogBatchScopeOr(sbatch) } : {});
+  const assignmentFilter = mergePublishedIntoFilter({ $or: batchIds.flatMap((b) => assignmentCatalogBatchScopeOr(b)) });
   const assignmentIds = (await Assignment.find(assignmentFilter).select("_id").lean()).map((x) => x._id);
   if (!assignmentIds.length) {
     return sendSuccess(res, {

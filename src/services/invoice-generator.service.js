@@ -105,8 +105,16 @@ async function buildInvoiceForPeriod({
   const existingCount = await Invoice.countDocuments({ enrollment_id: enrollment._id });
   const isFirstInvoiceForCourse = existingCount === 0;
 
-  const { entry: referralCredit, index: referralIndex } =
-    nextConsumableReferralCredit(student.referral_benefits_queue);
+  // Decision: global per-student credits (referral fee credit + the one-time registration discount)
+  // apply ONLY on the student's PRIMARY batch invoice — so a multi-batch student consumes them once
+  // per month, not once per batch. Non-primary invoices get base fee + scholarship only.
+  const isPrimaryBatchInvoice =
+    String(student.batch_id || "").toLowerCase().trim() !== "" &&
+    String(course.linked_batch_id || "").toLowerCase().trim() === String(student.batch_id || "").toLowerCase().trim();
+
+  const { entry: referralCredit, index: referralIndex } = isPrimaryBatchInvoice
+    ? nextConsumableReferralCredit(student.referral_benefits_queue)
+    : { entry: null, index: -1 };
 
   const scholarshipEntry = await findLatestScholarship({
     studentId: student._id,
@@ -117,7 +125,7 @@ async function buildInvoiceForPeriod({
   const breakdown = computeDiscounts({
     student,
     subtotalPaise,
-    isFirstInvoiceForCourse,
+    isFirstInvoiceForCourse: isFirstInvoiceForCourse && isPrimaryBatchInvoice,
     activeReferralCredit: referralCredit,
     scholarshipEntry,
   });

@@ -4,6 +4,7 @@ const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const StudentAchievementBadge = require("../models/StudentAchievementBadge");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { membershipMode, resolveStudentBatchIds } = require("../utils/student-batch-context");
 const { toIndiaCalendarYmd } = require("../utils/india-time");
 const { ARENA_QUEST_MILESTONES, ARENA_STREAK_BEST_MILESTONES } = require("../config/achievement-badges");
 const badgeDefSvc = require("./achievement-badge-definition.service");
@@ -41,17 +42,23 @@ function longestIstCalendarStreakFromSortedDays(sortedYmD) {
 }
 
 async function batchArenaQuestionIdsForStudent(studentId) {
-  const rawStudent = await Student.findById(studentId).select("batch batch_id").lean();
+  const rawStudent = await Student.findById(studentId).select("batch batch_id enrollment_number").lean();
   if (!rawStudent) return [];
-  const s = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
-  const batchId = String(s.batch_id || s.batch || "").toLowerCase().trim();
-  if (!batchId) return [];
+  // Read-switch: legacy = [single derived batch]; non-legacy = full enrollment-derived set.
+  const mode = membershipMode();
+  let batchIds;
+  if (mode === "legacy") {
+    const s = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
+    const batchId = String(s.batch_id || s.batch || "").toLowerCase().trim();
+    batchIds = batchId ? [batchId] : [];
+  } else {
+    batchIds = (await resolveStudentBatchIds(rawStudent, { mode })).batchIds;
+  }
+  if (!batchIds.length) return [];
 
   const questions = await ArenaQuestion.find({
     $and: [
-      {
-        $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
-      },
+      { $or: batchIds.flatMap((b) => [{ batch_id: b }, { batch_ids: { $in: [b] } }]) },
       { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
     ],
   })

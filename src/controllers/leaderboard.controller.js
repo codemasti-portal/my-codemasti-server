@@ -8,6 +8,12 @@ const {
   catalogBatchMongoMatch,
 } = require("../utils/enrollment");
 const {
+  membershipMode,
+  resolveStudentBatchIds,
+  studentIdsInBatches,
+} = require("../utils/student-batch-context");
+const registry = require("../utils/batch-catalog-registry");
+const {
   indiaThisYearSubmittedMatch,
   indiaThisMonthSubmittedMatch,
   indiaThisWeekSubmittedMatch,
@@ -35,17 +41,52 @@ function buildBatchScopeFilter(studentDoc) {
   return { $or: or };
 }
 
-async function getScopedStudentIdSet(studentId) {
+// Resolve the leaderboard "board" for a viewer. A board is ONE batch: cohort = students in that
+// batch, XP limited to that batch's content. requestedBatchId picks the board; default = the
+// student's primary batch (Student.batch_id) else their first batch. Returns the full batch list
+// (availableBatches) so the client can render a per-batch switcher for multi-batch students.
+async function getScopedStudentIdSet(studentId, requestedBatchId) {
   const rawStudent = await Student.findById(studentId).lean();
   const studentDoc = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
   if (!studentDoc) return null;
 
-  const batchId = String(studentDoc.batch_id || "").trim().toLowerCase();
-  const filter = batchId
-    ? { role: "student", ...catalogBatchMongoMatch(batchId) }
-    : { role: "student", ...buildBatchScopeFilter(studentDoc) };
-  const peerStudents = await Student.find(filter, { _id: 1 }).lean();
-  return new Set(peerStudents.map((row) => String(row._id)));
+  const mode = membershipMode();
+  if (mode === "legacy") {
+    // Legacy stays byte-identical: cohort by single batch_id, XP global (batchIds empty).
+    const batchId = String(studentDoc.batch_id || "").trim().toLowerCase();
+    const filter = batchId
+      ? { role: "student", ...catalogBatchMongoMatch(batchId) }
+      : { role: "student", ...buildBatchScopeFilter(studentDoc) };
+    const peerStudents = await Student.find(filter, { _id: 1 }).lean();
+    return {
+      ids: new Set(peerStudents.map((row) => String(row._id))),
+      batchIds: [],
+      availableBatches: batchId ? [batchId] : [],
+      selectedBatch: batchId || null,
+    };
+  }
+
+  // Non-legacy: resolve the student's batches, then scope to ONE board batch.
+  const { batchIds } = await resolveStudentBatchIds(studentId, { mode });
+  if (!batchIds.length) {
+    return { ids: new Set(), batchIds: [], availableBatches: [], selectedBatch: null };
+  }
+  const want = String(requestedBatchId || "").toLowerCase().trim();
+  const primary = String(studentDoc.batch_id || "").toLowerCase().trim();
+  const board =
+    (want && batchIds.includes(want) && want) ||
+    (primary && batchIds.includes(primary) && primary) ||
+    batchIds[0];
+
+  const ids = new Set((await studentIdsInBatches([board])).map(String));
+  if (mode === "union") {
+    // Fail-safe: also include legacy-matched peers in this board's batch.
+    const m = catalogBatchMongoMatch(board);
+    const orParts = m.$or ? m.$or : [m];
+    const legacyPeers = await Student.find({ role: "student", $or: orParts }, { _id: 1 }).lean();
+    for (const r of legacyPeers) ids.add(String(r._id));
+  }
+  return { ids, batchIds: [board], availableBatches: batchIds, selectedBatch: board };
 }
 
 function submittedAtMatch(timeFilter) {
@@ -57,7 +98,56 @@ function submittedAtMatch(timeFilter) {
   return {};
 }
 
-async function buildRowsForSubmittedFilter(t) {
+async function buildRowsForSubmittedFilter(t, { batchIds } = {}) {
+  // When batchIds is provided, XP is limited to that batch set's OWN content — arena questions /
+  // assignments tagged to those batches, plus globally-visible untagged content (batch_id="" with no
+  // batch_ids), which is shown to every batch. Omitted = global (all content): preserves legacy
+  // leaderboards and lifetime/milestone badge programs byte-for-byte.
+  const scopeKeys = Array.isArray(batchIds)
+    ? [...new Set(batchIds.map((b) => String(b || "").toLowerCase().trim()).filter(Boolean))]
+    : [];
+  const scoped = scopeKeys.length > 0;
+  // Normalize the looked-up doc's batch tags to lowercase, then keep only rows whose content belongs
+  // to one of the scoped batches (or is global/untagged).
+  const arenaBatchStages = scoped
+    ? [
+        {
+          $addFields: {
+            _bid: { $toLower: { $ifNull: ["$q.batch_id", ""] } },
+            _bids: { $map: { input: { $ifNull: ["$q.batch_ids", []] }, as: "b", in: { $toLower: { $ifNull: ["$$b", ""] } } } },
+          },
+        },
+        {
+          $match: {
+            $or: [
+              { _bid: { $in: scopeKeys } },
+              { _bids: { $in: scopeKeys } },
+              { $and: [{ _bid: "" }, { _bids: { $size: 0 } }] },
+            ],
+          },
+        },
+      ]
+    : [];
+  const assignBatchStages = scoped
+    ? [
+        {
+          $addFields: {
+            _abid: { $toLower: { $ifNull: ["$a.batch_id", ""] } },
+            _abids: { $map: { input: { $ifNull: ["$a.batch_ids", []] }, as: "b", in: { $toLower: { $ifNull: ["$$b", ""] } } } },
+          },
+        },
+        {
+          $match: {
+            $or: [
+              { _abid: { $in: scopeKeys } },
+              { _abids: { $in: scopeKeys } },
+              // global/untagged — but only for a real assignment (orphaned submissions are excluded).
+              { $and: [{ "a._id": { $exists: true } }, { _abid: "" }, { _abids: { $size: 0 } }] },
+            ],
+          },
+        },
+      ]
+    : [];
   const assignPipe = [
     { $match: { status: "Accepted", ...t } },
     {
@@ -78,6 +168,7 @@ async function buildRowsForSubmittedFilter(t) {
       },
     },
     { $unwind: { path: "$a", preserveNullAndEmptyArrays: true } },
+    ...assignBatchStages,
     {
       $addFields: {
         _fullXp: {
@@ -144,6 +235,7 @@ async function buildRowsForSubmittedFilter(t) {
       },
     },
     { $unwind: "$q" },
+    ...arenaBatchStages,
     {
       $addFields: {
         effective_xp: {
@@ -188,8 +280,8 @@ async function buildRowsForSubmittedFilter(t) {
   return merged;
 }
 
-async function buildRows(timeFilter) {
-  return buildRowsForSubmittedFilter(submittedAtMatch(timeFilter));
+async function buildRows(timeFilter, opts) {
+  return buildRowsForSubmittedFilter(submittedAtMatch(timeFilter), opts);
 }
 
 async function buildLatestSubmissionMapForFilter(t) {
@@ -224,13 +316,15 @@ async function buildLatestSubmissionMap(timeFilter) {
 async function list(req, res) {
   const raw = String(req.query.time_filter || "all_time");
   const tf = ["all_time", "this_year", "this_month", "this_week"].includes(raw) ? raw : "all_time";
-  const scopedStudentIds = await getScopedStudentIdSet(req.user.sub);
-  if (!scopedStudentIds) {
+  const scope = await getScopedStudentIdSet(req.user.sub, req.query.batch_id);
+  if (!scope) {
     return sendSuccess(res, []);
   }
+  const scopedStudentIds = scope.ids;
+  const xpOpts = scope.batchIds.length ? { batchIds: scope.batchIds } : undefined;
 
   const [merged, latestSubmissionMap] = await Promise.all([
-    buildRows(tf),
+    buildRows(tf, xpOpts),
     buildLatestSubmissionMap(tf),
   ]);
   const ids = [...scopedStudentIds].map((id) => new mongoose.Types.ObjectId(id));
@@ -269,18 +363,22 @@ async function list(req, res) {
 async function me(req, res) {
   const raw = String(req.query.time_filter || "all_time");
   const tf = ["all_time", "this_year", "this_month", "this_week"].includes(raw) ? raw : "all_time";
-  const scopedStudentIds = await getScopedStudentIdSet(req.user.sub);
-  if (!scopedStudentIds) {
+  const scope = await getScopedStudentIdSet(req.user.sub, req.query.batch_id);
+  if (!scope) {
     return sendSuccess(res, {
       rank: null,
       xp: 0,
       time_filter: tf,
       latest_submission_time: null,
+      selected_batch_id: null,
+      batches: [],
     });
   }
+  const scopedStudentIds = scope.ids;
+  const xpOpts = scope.batchIds.length ? { batchIds: scope.batchIds } : undefined;
 
   const [merged, latestSubmissionMap] = await Promise.all([
-    buildRows(tf),
+    buildRows(tf, xpOpts),
     buildLatestSubmissionMap(tf),
   ]);
   const selfId = String(req.user.sub);
@@ -293,11 +391,19 @@ async function me(req, res) {
     .sort((a, b) => Number(b[1].xp || 0) - Number(a[1].xp || 0) || String(a[0]).localeCompare(String(b[0])));
   const rankIdx = sorted.findIndex(([id]) => id === selfId);
 
+  // Expose the student's batches so the client can show a per-batch switcher (multi-batch only).
+  const batches = (scope.availableBatches || []).map((b) => ({
+    batch_id: b,
+    name: registry.displayNameSync(b) || b,
+  }));
+
   return sendSuccess(res, {
     rank: rankIdx >= 0 ? rankIdx + 1 : null,
     xp: myXp,
     time_filter: tf,
     latest_submission_time: myLast && myLast > new Date(0) ? myLast.toISOString() : null,
+    selected_batch_id: scope.selectedBatch,
+    batches,
   });
 }
 

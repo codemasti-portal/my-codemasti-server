@@ -1,7 +1,7 @@
 const Assignment = require("../models/Assignment");
 const Notification = require("../models/Notification");
 const Student = require("../models/Student");
-const { studentsInCatalogBatchesFilter } = require("../utils/enrollment");
+const { studentsInBatchesFilterResolved } = require("../utils/student-batch-context");
 
 /**
  * In-app "new assignment" fanout. Call only when the assignment is live for students
@@ -24,7 +24,7 @@ async function fanoutAssignmentReleaseNotification(assignment) {
   const refId = `assignment:${assignmentIdStr}`;
   const deepLink = `/assignments/${assignmentIdStr}`;
 
-  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
+  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
 
   const students = await Student.find(studentFilter).select("_id").lean();
   if (!students.length) return;

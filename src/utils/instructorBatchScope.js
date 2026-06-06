@@ -1,12 +1,6 @@
 const Staff = require("../models/Staff");
 const { augmentStudentCatalogFieldsFromEnrollment, catalogBatchIdsFromStudentLean } = require("./enrollment");
-
-/** Catalog batch_id → Announcement / Student `batch` label */
-const DISPLAY_BATCH_BY_CATALOG_ID = {
-  innovators: "Innovators",
-  spark: "Spark",
-  builders: "Builders",
-};
+const registry = require("./batch-catalog-registry");
 
 /**
  * @returns {null} Caller applies no instructor-only batch restriction.
@@ -36,6 +30,30 @@ function studentInAnyAssignedBatch(studentDoc, allowedNormalizedBatchIds) {
   return ids.some((id) => allow.has(String(id || "").trim().toLowerCase()));
 }
 
+/**
+ * M:N-aware variant: an instructor may access a student if the student has an ACTIVE enrollment in any
+ * of the instructor's assigned batches — not just their legacy primary batch. Keeps `getStudent` /
+ * scorecard access consistent with the M:N-scoped student LIST. Legacy mode is byte-identical.
+ */
+async function studentInAnyAssignedBatchResolved(studentDoc, allowedNormalizedBatchIds) {
+  if (!allowedNormalizedBatchIds?.length || !studentDoc?._id) return false;
+  const { membershipMode } = require("./student-batch-context");
+  if (membershipMode() === "legacy") {
+    return studentInAnyAssignedBatch(studentDoc, allowedNormalizedBatchIds);
+  }
+  const StudentEnrollment = require("../models/StudentEnrollment");
+  const allow = [...new Set(allowedNormalizedBatchIds.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean))];
+  if (!allow.length) return false;
+  const hit = await StudentEnrollment.findOne({
+    student_id: studentDoc._id,
+    status: "active",
+    batch_id: { $in: allow },
+  })
+    .select("_id")
+    .lean();
+  return Boolean(hit);
+}
+
 function assignmentDocTouchesAllowedBatches(doc, allowed) {
   if (!allowed?.length) return false;
   const set = new Set(allowed.map((x) => String(x || "").trim().toLowerCase()));
@@ -60,7 +78,7 @@ function arenaDocTouchesAllowedBatches(doc, allowed) {
 function announcementFilterForInstructorBatches(allowed) {
   if (!allowed.length) return { _id: null };
   const batchNameOr = allowed
-    .map((bid) => DISPLAY_BATCH_BY_CATALOG_ID[bid])
+    .map((bid) => registry.displayNameSync(bid))
     .filter(Boolean)
     .map((name) => ({ scope: "batch", batch: name, $or: [{ batch_id: "" }, { batch_id: { $exists: false } }] }));
 
@@ -99,7 +117,8 @@ function announcementIsBatchScopedToAllowed(doc, allowed) {
   if (bid && allowed.includes(bid)) return true;
   const label = String(doc.batch || "").trim();
   for (const id of allowed) {
-    if (DISPLAY_BATCH_BY_CATALOG_ID[id] === label) return true;
+    const nm = registry.displayNameSync(id);
+    if (nm && nm === label) return true;
   }
   return false;
 }
@@ -117,9 +136,9 @@ function noteMatchesInstructorScope(doc, allowed) {
 module.exports = {
   getInstructorAssignedBatchIds,
   studentInAnyAssignedBatch,
+  studentInAnyAssignedBatchResolved,
   assignmentDocTouchesAllowedBatches,
   arenaDocTouchesAllowedBatches,
-  DISPLAY_BATCH_BY_CATALOG_ID,
   announcementFilterForInstructorBatches,
   noteVisibleToInstructorFilter,
   announcementVisibleToInstructor,

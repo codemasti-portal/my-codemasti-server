@@ -1,6 +1,6 @@
 const Notification = require("../models/Notification");
 const Student = require("../models/Student");
-const { studentsInCatalogBatchesFilter } = require("../utils/enrollment");
+const { studentsInBatchesFilterResolved } = require("../utils/student-batch-context");
 const { sendSimpleEmail } = require("./brevo");
 
 function isDuplicateKeyError(err) {
@@ -144,7 +144,7 @@ async function notifyStudentsForSlot({
   if (!batchId) return { created: 0, emailed: 0 };
   const sectionId = String(slot?.section_id || "").trim().toLowerCase();
 
-  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
+  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
 
   const students = await Student.find(studentFilter).select("_id name email").lean();
   let created = 0;

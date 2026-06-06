@@ -4,11 +4,22 @@
  * S260206 → Spark, year 2026, section 02, roll 06
  * B260702 → Builders, year 2026, section 07, roll 02
  */
+const registry = require("./batch-catalog-registry");
+
+// Legacy seed of the three original programs. The batch catalog (registry) is the authority for
+// any batch beyond these and for newly created ones; this map stays as a zero-dependency fallback
+// so the original three behave identically even before the registry has loaded from the DB.
 const PREFIX_TO_BATCH = {
   I: "Innovators",
   S: "Spark",
   B: "Builders",
 };
+
+/** Resolve an enrollment letter to its batch display name (legacy seed first, then catalog). */
+function batchNameForPrefix(prefix) {
+  const p = String(prefix || "").trim().toUpperCase();
+  return PREFIX_TO_BATCH[p] || registry.prefixToDisplayNameSync(p) || "";
+}
 
 /**
  * @param {string} raw
@@ -23,12 +34,18 @@ const PREFIX_TO_BATCH = {
  */
 function parseEnrollmentNumber(raw) {
   const value = String(raw).trim().toUpperCase();
-  if (!/^[ISB]\d{6}$/.test(value)) {
+  if (!/^[A-Z]\d{6}$/.test(value)) {
     throw new Error(
-      "Invalid enrollment_number. Expected I|S|B + 6 digits (YY section roll), e.g. I260105, S260206, B260702"
+      "Invalid enrollment_number. Expected a batch letter + 6 digits (YY section roll), e.g. I260105, S260206, B260702"
     );
   }
   const prefix = value[0];
+  const enrollment_batch_name = batchNameForPrefix(prefix);
+  if (!enrollment_batch_name) {
+    throw new Error(
+      `Unknown enrollment batch letter "${prefix}". Create a batch with this enrollment_prefix in the batch catalog first.`
+    );
+  }
   const digits = value.slice(1);
   const year2 = Number(digits.slice(0, 2));
   const enrollment_year = 2000 + year2;
@@ -37,7 +54,7 @@ function parseEnrollmentNumber(raw) {
   return {
     enrollment_number: value,
     enrollment_batch_prefix: prefix,
-    enrollment_batch_name: PREFIX_TO_BATCH[prefix],
+    enrollment_batch_name,
     enrollment_year,
     enrollment_section,
     enrollment_roll_no,
@@ -50,9 +67,12 @@ function parseEnrollmentNumber(raw) {
  */
 function deriveStudentBatchFromEnrollment(parsed) {
   const name = parsed.enrollment_batch_name || "";
+  // Prefer the catalog's canonical batch_id for this enrollment letter; fall back to the
+  // lowercased display name (matches the legacy behavior for Spark/Builders/Innovators).
+  const fromPrefix = registry.prefixToBatchIdSync(parsed.enrollment_batch_prefix);
   return {
     batch: name,
-    batch_id: name.toLowerCase(),
+    batch_id: fromPrefix || name.toLowerCase(),
   };
 }
 
@@ -69,7 +89,7 @@ const CATALOG_BATCH_ID_TO_PREFIX = {
  */
 function catalogBatchMongoMatch(batchId) {
   const bid = String(batchId || "").trim().toLowerCase();
-  const letter = CATALOG_BATCH_ID_TO_PREFIX[bid];
+  const letter = CATALOG_BATCH_ID_TO_PREFIX[bid] || registry.batchIdToPrefixSync(bid);
   if (!letter) {
     return { batch_id: bid };
   }
@@ -80,6 +100,9 @@ function catalogBatchMongoMatch(batchId) {
 
 /** Program batch key(s) for loading timetable/notifications consistently (document batch_id ∪ enrollment-derived catalog id). */
 function catalogBatchIdsFromStudentLean(student) {
+  // Read-switch: when a resolved membership set has been attached (non-legacy mode only),
+  // return it verbatim. Nothing attaches this in legacy mode, so this is a perfect no-op there.
+  if (student && Array.isArray(student.__membershipBatchIds)) return student.__membershipBatchIds;
   const ids = new Set();
   const bid = String(student?.batch_id || "").trim().toLowerCase();
   if (bid) ids.add(bid);
@@ -103,7 +126,7 @@ function catalogBatchIdsFromStudentLean(student) {
 function catalogBatchMembershipOrConditions(batchKey) {
   const bid = String(batchKey || "").trim().toLowerCase();
   if (!bid) return [];
-  const letter = CATALOG_BATCH_ID_TO_PREFIX[bid];
+  const letter = CATALOG_BATCH_ID_TO_PREFIX[bid] || registry.batchIdToPrefixSync(bid);
   if (!letter) {
     return [{ batch_id: bid }];
   }

@@ -6,7 +6,7 @@ const Student = require("../models/Student");
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 
 function catalogBatchIdFromStudentLean(lean) {
   const s = augmentStudentCatalogFieldsFromEnrollment(lean || {});
@@ -38,16 +38,13 @@ async function list(req, res) {
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   await scopeStudentToBatch(req, student);
 
-  const batchId = catalogBatchIdFromStudentLean(student);
+  // Read-switch: legacy = [single batch_id] (byte-identical $or); non-legacy = full membership set.
+  const batchIds = membershipKeysOr(student, [catalogBatchIdFromStudentLean(student)]);
+  const batchOr = batchIds.flatMap((b) => [{ batch_id: b }, { batch_ids: { $in: [b] } }]);
 
   // Build filter conditions as an array for $and
   const filterConditions = [
-    {
-      $or: [
-        { batch_id: batchId }, // Old format: single batch_id
-        { batch_ids: { $in: [batchId] } }, // New format: array of batch_ids
-      ],
-    },
+    batchOr.length ? { $or: batchOr } : { _id: null },
     // Exclude disabled questions from student view
     { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
   ];
@@ -109,15 +106,14 @@ async function detail(req, res) {
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   await scopeStudentToBatch(req, student);
 
-  const batchId = catalogBatchIdFromStudentLean(student);
+  // Read-switch: legacy = [single batch_id] (byte-identical $or); non-legacy = full membership set.
+  const batchIds = membershipKeysOr(student, [catalogBatchIdFromStudentLean(student)]);
+  const batchOr = batchIds.flatMap((b) => [{ batch_id: b }, { batch_ids: { $in: [b] } }]);
 
-  // Find question and check if it's assigned to this batch
+  // Find question and check if it's assigned to any of the student's batches
   const question = await ArenaQuestion.findOne({
     _id: req.params.questionId,
-    $or: [
-      { batch_id: batchId },
-      { batch_ids: { $in: [batchId] } },
-    ],
+    ...(batchOr.length ? { $or: batchOr } : { _id: null }),
   }).lean();
 
   if (!question) return sendError(res, 404, "QUESTION_NOT_FOUND", "Arena question not found");

@@ -30,8 +30,6 @@ const invoiceSchema = new mongoose.Schema(
     generated_by: { type: String, default: "system", trim: true },
     generated_by_staff_id: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },
     notes: { type: String, default: "", trim: true, maxlength: 2000 },
-    reminder_pre_due_sent_at: { type: Date, default: null },
-    reminder_overdue_sent_at: { type: Date, default: null },
   },
   { timestamps: true, versionKey: false }
 );

@@ -36,14 +36,15 @@ router.post(
   communityMediaUpload,
   doubtsController.postCommunity
 );
+// Moderation (hide/delete) is destructive — restrict to admin/super_admin.
 router.patch(
   "/doubts/community/:id/hide",
-  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR, ROLES.MENTOR]),
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN]),
   doubtsController.hideCommunity
 );
 router.delete(
   "/doubts/community/:id",
-  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR, ROLES.MENTOR]),
+  requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN]),
   doubtsController.deleteCommunity
 );
 

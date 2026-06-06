@@ -24,6 +24,7 @@ const {
   buildResourceUploadedEmail: buildInstructorResourceEmail,
 } = require("../services/instructor-notifications.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
+const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 const googleMeetCal = require("../services/google-calendar-meet.service");
 const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
@@ -90,7 +91,7 @@ async function fanoutTimetableSlotNotification(slot, action) {
   const body = `${slot.subject} on ${slot.day} (${slot.time}) by ${slot.teacher} was ${action}.`;
   const refId = `timetable-slot:${String(slot._id)}`;
 
-  const studentFilter = studentsInCatalogBatchesFilter([batchId], { sectionId });
+  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
   const students = await Student.find(studentFilter).select("_id").lean();
   if (!students.length) return;
 
@@ -120,7 +121,7 @@ async function fanoutMentorSlotNotification(slot) {
   if (targetStudentIds.length > 0) {
     students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
   } else if (targetBatchIds.length > 0) {
-    const filter = studentsInCatalogBatchesFilter(targetBatchIds, {
+    const filter = await studentsInBatchesFilterResolved(targetBatchIds, {
       sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
     });
     students = await Student.find(filter).select("_id").lean();
@@ -1533,7 +1534,7 @@ async function provisionTimetableGoogleMeet(req, res) {
     );
   }
 
-  const filter = catalogBatchStudentFilter(body.batch_id.toLowerCase(), body.section_id);
+  const filter = await catalogBatchStudentFilterResolved(body.batch_id.toLowerCase(), body.section_id);
   const students = await Student.find(filter).select("email").lean().limit(5000);
   const studentEmails = [
     ...new Set(students.map((s) => String(s.email || "").trim().toLowerCase()).filter(Boolean)),

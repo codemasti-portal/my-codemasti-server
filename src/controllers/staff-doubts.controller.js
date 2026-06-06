@@ -10,6 +10,8 @@ const {
   buildCommunityUploadFolder,
   buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
+const registry = require("../utils/batch-catalog-registry");
+const { membershipMode, studentIdsInBatches } = require("../utils/student-batch-context");
 
 function mediaResourceType(mimetype) {
   const type = String(mimetype || "");
@@ -59,16 +61,20 @@ async function listPersonal(req, res) {
   const batchId = String(req.query.batch_id || "").trim().toLowerCase();
   const includeAllDefaultBatches =
     String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
-  const defaultBatchIds = ["spark", "builders", "innovators"];
+  const defaultBatchIds = registry.defaultViewBatchIdsSync();
   if (status === "pending" || status === "answered") filter.status = status;
   if (includeAllDefaultBatches || batchId) {
     const batchScope = includeAllDefaultBatches ? defaultBatchIds : [batchId];
-    const studentsInScope = await Student.find({
-      batch_id: { $in: batchScope },
-    })
-      .select("_id")
-      .lean();
-    const studentIdsInScope = studentsInScope.map((s) => s._id);
+    let studentIdsInScope;
+    if (membershipMode() === "legacy") {
+      // Legacy stays byte-identical: scope by the single Student.batch_id.
+      const studentsInScope = await Student.find({ batch_id: { $in: batchScope } }).select("_id").lean();
+      studentIdsInScope = studentsInScope.map((s) => s._id);
+    } else {
+      // M:N: a student belongs to a batch via an ACTIVE enrollment, not just the legacy primary field —
+      // so a multi-batch student's doubts surface to every batch they're active in.
+      studentIdsInScope = await studentIdsInBatches(batchScope);
+    }
     filter.student_id = { $in: studentIdsInScope };
   }
 
@@ -149,7 +155,7 @@ async function listCommunity(req, res) {
   const batchId = String(req.query.batch_id || "").trim().toLowerCase();
   const includeAllDefaultBatches =
     String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
-  const defaultBatchIds = ["spark", "builders", "innovators"];
+  const defaultBatchIds = registry.defaultViewBatchIdsSync();
   let filter = null;
   if (includeAllDefaultBatches) {
     filter = { channel_id: { $in: defaultBatchIds } };
