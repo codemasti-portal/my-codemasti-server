@@ -3,7 +3,7 @@ const Note = require("../models/Note");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { cloudinary, ensureCloudinaryConfig } = require("../utils/cloudinary");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { catalogSubjects } = require("../utils/catalog-subjects");
 
 function studentBatchCandidates(student) {
@@ -17,7 +17,10 @@ function studentBatchCandidates(student) {
 }
 
 function studentNoteVisibilityFilter(student) {
-  const batchIds = studentBatchCandidates(student);
+  // Use the resolved M:N membership set (attached by scopeStudentToBatch) so a multi-batch student
+  // only sees notes for their selected batch — NOT the legacy enrollment-label candidates, which
+  // leaked another batch's notes into the selected-batch view.
+  const batchIds = membershipKeysOr(student, studentBatchCandidates(student));
   const sid = String(student?.section_id || student?.enrollment_section || "")
     .toLowerCase()
     .trim();

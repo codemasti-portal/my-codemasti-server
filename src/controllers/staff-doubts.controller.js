@@ -55,27 +55,107 @@ async function uploadCommunityMedia(req) {
   };
 }
 
+/**
+ * What doubts may this staff member see/act on?
+ *   - super_admin / admin → everything (a shared pool)
+ *   - instructor          → their assigned batches
+ *   - mentor              → their assigned students
+ */
+async function resolveDoubtScope(req) {
+  const role = String(req.staff?.role || "").toLowerCase();
+  if (role === "super_admin" || role === "admin") return { mode: "all" };
+  const staff = await Staff.findById(req.staff?.sub).select("batches_assigned assigned_students").lean();
+  if (role === "instructor") {
+    const batchIds = [
+      ...new Set((staff?.batches_assigned || []).map((b) => String(b || "").trim().toLowerCase()).filter(Boolean)),
+    ];
+    return { mode: "instructor", batchIds };
+  }
+  if (role === "mentor") {
+    const studentIds = [...new Set((staff?.assigned_students || []).map((s) => String(s || "").trim()).filter(Boolean))];
+    return { mode: "mentor", studentIds };
+  }
+  return { mode: "none" };
+}
+
+/** Student _ids in a batch scope (mode-gated: legacy primary field vs M:N active enrollments). */
+async function studentIdsForBatchScope(batchScope) {
+  if (!batchScope.length) return [];
+  if (membershipMode() === "legacy") {
+    const rows = await Student.find({ batch_id: { $in: batchScope } }).select("_id").lean();
+    return rows.map((s) => s._id);
+  }
+  return studentIdsInBatches(batchScope);
+}
+
+/** Distinct batch_ids a set of students belong to (to scope a mentor's community channels). */
+async function batchIdsForStudents(studentIds) {
+  if (!studentIds.length) return [];
+  if (membershipMode() === "legacy") {
+    const rows = await Student.find({ _id: { $in: studentIds } }).select("batch_id").lean();
+    return [...new Set(rows.map((s) => String(s.batch_id || "").toLowerCase()).filter(Boolean))];
+  }
+  const StudentEnrollment = require("../models/StudentEnrollment");
+  const rows = await StudentEnrollment.find({ student_id: { $in: studentIds }, status: "active" })
+    .select("batch_id")
+    .lean();
+  return [...new Set(rows.map((e) => String(e.batch_id || "").toLowerCase()).filter(Boolean))];
+}
+
+/** Write-guard: may this staff answer/act on a doubt from `studentId`? */
+async function staffCanAccessStudent(scope, studentId) {
+  if (scope.mode === "all") return true;
+  const sid = String(studentId || "");
+  if (scope.mode === "mentor") return scope.studentIds.map(String).includes(sid);
+  if (scope.mode === "instructor") {
+    if (!scope.batchIds.length) return false;
+    const ids = new Set((await studentIdsForBatchScope(scope.batchIds)).map((x) => String(x)));
+    return ids.has(sid);
+  }
+  return false;
+}
+
+/** Write-guard: may this staff post in `batchId`'s community channel? */
+async function staffCanAccessBatch(scope, batchId) {
+  const bid = String(batchId || "").toLowerCase();
+  if (scope.mode === "all") return true;
+  if (scope.mode === "instructor") return scope.batchIds.includes(bid);
+  if (scope.mode === "mentor") return (await batchIdsForStudents(scope.studentIds)).includes(bid);
+  return false;
+}
+
 async function listPersonal(req, res) {
   const status = String(req.query.status || "pending").trim().toLowerCase();
   const filter = {};
   const batchId = String(req.query.batch_id || "").trim().toLowerCase();
   const includeAllDefaultBatches =
     String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
-  const defaultBatchIds = registry.defaultViewBatchIdsSync();
   if (status === "pending" || status === "answered") filter.status = status;
-  if (includeAllDefaultBatches || batchId) {
-    const batchScope = includeAllDefaultBatches ? defaultBatchIds : [batchId];
-    let studentIdsInScope;
-    if (membershipMode() === "legacy") {
-      // Legacy stays byte-identical: scope by the single Student.batch_id.
-      const studentsInScope = await Student.find({ batch_id: { $in: batchScope } }).select("_id").lean();
-      studentIdsInScope = studentsInScope.map((s) => s._id);
-    } else {
-      // M:N: a student belongs to a batch via an ACTIVE enrollment, not just the legacy primary field —
-      // so a multi-batch student's doubts surface to every batch they're active in.
-      studentIdsInScope = await studentIdsInBatches(batchScope);
+
+  const scope = await resolveDoubtScope(req);
+  if (scope.mode === "mentor") {
+    // Mentor: only their assigned students' doubts (optionally narrowed to a requested batch).
+    if (!scope.studentIds.length) return sendSuccess(res, []);
+    let ids = scope.studentIds;
+    if (batchId) {
+      const inBatch = new Set((await studentIdsForBatchScope([batchId])).map((x) => String(x)));
+      ids = ids.filter((id) => inBatch.has(String(id)));
     }
-    filter.student_id = { $in: studentIdsInScope };
+    filter.student_id = { $in: ids };
+  } else if (scope.mode === "instructor") {
+    // Instructor: only their assigned batches (intersected with a requested batch).
+    if (!scope.batchIds.length) return sendSuccess(res, []);
+    const batchScope = batchId ? (scope.batchIds.includes(batchId) ? [batchId] : []) : scope.batchIds;
+    if (!batchScope.length) return sendSuccess(res, []);
+    filter.student_id = { $in: await studentIdsForBatchScope(batchScope) };
+  } else if (scope.mode === "all") {
+    // Admin / super_admin: unchanged — all doubts, or scoped to a batch / the default-views set.
+    if (includeAllDefaultBatches || batchId) {
+      const batchScope = includeAllDefaultBatches ? registry.defaultViewBatchIdsSync() : [batchId];
+      filter.student_id = { $in: await studentIdsForBatchScope(batchScope) };
+    }
+  } else {
+    return sendSuccess(res, []);
   }
 
   const rows = await PersonalDoubt.find(filter).sort({ createdAt: -1 }).limit(500).lean();
@@ -139,6 +219,10 @@ async function answerPersonal(req, res) {
   }
   const doc = await PersonalDoubt.findById(req.params.id);
   if (!doc) return sendError(res, 404, "DOUBT_NOT_FOUND", "Personal doubt not found");
+  const scope = await resolveDoubtScope(req);
+  if (!(await staffCanAccessStudent(scope, doc.student_id))) {
+    return sendError(res, 403, "FORBIDDEN", "This doubt is outside your assigned scope");
+  }
   const staff = await Staff.findById(req.staff.sub).select("name").lean();
   doc.status = "answered";
   doc.teacher_reply = text;
@@ -155,13 +239,26 @@ async function listCommunity(req, res) {
   const batchId = String(req.query.batch_id || "").trim().toLowerCase();
   const includeAllDefaultBatches =
     String(req.query.all || "").trim() === "1" || String(req.query.all || "").trim().toLowerCase() === "true";
-  const defaultBatchIds = registry.defaultViewBatchIdsSync();
+  const scope = await resolveDoubtScope(req);
+
   let filter = null;
-  if (includeAllDefaultBatches) {
-    filter = { channel_id: { $in: defaultBatchIds } };
+  if (scope.mode === "all") {
+    if (includeAllDefaultBatches) {
+      filter = { channel_id: { $in: registry.defaultViewBatchIdsSync() } };
+    } else {
+      if (!batchId) return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
+      filter = { channel_id: batchId };
+    }
   } else {
-    if (!batchId) return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
-    filter = { channel_id: batchId };
+    // instructor → assigned batches; mentor → batches of their assigned students.
+    const allowed = scope.mode === "instructor" ? scope.batchIds : await batchIdsForStudents(scope.studentIds);
+    if (!allowed.length) return sendSuccess(res, []);
+    if (batchId) {
+      if (!allowed.includes(batchId)) return sendSuccess(res, []);
+      filter = { channel_id: batchId };
+    } else {
+      filter = { channel_id: { $in: allowed } };
+    }
   }
   const rows = await CommunityMessage.find(filter).sort({ createdAt: -1 }).limit(500).lean();
   const myStaffId = String(req.staff.sub || "");
@@ -242,6 +339,10 @@ async function postCommunity(req, res) {
       .optional(),
   });
   const body = schema.parse(bodySource);
+  const scope = await resolveDoubtScope(req);
+  if (!(await staffCanAccessBatch(scope, body.batch_id))) {
+    return sendError(res, 403, "FORBIDDEN", "You can only post in your assigned batches");
+  }
   const text = String(body.text || "").trim();
   const codeContent = String(body.code?.content || "").trim();
   let media = null;

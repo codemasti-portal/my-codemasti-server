@@ -28,14 +28,16 @@ const {
 } = require("./enrollment");
 
 /**
- * Membership read source (read-switch flag). Controls the future resolver below.
- *   "legacy"     — derive batch ids from Student.batch_id / enrollment_number (today's behavior; default)
- *   "union"      — legacy ∪ enrollment-derived (fail-safe: never drops a student during the switch)
- *   "enrollment" — StudentEnrollment is authoritative (the end state)
+ * Membership read source. The single-batch → multi-batch (M:N) migration is COMPLETE: batch
+ * membership is now always derived from active StudentEnrollment records.
+ *
+ * The old read-switch env flag BATCH_MEMBERSHIP_SOURCE (legacy | union | enrollment) has been
+ * retired — this always returns "enrollment". Parity was verified (0 students dropped) before the
+ * cutover. The remaining `=== "legacy"` / `=== "union"` branches across the codebase are now dead
+ * fallbacks; they are safe to delete in a follow-up cleanup.
  */
 function membershipMode() {
-  const v = String(process.env.BATCH_MEMBERSHIP_SOURCE || "legacy").toLowerCase().trim();
-  return ["legacy", "union", "enrollment"].includes(v) ? v : "legacy";
+  return "enrollment";
 }
 
 /**
