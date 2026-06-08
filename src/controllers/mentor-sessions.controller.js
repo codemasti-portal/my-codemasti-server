@@ -2,7 +2,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const MentorSlot = require("../models/MentorSlot");
 const MentorSessionJoin = require("../models/MentorSessionJoin");
 const Student = require("../models/Student");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 
 function getSessionStartMs(slot) {
   const baseDate = new Date(slot?.date);
@@ -23,38 +23,46 @@ function getSessionStartMs(slot) {
   ).getTime();
 }
 
+/** Mentor-slot $or clauses for a student's batches (read-switch: one batch in legacy, full set in M:N). */
+function batchSectionClausesFor(batchIds, sectionForBatch) {
+  const clauses = [];
+  for (const bid of batchIds) {
+    // Per-batch section (the student's section IN that batch); legacy passes the single section.
+    const sec = typeof sectionForBatch === "function" ? sectionForBatch(bid) : sectionForBatch;
+    if (sec) {
+      clauses.push({
+        $and: [
+          { target_batch_ids: bid },
+          { $or: [{ target_section_ids: { $exists: false } }, { target_section_ids: { $size: 0 } }, { target_section_ids: sec }] },
+        ],
+      });
+    } else {
+      clauses.push({
+        $and: [
+          { target_batch_ids: bid },
+          { $or: [{ target_section_ids: { $exists: false } }, { target_section_ids: { $size: 0 } }] },
+        ],
+      });
+    }
+  }
+  return clauses;
+}
+
+/** Resolve a (bid) → section function: the student's section IN each batch (enrollment-derived). */
+async function sectionResolverFor(student) {
+  const { sectionByBatch } = await enrollmentBatchIdsForStudent(student?._id);
+  return (bid) => (sectionByBatch || {})[bid] || "";
+}
+
 async function listSlots(req, res) {
   const student = await Student.findById(req.user.sub).select("batch_id section_id").lean();
   if (student) await scopeStudentToBatch(req, student);
   const studentBatchId = String(student?.batch_id || "").trim().toLowerCase();
   const studentSectionId = String(student?.section_id || "").trim().toLowerCase();
   const filter = { publish_date: { $lte: new Date() } };
-  const batchSectionClauses = [];
-  if (studentBatchId) {
-    if (studentSectionId) {
-      batchSectionClauses.push({
-        $and: [
-          { target_batch_ids: studentBatchId },
-          {
-            $or: [
-              { target_section_ids: { $exists: false } },
-              { target_section_ids: { $size: 0 } },
-              { target_section_ids: studentSectionId },
-            ],
-          },
-        ],
-      });
-    } else {
-      batchSectionClauses.push({
-        $and: [
-          { target_batch_ids: studentBatchId },
-          {
-            $or: [{ target_section_ids: { $exists: false } }, { target_section_ids: { $size: 0 } }],
-          },
-        ],
-      });
-    }
-  }
+  const batchIds = membershipKeysOr(student, [studentBatchId].filter(Boolean));
+  const sectionForBatch = await sectionResolverFor(student, studentSectionId);
+  const batchSectionClauses = batchSectionClausesFor(batchIds, sectionForBatch);
   filter.$or = [{ target_student_ids: req.user.sub }, ...batchSectionClauses];
   const from = req.query.from ? new Date(req.query.from) : null;
   const to = req.query.to ? new Date(`${req.query.to}T23:59:59.999Z`) : null;
@@ -114,32 +122,9 @@ async function mySessions(req, res) {
   if (student) await scopeStudentToBatch(req, student);
   const studentBatchId = String(student?.batch_id || "").trim().toLowerCase();
   const studentSectionId = String(student?.section_id || "").trim().toLowerCase();
-  const batchSectionClauses = [];
-  if (studentBatchId) {
-    if (studentSectionId) {
-      batchSectionClauses.push({
-        $and: [
-          { target_batch_ids: studentBatchId },
-          {
-            $or: [
-              { target_section_ids: { $exists: false } },
-              { target_section_ids: { $size: 0 } },
-              { target_section_ids: studentSectionId },
-            ],
-          },
-        ],
-      });
-    } else {
-      batchSectionClauses.push({
-        $and: [
-          { target_batch_ids: studentBatchId },
-          {
-            $or: [{ target_section_ids: { $exists: false } }, { target_section_ids: { $size: 0 } }],
-          },
-        ],
-      });
-    }
-  }
+  const batchIds = membershipKeysOr(student, [studentBatchId].filter(Boolean));
+  const sectionForBatch = await sectionResolverFor(student, studentSectionId);
+  const batchSectionClauses = batchSectionClausesFor(batchIds, sectionForBatch);
   const filter = {
     publish_date: { $lte: new Date() },
     $or: [{ target_student_ids: req.user.sub }, ...batchSectionClauses],
@@ -173,9 +158,14 @@ async function joinSession(req, res) {
   const slot = await MentorSlot.findById(req.params.sessionId).lean();
   if (!slot) return sendError(res, 404, "SESSION_NOT_FOUND", "Session not found");
   const isIndividual = Array.isArray(slot.target_student_ids) && slot.target_student_ids.some((id) => String(id) === String(req.user.sub));
-  const batchMatch = Array.isArray(slot.target_batch_ids) && slot.target_batch_ids.includes(studentBatchId);
+  const batchIds = membershipKeysOr(student, [studentBatchId].filter(Boolean));
+  const slotBatches = Array.isArray(slot.target_batch_ids) ? slot.target_batch_ids.map((b) => String(b).toLowerCase().trim()) : [];
+  const matchedBatch = slotBatches.find((b) => batchIds.includes(b)) || "";
+  const batchMatch = Boolean(matchedBatch);
+  const sectionForBatch = await sectionResolverFor(student, studentSectionId);
+  const effSection = batchMatch ? sectionForBatch(matchedBatch) : studentSectionId;
   const sectionList = Array.isArray(slot.target_section_ids) ? slot.target_section_ids : [];
-  const sectionMatch = sectionList.length === 0 || (studentSectionId && sectionList.includes(studentSectionId));
+  const sectionMatch = sectionList.length === 0 || (effSection && sectionList.includes(effSection));
   if (!(isIndividual || (batchMatch && sectionMatch))) return sendError(res, 403, "FORBIDDEN", "Session is not assigned to you");
   if (slot.publish_date && new Date(slot.publish_date).getTime() > Date.now()) {
     return sendError(res, 403, "FORBIDDEN", "Session is not published yet");

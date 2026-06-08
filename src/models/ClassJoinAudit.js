@@ -14,6 +14,9 @@ const classJoinAuditSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Batch the student attended this class AS (the class's batch, or their matching batch for a
+    // multi-target class). Stamped at join time so per-batch attendance is accurate under M:N.
+    batch_id: { type: String, default: "", lowercase: true, trim: true, index: true },
     joined_at: { type: Date, default: Date.now, index: true },
     source: { type: String, default: "web", trim: true },
     ip_address: { type: String, default: "" },

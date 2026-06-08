@@ -11,6 +11,15 @@ const Note = require("../models/Note");
 const Student = require("../models/Student");
 const Notification = require("../models/Notification");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { validateBatchSubject, invalidSubjectMessage } = require("../utils/catalog-subjects");
+
+/** Single-source-of-truth subject guard for notes (subject must be in the targeted batch(es) catalog). */
+async function resolveNoteSubjectOrError(res, batchIds, subject) {
+  const r = await validateBatchSubject(batchIds, subject);
+  if (r.ok) return { ok: true, value: r.value };
+  sendError(res, 400, "INVALID_SUBJECT", invalidSubjectMessage(r.allowed));
+  return { ok: false };
+}
 const {
   getInstructorAssignedBatchIds,
   announcementFilterForInstructorBatches,
@@ -558,6 +567,13 @@ async function createNote(req, res) {
       { message: "Select at least one batch or one section" }
     );
   const body = schema.parse(req.body);
+  const noteBatchIds = [
+    ...body.target_batch_ids,
+    ...body.target_section_refs.map((r) => r.batch_id),
+  ];
+  const subjCheck = await resolveNoteSubjectOrError(res, noteBatchIds, body.subject);
+  if (!subjCheck.ok) return;
+  body.subject = subjCheck.value;
   const created = await Note.create({
     subject: body.subject,
     module: body.module,
@@ -603,6 +619,18 @@ async function updateNote(req, res) {
   const body = schema.parse(req.body);
   const doc = await Note.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Note not found");
+
+  if (body.subject !== undefined) {
+    const effBatchIds = [
+      ...(body.target_batch_ids !== undefined ? body.target_batch_ids : doc.target_batch_ids || []),
+      ...(body.target_section_refs !== undefined ? body.target_section_refs : doc.target_section_refs || []).map(
+        (r) => r.batch_id
+      ),
+    ];
+    const subjCheck = await resolveNoteSubjectOrError(res, effBatchIds, body.subject);
+    if (!subjCheck.ok) return;
+    body.subject = subjCheck.value;
+  }
 
   if (body.subject !== undefined) doc.subject = body.subject;
   if (body.module !== undefined) doc.module = body.module;

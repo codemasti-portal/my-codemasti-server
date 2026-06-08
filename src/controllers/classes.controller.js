@@ -3,7 +3,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const LiveClass = require("../models/LiveClass");
 const ClassJoinAudit = require("../models/ClassJoinAudit");
 const Student = require("../models/Student");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 
 function parseClassDateTime(date, hhmm) {
   const [hour, minute] = hhmm.split(":").map((v) => Number(v));
@@ -25,7 +25,8 @@ function deriveStatus(now, startAt, endAt) {
 }
 
 function studentClassVisibilityFilter(student) {
-  const bid = String(student?.batch_id || "").toLowerCase().trim();
+  // Read-switch: legacy = [single batch_id]; non-legacy = full attached membership set.
+  const batchIds = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
   const sid = String(student?.section_id || student?.enrollment_section || "").toLowerCase().trim();
 
   const legacyOpen = {
@@ -41,17 +42,12 @@ function studentClassVisibilityFilter(student) {
   };
 
   const parts = [legacyOpen];
-  if (bid) {
-    // Legacy single batch target.
+  for (const bid of batchIds) {
+    // Legacy single batch target + new batch-level multi-target.
     parts.push({ batch_id: bid });
-    // New batch-level multi-target.
     parts.push({ target_batch_ids: bid });
-  }
-  if (bid && sid) {
-    // New section-level targeting.
-    parts.push({
-      target_section_refs: { $elemMatch: { batch_id: bid, section_id: sid } },
-    });
+    // New section-level targeting (student's section within this batch).
+    if (sid) parts.push({ target_section_refs: { $elemMatch: { batch_id: bid, section_id: sid } } });
   }
   return { $or: parts };
 }
@@ -60,15 +56,16 @@ function classVisibleToStudent(liveClass, student) {
   const tb = liveClass.target_batch_ids || [];
   const ts = liveClass.target_section_refs || [];
   const legacyBatch = String(liveClass.batch_id || "").toLowerCase().trim();
-  const bid = String(student?.batch_id || "").toLowerCase().trim();
+  // Read-switch: legacy = [single batch_id]; non-legacy = full attached membership set.
+  const batchIds = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
   const sid = String(student?.section_id || student?.enrollment_section || "").toLowerCase().trim();
 
   // Open class (legacy/global): no explicit targeting fields.
   if (!legacyBatch && tb.length === 0 && (!ts || ts.length === 0)) return true;
-  if (bid && legacyBatch && legacyBatch === bid) return true;
-  if (bid && tb.some((x) => String(x).toLowerCase() === bid)) return true;
-  if (bid && sid && ts.some((r) => String(r.batch_id).toLowerCase() === bid && String(r.section_id).toLowerCase() === sid)) {
-    return true;
+  for (const bid of batchIds) {
+    if (legacyBatch && legacyBatch === bid) return true;
+    if (tb.some((x) => String(x).toLowerCase() === bid)) return true;
+    if (sid && ts.some((r) => String(r.batch_id).toLowerCase() === bid && String(r.section_id).toLowerCase() === sid)) return true;
   }
   return false;
 }
@@ -236,6 +233,16 @@ async function recordings(req, res) {
   return sendSuccess(res, data, "", { page, limit, total });
 }
 
+/** Which batch a student is attending a class AS: the class's batch, or their matching batch for a multi-target class. */
+function attendedBatchForClass(classDoc, student) {
+  const legacy = String(classDoc.batch_id || "").toLowerCase().trim();
+  if (legacy) return legacy;
+  const targets = (classDoc.target_batch_ids || []).map((b) => String(b).toLowerCase().trim()).filter(Boolean);
+  if (!targets.length) return "";
+  const myBatches = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  return targets.find((t) => myBatches.includes(t)) || targets[0];
+}
+
 async function join(req, res) {
   const classDoc = await LiveClass.findById(req.params.classId).lean();
   if (!classDoc) {
@@ -260,6 +267,7 @@ async function join(req, res) {
   const audit = await ClassJoinAudit.create({
     class_id: classDoc._id,
     student_id: req.user.sub,
+    batch_id: attendedBatchForClass(classDoc, student),
     joined_at: new Date(),
     source,
     ip_address: ipAddress,
@@ -302,6 +310,7 @@ async function joins(req, res) {
   const data = rows.map((row) => ({
     join_id: String(row._id),
     class_id: String(row.class_id),
+    attended_batch_id: row.batch_id || "",
     joined_at: row.joined_at,
     source: row.source,
     ip_address: row.ip_address,

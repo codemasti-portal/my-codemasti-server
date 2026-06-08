@@ -8,8 +8,9 @@ const Student = require("../models/Student");
 const BatchCatalog = require("../models/BatchCatalog");
 const { DEFAULT_BATCHES } = require("../constants/batchDefaults");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
+const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
 const { executePythonCode } = require("../services/python-executor-local");
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
@@ -109,11 +110,13 @@ function assignmentScopeBatchKeys(assignment) {
 /** Matches student list visibility: published + batch scope (batch_id and/or batch_ids, legacy global when unscoped). */
 function isAssignmentVisibleToStudent(assignment, student, now = new Date()) {
   if (!isAssignmentReleased(assignment, now)) return false;
-  const sbatch = String(student?.batch_id || "").toLowerCase().trim();
   const scopes = assignmentScopeBatchKeys(assignment);
   if (scopes.length === 0) return true;
-  if (!sbatch) return false;
-  return scopes.includes(sbatch);
+  // Read-switch: in legacy mode this is [batch_id] (byte-identical to scopes.includes(sbatch));
+  // in non-legacy mode it's the student's full attached membership set.
+  const studentBatches = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  if (studentBatches.length === 0) return false;
+  return studentBatches.some((b) => scopes.includes(b));
 }
 
 function normCatalogSectionId(s) {
@@ -240,7 +243,8 @@ async function list(req, res) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
   await scopeStudentToBatch(req, student);
-  const sbatch = String(student.batch_id || "").toLowerCase().trim();
+  const attached = student && Array.isArray(student.__membershipBatchIds);
+  const batchIds = membershipKeysOr(student, [String(student.batch_id || "").toLowerCase().trim()].filter(Boolean));
 
   const catalogs = await BatchCatalog.find({}).lean();
   const catalogById = new Map(catalogs.map((c) => [String(c.batch_id || "").toLowerCase(), c]));
@@ -248,8 +252,11 @@ async function list(req, res) {
   const parts = [];
   if (subject) parts.push({ subject });
   if (assignmentType) parts.push({ assignment_type: assignmentType });
-  if (sbatch) {
-    parts.push({ $or: assignmentCatalogBatchScopeOr(sbatch) });
+  if (batchIds.length) {
+    parts.push({ $or: batchIds.flatMap((b) => assignmentCatalogBatchScopeOr(b)) });
+  } else if (attached) {
+    // Non-legacy student in zero batches: no batch-scoped assignments.
+    parts.push({ _id: null });
   }
 
   const baseFilter =
@@ -395,34 +402,31 @@ async function filters(req, res) {
     return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
   }
   await scopeStudentToBatch(req, student);
-  const sbatch = String(student.batch_id || "").toLowerCase().trim();
-  if (!sbatch) {
+  const batchIds = membershipKeysOr(student, [String(student.batch_id || "").toLowerCase().trim()].filter(Boolean));
+  // Subjects come from the batch catalog (single source of truth), independent of what content exists.
+  const subjects = batchIds.length ? await catalogSubjectsForBatches(batchIds) : [];
+  if (!batchIds.length) {
     return sendSuccess(res, {
-      subjects: [],
+      subjects,
       difficulties: [],
       assignment_types: [],
       statuses: ["pending", "attempted", "solved"],
     });
   }
 
-  const assignmentFilter = mergePublishedIntoFilter(sbatch ? { $or: assignmentCatalogBatchScopeOr(sbatch) } : {});
+  const assignmentFilter = mergePublishedIntoFilter({ $or: batchIds.flatMap((b) => assignmentCatalogBatchScopeOr(b)) });
   const assignmentIds = (await Assignment.find(assignmentFilter).select("_id").lean()).map((x) => x._id);
   if (!assignmentIds.length) {
     return sendSuccess(res, {
-      subjects: [],
+      subjects,
       difficulties: [],
       assignment_types: [],
       statuses: ["pending", "attempted", "solved"],
     });
   }
 
-  const [subjectsRows, difficultiesRows, assignmentTypesRows] = await Promise.all([
-    Assignment.aggregate([
-      { $match: { _id: { $in: assignmentIds } } },
-      { $group: { _id: "$subject" } },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { _id: 1 } },
-    ]),
+  // Difficulty + assignment_type stay content-derived (they are not catalog-managed).
+  const [difficultiesRows, assignmentTypesRows] = await Promise.all([
     AssignmentQuestion.aggregate([
       { $match: { assignment_id: { $in: assignmentIds } } },
       { $group: { _id: "$difficulty" } },
@@ -437,7 +441,7 @@ async function filters(req, res) {
     ]),
   ]);
   return sendSuccess(res, {
-    subjects: subjectsRows.map((r) => r._id).filter(Boolean),
+    subjects,
     difficulties: difficultiesRows.map((r) => String(r._id || "").toLowerCase()).filter(Boolean),
     assignment_types: assignmentTypesRows.map((r) => String(r._id || "").toLowerCase()).filter(Boolean),
     statuses: ["pending", "attempted", "solved"],

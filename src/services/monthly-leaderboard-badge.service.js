@@ -1,7 +1,8 @@
 const mongoose = require("mongoose");
 const Student = require("../models/Student");
 const MonthlyLeaderboardBadge = require("../models/MonthlyLeaderboardBadge");
-const { augmentStudentCatalogFieldsFromEnrollment, catalogBatchMongoMatch } = require("../utils/enrollment");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { resolveStudentBatchIds, catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
 const {
   submittedAtIndiaCalendarMonth,
   recentClosedIndianMonthPeriods,
@@ -34,7 +35,13 @@ async function distinctScopeKeys() {
   const rows = await Student.find({ role: "student" }).select("_id batch_id enrollment_number").lean();
   const keys = new Set();
   for (const row of rows) {
-    keys.add(scopeKeyForStudentLean(row));
+    // A multi-batch student contributes a cohort key for EACH active batch.
+    const { batchIds } = await resolveStudentBatchIds(row);
+    if (batchIds.length) {
+      for (const b of batchIds) keys.add(b);
+    } else {
+      keys.add(`solo:${String(row._id)}`);
+    }
   }
   return [...keys];
 }
@@ -53,7 +60,13 @@ async function finalizePeriodForScopeIfMissing(scopeKey, period) {
   if (!p) return null;
 
   const submittedFilter = submittedAtIndiaCalendarMonth(p.year, p.month);
-  const merged = await buildRowsForSubmittedFilter(submittedFilter);
+  // Per-batch scope: in non-legacy mode a cohort's "Student of the Month" counts only that batch's
+  // own content. Legacy stays global (byte-identical); solo (no-batch) students stay global too.
+  const scopeBatchIds = scopeKey.startsWith("solo:") ? undefined : [scopeKey];
+  const merged = await buildRowsForSubmittedFilter(
+    submittedFilter,
+    scopeBatchIds ? { batchIds: scopeBatchIds } : undefined
+  );
 
   let students;
   if (scopeKey.startsWith("solo:")) {
@@ -63,7 +76,7 @@ async function finalizePeriodForScopeIfMissing(scopeKey, period) {
   } else {
     students = await Student.find({
       role: "student",
-      ...catalogBatchMongoMatch(scopeKey),
+      ...(await catalogBatchMongoMatchResolved(scopeKey)),
     })
       .select("_id name avatar_url")
       .lean();

@@ -6,7 +6,6 @@ const { startTimetableClassReminderScheduler } = require("./services/timetable-c
 const { startAssignmentReleaseNotificationScheduler } = require("./services/assignment-release-notification.scheduler");
 const { startNotificationCleanupScheduler } = require("./services/notification-cleanup.scheduler");
 const { startMonthlyInvoiceScheduler } = require("./services/monthly-invoice.scheduler");
-const { startPaymentReminderScheduler } = require("./services/payment-reminder.scheduler");
 
 const PORT = process.env.PORT || 5001;
 
@@ -18,7 +17,6 @@ async function bootstrap() {
     startAssignmentReleaseNotificationScheduler();
     startNotificationCleanupScheduler();
     startMonthlyInvoiceScheduler();
-    startPaymentReminderScheduler();
     app.listen(PORT, () => {
       console.log(`CodeMasti API running on port ${PORT}`);
     });

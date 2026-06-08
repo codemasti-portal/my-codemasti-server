@@ -40,6 +40,15 @@ function toRow(c) {
   };
 }
 
+/** One active Course per batch: returns a clashing active course (excluding `exceptId`) or null. */
+async function batchAlreadyHasActiveCourse(linkedBatchId, exceptId) {
+  const bid = String(linkedBatchId || "").toLowerCase().trim();
+  if (!bid) return null;
+  const q = { linked_batch_id: bid, is_active: true };
+  if (exceptId) q._id = { $ne: exceptId };
+  return Course.findOne(q).select("_id code name").lean();
+}
+
 async function listCourses(req, res) {
   const { category, is_active, q } = req.query || {};
   const filter = {};
@@ -65,6 +74,12 @@ async function createCourse(req, res) {
   const parsed = baseSchema.safeParse(req.body || {});
   if (!parsed.success) return sendError(res, 400, "VALIDATION_ERROR", parsed.error.issues[0]?.message || "Invalid body");
   const body = parsed.data;
+  if (body.is_active !== false && body.linked_batch_id) {
+    const clash = await batchAlreadyHasActiveCourse(body.linked_batch_id, null);
+    if (clash) {
+      return sendError(res, 409, "BATCH_HAS_ACTIVE_COURSE", `Batch "${body.linked_batch_id}" is already linked to active course "${clash.code}". A batch may have only one active course.`);
+    }
+  }
   try {
     const doc = await Course.create({
       ...body,
@@ -85,10 +100,38 @@ async function updateCourse(req, res) {
   if (!parsed.success) return sendError(res, 400, "VALIDATION_ERROR", parsed.error.issues[0]?.message || "Invalid body");
   const doc = await Course.findById(id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Course not found");
+  const prevLinkedBatchId = String(doc.linked_batch_id || "").toLowerCase().trim();
   Object.assign(doc, parsed.data);
   doc.updated_by = req.staff?.sub;
+  // Decision #11: forbid re-linking a course to a different batch once it has active enrollments —
+  // re-pointing would strand historical invoices/scorecard on the old batch. Archive + recreate instead.
+  if (String(doc.linked_batch_id || "").toLowerCase().trim() !== prevLinkedBatchId) {
+    const activeEnr = await StudentEnrollment.countDocuments({ course_id: doc._id, status: "active" });
+    if (activeEnr > 0) {
+      return sendError(
+        res,
+        409,
+        "COURSE_RELINK_BLOCKED",
+        `Cannot change this course's batch: ${activeEnr} active enrollment(s) exist. Archive this course and create a new one for the other batch.`
+      );
+    }
+  }
+  if (doc.is_active && String(doc.linked_batch_id || "").trim()) {
+    const clash = await batchAlreadyHasActiveCourse(doc.linked_batch_id, doc._id);
+    if (clash) {
+      return sendError(res, 409, "BATCH_HAS_ACTIVE_COURSE", `Batch "${doc.linked_batch_id}" is already linked to active course "${clash.code}". A batch may have only one active course.`);
+    }
+  }
   try {
     await doc.save();
+    // Keep the denormalized StudentEnrollment.batch_id in sync if this course's batch changed.
+    const nextLinkedBatchId = String(doc.linked_batch_id || "").toLowerCase().trim();
+    if (nextLinkedBatchId !== prevLinkedBatchId) {
+      await StudentEnrollment.updateMany(
+        { course_id: doc._id },
+        { $set: { batch_id: nextLinkedBatchId } }
+      );
+    }
     return sendSuccess(res, toRow(doc.toObject()), "Course updated");
   } catch (err) {
     if (err.code === 11000) return sendError(res, 409, "DUPLICATE", "Course code already exists");

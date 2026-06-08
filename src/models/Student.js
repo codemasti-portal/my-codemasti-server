@@ -12,7 +12,8 @@ const studentSchema = new mongoose.Schema(
     // "batch" is the display label used by announcements/etc.
     batch: { type: String, default: "" },
     // "batch_id" is the identifier used by timetable/live classes APIs.
-    batch_id: { type: String, default: "" },
+    // Normalized to match StudentEnrollment.batch_id / Course.linked_batch_id (lowercase + trimmed).
+    batch_id: { type: String, default: "", lowercase: true, trim: true },
     /** Catalog section id (e.g. "core") for notes targeting; optional. */
     section_id: { type: String, default: "", trim: true },
     course: { type: String, default: "" },

@@ -2,6 +2,7 @@ const Contest = require("../models/Contest");
 const ScorecardTest = require("../models/ScorecardTest");
 const { getContestPhase, countdownSeconds } = require("../utils/contestPhase");
 const { buildContestResultsUrl } = require("../utils/contestResultsUrl");
+const { membershipKeysOr } = require("../utils/student-batch-context");
 
 function normSectionId(v) {
   return String(v ?? "")
@@ -23,11 +24,11 @@ function sectionAllows(student, contest) {
 }
 
 function batchMatches(student, contest) {
-  const sbatch = normalizeBatchId(student?.batch_id);
   const cbatch = normalizeBatchId(contest.batch_id);
   if (!cbatch) return false;
-  if (!sbatch) return false;
-  return sbatch === cbatch;
+  // Read-switch: legacy = [single batch_id] (byte-identical equality); non-legacy = full membership set.
+  const studentBatches = membershipKeysOr(student, [normalizeBatchId(student?.batch_id)].filter(Boolean));
+  return studentBatches.includes(cbatch);
 }
 
 function isContestVisibleToStudent(student, contest, now = new Date()) {
@@ -133,13 +134,13 @@ async function loadTestsMap(testIds) {
 }
 
 async function listContestsForStudent(student, { now = new Date(), includeEndedDays = 30 } = {}) {
-  const batchId = normalizeBatchId(student?.batch_id);
-  if (!batchId) return [];
+  const batchIds = membershipKeysOr(student, [normalizeBatchId(student?.batch_id)].filter(Boolean));
+  if (!batchIds.length) return [];
 
   const cutoff = new Date(now.getTime() - includeEndedDays * 24 * 60 * 60 * 1000);
   const rows = await Contest.find({
     is_published: true,
-    batch_id: batchId,
+    batch_id: { $in: batchIds },
     end_at: { $gte: cutoff },
   })
     .sort({ start_at: -1 })
@@ -151,12 +152,12 @@ async function listContestsForStudent(student, { now = new Date(), includeEndedD
 }
 
 async function pickDashboardContestCard(student, now = new Date()) {
-  const batchId = normalizeBatchId(student?.batch_id);
-  if (!batchId) return null;
+  const batchIds = membershipKeysOr(student, [normalizeBatchId(student?.batch_id)].filter(Boolean));
+  if (!batchIds.length) return null;
 
   const rows = await Contest.find({
     is_published: true,
-    batch_id: batchId,
+    batch_id: { $in: batchIds },
     show_from: { $lte: now },
     end_at: { $gte: now },
   })

@@ -5,13 +5,22 @@ const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { assignmentPublishedVisibleToCatalogBatch } = require("../utils/assignmentBatchFilter");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { pickDashboardContestCard, loadStudent } = require("../controllers/contest.controller");
 
 function visibleAssignmentsQueryForStudent(student, now = new Date()) {
   const enriched = augmentStudentCatalogFieldsFromEnrollment(student);
-  const sbatch = String(enriched?.batch_id || "").toLowerCase().trim();
-  return assignmentPublishedVisibleToCatalogBatch(sbatch, now);
+  const legacy = [String(enriched?.batch_id || "").toLowerCase().trim()].filter(Boolean);
+  // Read-switch: legacy = single batch (byte-identical); non-legacy = OR over the full membership set.
+  const attached = student && Array.isArray(student.__membershipBatchIds);
+  const batchIds = membershipKeysOr(student, legacy);
+  // Non-legacy student in zero batches sees NO batch-scoped assignments. (Legacy keeps its
+  // batch-less "all published" behavior — which only applies when nothing is attached.)
+  if (attached && batchIds.length === 0) return { _id: null };
+  if (batchIds.length <= 1) {
+    return assignmentPublishedVisibleToCatalogBatch(batchIds[0] || "", now);
+  }
+  return { $or: batchIds.map((b) => assignmentPublishedVisibleToCatalogBatch(b, now)) };
 }
 
 async function summary(req, res) {

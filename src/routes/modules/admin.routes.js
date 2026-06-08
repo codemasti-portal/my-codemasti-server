@@ -148,10 +148,15 @@ router.patch("/batches/:batch_id", ...manageContent, batchCatalog.update);
 router.delete("/batches/:batch_id", ...manageContent, batchCatalog.remove);
 
 router.get("/students", ...viewStudents, controller.listStudents);
+// Specific /students/* routes MUST precede the /students/:id param route below.
+router.get("/students/lookup", ...adminOnly, controller.lookupStudentByEmail);
+router.get("/students/next-enrollment", ...adminOnly, controller.nextEnrollmentNumber);
 router.post("/students", ...adminOnly, controller.createStudent);
 router.get("/students/:id", ...viewStudents, controller.getStudent);
 router.patch("/students/:id", ...adminOnly, controller.updateStudent);
-router.patch("/students/:id/program-batch", ...adminOnly, controller.reassignStudentProgramBatch);
+// Multi-batch membership (additive): add to / remove from a batch without affecting other batches.
+router.post("/students/:id/batches", ...adminOnly, controller.addStudentBatch);
+router.delete("/students/:id/batches/:batch_id", ...adminOnly, controller.removeStudentBatch);
 router.post(
   "/students/:id/avatar",
   ...adminOnly,

@@ -3,7 +3,7 @@ const Student = require("../models/Student");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const StudentAchievementBadge = require("../models/StudentAchievementBadge");
-const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { resolveStudentBatchIds } = require("../utils/student-batch-context");
 const { toIndiaCalendarYmd } = require("../utils/india-time");
 const { ARENA_QUEST_MILESTONES, ARENA_STREAK_BEST_MILESTONES } = require("../config/achievement-badges");
 const badgeDefSvc = require("./achievement-badge-definition.service");
@@ -41,17 +41,15 @@ function longestIstCalendarStreakFromSortedDays(sortedYmD) {
 }
 
 async function batchArenaQuestionIdsForStudent(studentId) {
-  const rawStudent = await Student.findById(studentId).select("batch batch_id").lean();
+  const rawStudent = await Student.findById(studentId).select("batch batch_id enrollment_number").lean();
   if (!rawStudent) return [];
-  const s = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
-  const batchId = String(s.batch_id || s.batch || "").toLowerCase().trim();
-  if (!batchId) return [];
+  // Membership is the full enrollment-derived batch set.
+  const { batchIds } = await resolveStudentBatchIds(rawStudent);
+  if (!batchIds.length) return [];
 
   const questions = await ArenaQuestion.find({
     $and: [
-      {
-        $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
-      },
+      { $or: batchIds.flatMap((b) => [{ batch_id: b }, { batch_ids: { $in: [b] } }]) },
       { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
     ],
   })
