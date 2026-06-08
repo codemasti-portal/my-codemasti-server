@@ -3,12 +3,8 @@ const { sendSuccess } = require("../utils/response");
 const Student = require("../models/Student");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaSubmission = require("../models/ArenaSubmission");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const {
-  augmentStudentCatalogFieldsFromEnrollment,
-  catalogBatchMongoMatch,
-} = require("../utils/enrollment");
-const {
-  membershipMode,
   resolveStudentBatchIds,
   studentIdsInBatches,
 } = require("../utils/student-batch-context");
@@ -20,27 +16,6 @@ const {
   submittedAtIndiaCalendarMonth,
 } = require("../utils/india-time");
 
-function escapeRegex(text) {
-  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildBatchScopeFilter(studentDoc) {
-  const keys = Array.from(
-    new Set(
-      [studentDoc?.batch_id, studentDoc?.batch, studentDoc?.enrollment_batch_name]
-        .map((v) => String(v || "").trim())
-        .filter(Boolean)
-    )
-  );
-  const or = [];
-  for (const key of keys) {
-    const rx = new RegExp(`^${escapeRegex(key)}$`, "i");
-    or.push({ batch_id: rx }, { batch: rx }, { enrollment_batch_name: rx });
-  }
-  if (or.length === 0) return { _id: studentDoc?._id };
-  return { $or: or };
-}
-
 // Resolve the leaderboard "board" for a viewer. A board is ONE batch: cohort = students in that
 // batch, XP limited to that batch's content. requestedBatchId picks the board; default = the
 // student's primary batch (Student.batch_id) else their first batch. Returns the full batch list
@@ -50,24 +25,8 @@ async function getScopedStudentIdSet(studentId, requestedBatchId) {
   const studentDoc = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
   if (!studentDoc) return null;
 
-  const mode = membershipMode();
-  if (mode === "legacy") {
-    // Legacy stays byte-identical: cohort by single batch_id, XP global (batchIds empty).
-    const batchId = String(studentDoc.batch_id || "").trim().toLowerCase();
-    const filter = batchId
-      ? { role: "student", ...catalogBatchMongoMatch(batchId) }
-      : { role: "student", ...buildBatchScopeFilter(studentDoc) };
-    const peerStudents = await Student.find(filter, { _id: 1 }).lean();
-    return {
-      ids: new Set(peerStudents.map((row) => String(row._id))),
-      batchIds: [],
-      availableBatches: batchId ? [batchId] : [],
-      selectedBatch: batchId || null,
-    };
-  }
-
-  // Non-legacy: resolve the student's batches, then scope to ONE board batch.
-  const { batchIds } = await resolveStudentBatchIds(studentId, { mode });
+  // Resolve the student's batches, then scope the board to ONE batch.
+  const { batchIds } = await resolveStudentBatchIds(studentId);
   if (!batchIds.length) {
     return { ids: new Set(), batchIds: [], availableBatches: [], selectedBatch: null };
   }
@@ -79,13 +38,6 @@ async function getScopedStudentIdSet(studentId, requestedBatchId) {
     batchIds[0];
 
   const ids = new Set((await studentIdsInBatches([board])).map(String));
-  if (mode === "union") {
-    // Fail-safe: also include legacy-matched peers in this board's batch.
-    const m = catalogBatchMongoMatch(board);
-    const orParts = m.$or ? m.$or : [m];
-    const legacyPeers = await Student.find({ role: "student", $or: orParts }, { _id: 1 }).lean();
-    for (const r of legacyPeers) ids.add(String(r._id));
-  }
   return { ids, batchIds: [board], availableBatches: batchIds, selectedBatch: board };
 }
 

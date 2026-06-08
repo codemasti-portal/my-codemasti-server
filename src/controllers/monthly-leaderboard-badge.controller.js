@@ -2,7 +2,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
 const MonthlyLeaderboardBadge = require("../models/MonthlyLeaderboardBadge");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { membershipMode, resolveStudentBatchIds } = require("../utils/student-batch-context");
+const { resolveStudentBatchIds } = require("../utils/student-batch-context");
 const monthlyBadgeSvc = require("../services/monthly-leaderboard-badge.service");
 
 // Resolve the cohort scope for monthly winners: honor a requested batch_id ONLY when the student
@@ -12,11 +12,7 @@ async function resolveWinnersScopeKey(rawStudent, requestedBatchId) {
   const fallback = monthlyBadgeSvc.scopeKeyForStudentLean(s);
   const want = String(requestedBatchId || "").toLowerCase().trim();
   if (!want) return fallback;
-  const mode = membershipMode();
-  if (mode === "legacy") {
-    return want === String(s.batch_id || "").toLowerCase().trim() ? want : fallback;
-  }
-  const { batchIds } = await resolveStudentBatchIds(rawStudent, { mode });
+  const { batchIds } = await resolveStudentBatchIds(rawStudent);
   return batchIds.includes(want) ? want : fallback;
 }
 

@@ -20,25 +20,6 @@
 
 const StudentEnrollment = require("../models/StudentEnrollment");
 const Course = require("../models/Course");
-const {
-  catalogBatchIdsFromStudentLean,
-  catalogBatchMongoMatch,
-  studentsInCatalogBatchesFilter,
-  catalogBatchStudentFilter,
-} = require("./enrollment");
-
-/**
- * Membership read source. The single-batch → multi-batch (M:N) migration is COMPLETE: batch
- * membership is now always derived from active StudentEnrollment records.
- *
- * The old read-switch env flag BATCH_MEMBERSHIP_SOURCE (legacy | union | enrollment) has been
- * retired — this always returns "enrollment". Parity was verified (0 students dropped) before the
- * cutover. The remaining `=== "legacy"` / `=== "union"` branches across the codebase are now dead
- * fallbacks; they are safe to delete in a follow-up cleanup.
- */
-function membershipMode() {
-  return "enrollment";
-}
 
 /**
  * Active batch ids for a student from their enrollments. Uses the denormalized
@@ -76,48 +57,14 @@ async function enrollmentBatchIdsForStudent(studentId) {
 }
 
 /**
- * Future authoritative membership resolver (enrollment-backed), flag-gated. ADDITIVE — not yet
- * wired into live read paths (that's the read-switch step). Returns the legacy shape plus diagnostics.
+ * Authoritative membership resolver: a student's active batch ids (+ per-batch sections) from
+ * their enrollments.
  * @param {object|string} studentOrId  a lean Student doc (preferred) or a student id
  */
-async function resolveStudentBatchIds(studentOrId, { mode } = {}) {
-  const m = mode || membershipMode();
-  let studentDoc = null;
-  let studentId = null;
-  if (studentOrId && typeof studentOrId === "object") {
-    studentDoc = studentOrId;
-    studentId = studentOrId._id;
-  } else {
-    studentId = studentOrId;
-  }
-
-  let legacySet = [];
-  if (m !== "enrollment") {
-    if (!studentDoc && studentId) {
-      const Student = require("../models/Student");
-      studentDoc = await Student.findById(studentId).select("batch_id enrollment_number").lean();
-    }
-    // Compute legacy from RAW fields only — never read an attached membership set (avoids recursion).
-    legacySet = catalogBatchIdsFromStudentLean({
-      batch_id: studentDoc?.batch_id,
-      enrollment_number: studentDoc?.enrollment_number,
-    });
-  }
-
-  let enrollmentSet = [];
-  let sectionByBatch = {};
-  if (m !== "legacy") {
-    const r = await enrollmentBatchIdsForStudent(studentId);
-    enrollmentSet = r.batchIds;
-    sectionByBatch = r.sectionByBatch;
-  }
-
-  let batchIds;
-  if (m === "legacy") batchIds = legacySet;
-  else if (m === "enrollment") batchIds = enrollmentSet;
-  else batchIds = [...new Set([...legacySet, ...enrollmentSet])]; // union (fail-safe)
-
-  return { batchIds, sectionByBatch, legacySet, enrollmentSet, mode: m };
+async function resolveStudentBatchIds(studentOrId) {
+  const studentId = studentOrId && typeof studentOrId === "object" ? studentOrId._id : studentOrId;
+  const { batchIds, sectionByBatch } = await enrollmentBatchIdsForStudent(studentId);
+  return { batchIds, sectionByBatch };
 }
 
 async function resolveStudentBatchContext(req, student) {
@@ -154,13 +101,7 @@ async function resolveStudentBatchContext(req, student) {
   }
 
   const fallback = String(student?.batch_id || "").trim().toLowerCase();
-  const mode = membershipMode();
-  let batchIds;
-  if (mode === "legacy") {
-    batchIds = catalogBatchIdsFromStudentLean(student); // unchanged legacy behavior
-  } else {
-    batchIds = (await resolveStudentBatchIds(student, { mode })).batchIds;
-  }
+  const { batchIds } = await resolveStudentBatchIds(student);
   return { batchId: fallback, batchIds, explicit: false };
 }
 
@@ -176,18 +117,16 @@ async function scopeStudentToBatch(req, student) {
     // Suppress the enrollment-derived batch path — caller explicitly picked one.
     student.enrollment_number = "";
   }
-  // Read-switch: attach the resolved membership set so the sync chokepoint
-  // (catalogBatchIdsFromStudentLean) returns it. No-op under legacy mode (nothing attached).
-  if (student && membershipMode() !== "legacy") {
+  // Attach the resolved membership set so the sync chokepoint (catalogBatchIdsFromStudentLean) returns it.
+  if (student) {
     student.__membershipBatchIds = ctx.batchIds;
   }
   return ctx;
 }
 
-// ---- Cohort resolution ("which students are in batch X") for the read-switch ----
-// Each *Resolved wrapper returns the EXACT legacy filter in legacy mode (a perfect no-op),
-// and an enrollment-derived student-id set otherwise. "union" mode never drops a student the
-// legacy filter would have matched (RISK-2 fail-safe).
+// ---- Cohort resolution ("which students are in batch X") ----
+// Each *Resolved wrapper returns a Student.find filter scoped to the active-enrollment members of
+// the batch(es) (M:N membership).
 
 // The Mongo connection runs with serverApi.strict:true, which bans the `distinct` command.
 // Dedupe student ids in application code instead (returns ObjectIds, like .distinct() did).
@@ -213,49 +152,26 @@ async function studentIdsInBatches(batchKeys, { sectionId = "", sectionIds } = {
   return distinctStudentIdsForQuery(q);
 }
 
-/** Union of an enrollment-derived id set with whoever the legacy Student filter matches. */
-async function unionWithLegacy(legacyFilter, enrollmentIds) {
-  const Student = require("../models/Student");
-  const legacyRows = await Student.find(legacyFilter).select("_id").lean();
-  const merged = new Map(enrollmentIds.map((x) => [String(x), x]));
-  for (const r of legacyRows) merged.set(String(r._id), r._id);
-  return [...merged.values()];
-}
-
-/** Spreadable Student.find partial for one batch (mirrors catalogBatchMongoMatch). */
+/** Spreadable Student.find partial for the active-enrollment members of one batch. */
 async function catalogBatchMongoMatchResolved(batchId) {
-  const mode = membershipMode();
-  if (mode === "legacy") return catalogBatchMongoMatch(batchId);
-  const ids = await studentIdsInBatches([batchId]);
-  if (mode === "enrollment") return { _id: { $in: ids } };
-  const unionIds = await unionWithLegacy({ role: "student", ...catalogBatchMongoMatch(batchId) }, ids);
-  return { _id: { $in: unionIds } };
+  return { _id: { $in: await studentIdsInBatches([batchId]) } };
 }
 
 /** Full Student.find filter for a set of batches + section (mirrors studentsInCatalogBatchesFilter). */
 async function studentsInBatchesFilterResolved(batchKeys, opts = {}) {
-  const mode = membershipMode();
-  if (mode === "legacy") return studentsInCatalogBatchesFilter(batchKeys, opts);
   const ids = await studentIdsInBatches(batchKeys, opts);
-  if (mode === "enrollment") return { role: "student", _id: { $in: ids } };
-  const unionIds = await unionWithLegacy(studentsInCatalogBatchesFilter(batchKeys, opts), ids);
-  return { role: "student", _id: { $in: unionIds } };
+  return { role: "student", _id: { $in: ids } };
 }
 
 /** Full Student.find filter for one batch + raw section (mirrors catalogBatchStudentFilter). */
 async function catalogBatchStudentFilterResolved(batchId, rawSection) {
-  const mode = membershipMode();
-  if (mode === "legacy") return catalogBatchStudentFilter(batchId, rawSection);
   const bid = String(batchId || "").toLowerCase().trim();
   const hasSection = rawSection !== undefined && String(rawSection).trim() !== "";
   const sid = hasSection ? String(rawSection).trim().toLowerCase().replace(/\s+/g, "-") : "";
   const q = { batch_id: bid, status: "active" };
   if (sid === "__unassigned__") q.$or = [{ section_id: "" }, { section_id: { $exists: false } }];
   else if (sid) q.section_id = sid;
-  const ids = await distinctStudentIdsForQuery(q);
-  if (mode === "enrollment") return { role: "student", _id: { $in: ids } };
-  const unionIds = await unionWithLegacy(catalogBatchStudentFilter(batchId, rawSection), ids);
-  return { role: "student", _id: { $in: unionIds } };
+  return { role: "student", _id: { $in: await distinctStudentIdsForQuery(q) } };
 }
 
 /**
@@ -272,7 +188,6 @@ function membershipKeysOr(student, legacyFallback) {
 module.exports = {
   resolveStudentBatchContext,
   scopeStudentToBatch,
-  membershipMode,
   enrollmentBatchIdsForStudent,
   resolveStudentBatchIds,
   membershipKeysOr,

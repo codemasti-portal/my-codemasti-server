@@ -1,8 +1,8 @@
 const mongoose = require("mongoose");
 const Student = require("../models/Student");
 const MonthlyLeaderboardBadge = require("../models/MonthlyLeaderboardBadge");
-const { augmentStudentCatalogFieldsFromEnrollment, catalogBatchMongoMatch } = require("../utils/enrollment");
-const { membershipMode, resolveStudentBatchIds, catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
+const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { resolveStudentBatchIds, catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
 const {
   submittedAtIndiaCalendarMonth,
   recentClosedIndianMonthPeriods,
@@ -33,15 +33,10 @@ function scopeKeyForStudentLean(studentLean) {
 
 async function distinctScopeKeys() {
   const rows = await Student.find({ role: "student" }).select("_id batch_id enrollment_number").lean();
-  const mode = membershipMode();
   const keys = new Set();
   for (const row of rows) {
-    if (mode === "legacy") {
-      keys.add(scopeKeyForStudentLean(row));
-      continue;
-    }
-    // Non-legacy: a multi-batch student contributes a cohort key for EACH active batch.
-    const { batchIds } = await resolveStudentBatchIds(row, { mode });
+    // A multi-batch student contributes a cohort key for EACH active batch.
+    const { batchIds } = await resolveStudentBatchIds(row);
     if (batchIds.length) {
       for (const b of batchIds) keys.add(b);
     } else {
@@ -67,8 +62,7 @@ async function finalizePeriodForScopeIfMissing(scopeKey, period) {
   const submittedFilter = submittedAtIndiaCalendarMonth(p.year, p.month);
   // Per-batch scope: in non-legacy mode a cohort's "Student of the Month" counts only that batch's
   // own content. Legacy stays global (byte-identical); solo (no-batch) students stay global too.
-  const scopeBatchIds =
-    membershipMode() !== "legacy" && !scopeKey.startsWith("solo:") ? [scopeKey] : undefined;
+  const scopeBatchIds = scopeKey.startsWith("solo:") ? undefined : [scopeKey];
   const merged = await buildRowsForSubmittedFilter(
     submittedFilter,
     scopeBatchIds ? { batchIds: scopeBatchIds } : undefined

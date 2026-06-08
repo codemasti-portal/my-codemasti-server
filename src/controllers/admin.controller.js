@@ -23,7 +23,6 @@ const {
 const registry = require("../utils/batch-catalog-registry");
 const StudentEnrollment = require("../models/StudentEnrollment");
 const {
-  membershipMode,
   catalogBatchMongoMatchResolved,
   studentsInBatchesFilterResolved,
   studentIdsInBatches,
@@ -45,43 +44,6 @@ const uploadsRoot = getUploadsRoot();
 const avatarsDir = path.join(uploadsRoot, "avatars");
 
 /** Arena catalog visible to a student's batch (aligned with student arena list). */
-function arenaStudentCatalogFilter(batchKey) {
-  const batchId = String(batchKey || "").trim().toLowerCase();
-  if (!batchId) return null;
-  return {
-    $and: [
-      {
-        $or: [{ batch_id: batchId }, { batch_ids: { $in: [batchId] } }],
-      },
-      { $or: [{ is_disabled: false }, { is_disabled: { $exists: false } }] },
-    ],
-  };
-}
-
-async function arenaProgressForStudentId(studentId, batchKey) {
-  const filter = arenaStudentCatalogFilter(batchKey);
-  if (!filter) {
-    return { arena_questions_total: 0, arena_solved_count: 0 };
-  }
-  const qs = await ArenaQuestion.find(filter).select("_id").lean();
-  const qIds = qs.map((q) => q._id);
-  const total = qIds.length;
-  if (!total) {
-    return { arena_questions_total: 0, arena_solved_count: 0 };
-  }
-  // serverApi.strict:true bans the `distinct` command — count unique solved question_ids in app code.
-  const solvedRows = await ArenaSubmission.find({
-    student_id: studentId,
-    status: "Accepted",
-    question_id: { $in: qIds },
-  }).select("question_id").lean();
-  const solvedCount = new Set(solvedRows.map((r) => String(r.question_id))).size;
-  return {
-    arena_questions_total: total,
-    arena_solved_count: solvedCount,
-  };
-}
-
 async function arenaQuestionsForAdminBatchKeys(batchKeys) {
   const keys = [...new Set(batchKeys.map((k) => String(k || "").trim().toLowerCase()).filter(Boolean))];
   if (!keys.length) return [];
@@ -118,64 +80,7 @@ async function arenaProgressMapsForStudentRows(studentRows) {
   const solvedMap = new Map();
   const totalMap = new Map();
 
-  if (membershipMode() === "legacy") {
-    // ===== Legacy (unchanged, byte-identical) — group by the student's single primary batch =====
-    const byBatch = new Map();
-    for (const s of studentRows) {
-      const enriched = augmentStudentCatalogFieldsFromEnrollment(s);
-      const sid = String(enriched._id);
-      const bk = String(enriched.batch_id || enriched.batch || "").trim().toLowerCase();
-      if (!bk) {
-        solvedMap.set(sid, 0);
-        totalMap.set(sid, 0);
-        continue;
-      }
-      if (!byBatch.has(bk)) byBatch.set(bk, []);
-      byBatch.get(bk).push({ sid, oid: enriched._id });
-    }
-
-    const batchKeys = [...byBatch.keys()];
-    const allQs = await arenaQuestionsForAdminBatchKeys(batchKeys);
-
-    for (const [bk, pairs] of byBatch.entries()) {
-      const qIds = arenaQuestionIdsForStudentBatch(bk, allQs);
-      const total = qIds.length;
-      for (const { sid } of pairs) {
-        totalMap.set(sid, total);
-      }
-      if (!pairs.length || !qIds.length) {
-        for (const { sid } of pairs) solvedMap.set(sid, 0);
-        continue;
-      }
-      const studObjectIds = pairs.map((p) => p.oid);
-      const agg = await ArenaSubmission.aggregate([
-        {
-          $match: {
-            student_id: { $in: studObjectIds },
-            status: "Accepted",
-            question_id: { $in: qIds },
-          },
-        },
-        { $group: { _id: { sid: "$student_id", qid: "$question_id" } } },
-        { $group: { _id: "$_id.sid", n: { $sum: 1 } } },
-      ]);
-      const counts = new Map();
-      for (const r of agg) {
-        const raw = r._id;
-        const key = raw != null && typeof raw.toString === "function" ? raw.toString() : String(raw);
-        counts.set(key, Number(r.n || 0));
-      }
-      for (const { sid } of pairs) {
-        const key = String(sid);
-        solvedMap.set(key, counts.get(key) ?? 0);
-      }
-    }
-
-    return { solvedMap, totalMap };
-  }
-
-  // ===== Non-legacy (M:N): totals/solved span the UNION of each student's active batches =====
-  const mode = membershipMode();
+  // Totals/solved span the union of each student's active batches (M:N).
   const rowIds = studentRows.map((s) => s._id);
   const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
     .select("student_id batch_id")
@@ -186,13 +91,6 @@ async function arenaProgressMapsForStudentRows(studentRows) {
     const b = String(e.batch_id || "").toLowerCase().trim();
     const sid = String(e.student_id);
     if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
-  }
-  if (mode === "union") {
-    for (const s of studentRows) {
-      const enriched = augmentStudentCatalogFieldsFromEnrollment(s);
-      const lb = String(enriched.batch_id || enriched.batch || "").toLowerCase().trim();
-      if (lb) batchesByStudent.get(String(s._id)).add(lb);
-    }
   }
 
   const allBatchKeys = [...new Set([...batchesByStudent.values()].flatMap((set) => [...set]))].filter(Boolean);
@@ -256,9 +154,8 @@ async function assignmentProgressMapsForStudentRows(studentRows, now = new Date(
   const solvedMap = new Map();
   const totalMap = new Map();
 
-  if (membershipMode() !== "legacy") {
-    // ===== Non-legacy (M:N): union of published assignments across each student's active batches =====
-    const mode = membershipMode();
+  {
+    // Union of published assignments across each student's active batches (M:N).
     const rowIds = studentRows.map((s) => s._id);
     const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
       .select("student_id batch_id")
@@ -269,13 +166,6 @@ async function assignmentProgressMapsForStudentRows(studentRows, now = new Date(
       const b = String(e.batch_id || "").toLowerCase().trim();
       const sid = String(e.student_id);
       if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
-    }
-    if (mode === "union") {
-      for (const s of studentRows) {
-        const en = augmentStudentCatalogFieldsFromEnrollment(s);
-        const lb = String(en.batch_id || en.batch || "").toLowerCase().trim();
-        if (lb) batchesByStudent.get(String(s._id)).add(lb);
-      }
     }
 
     const allBatchKeys = [...new Set([...batchesByStudent.values()].flatMap((set) => [...set]))].filter(Boolean);
@@ -329,131 +219,101 @@ async function assignmentProgressMapsForStudentRows(studentRows, now = new Date(
     }
     return { solvedMap, totalMap };
   }
-
-  // ===== Legacy (unchanged, byte-identical) — group by the student's single primary batch =====
-  const byBatch = new Map();
-
-  for (const s of studentRows) {
-    const enriched = augmentStudentCatalogFieldsFromEnrollment(s);
-    const sid = mongoEntityKey(enriched._id);
-    const bk = String(enriched.batch_id || enriched.batch || "").trim().toLowerCase();
-    const groupKey = bk || ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY;
-    if (!byBatch.has(groupKey)) byBatch.set(groupKey, []);
-    byBatch.get(groupKey).push({ sid, oid: enriched._id });
-  }
-
-  for (const [bk, pairs] of byBatch.entries()) {
-    const filter =
-      bk === ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY
-        ? assignmentPublishedVisibleToCatalogBatch("", now)
-        : assignmentPublishedVisibleToCatalogBatch(bk, now);
-    const assignmentsFromQuery = await Assignment.find(filter).select("_id batch_id batch_ids release_date").lean();
-
-    const idSet = new Set(assignmentsFromQuery.map((a) => String(a._id)));
-    const studObjectIds = pairs.map((p) => p.oid);
-    const acceptedSubs =
-      studObjectIds.length > 0
-        ? await AssignmentSubmission.find({
-            student_id: { $in: studObjectIds },
-            status: "Accepted",
-          })
-            .select("question_id")
-            .lean()
-        : [];
-    const qidsFromSubs = [...new Set(acceptedSubs.map((r) => r.question_id).filter(Boolean))];
-    if (qidsFromSubs.length > 0) {
-      const qMeta = await AssignmentQuestion.find({ _id: { $in: qidsFromSubs } })
-        .select("assignment_id")
-        .lean();
-      for (const q of qMeta) {
-        if (q.assignment_id != null) idSet.add(String(q.assignment_id));
-      }
-    }
-
-    const mergedIdList = [...idSet];
-    const batchKeyForJs = bk === ASSIGNMENT_PROGRESS_ALL_BATCHES_KEY ? "" : bk;
-    let aidList = [];
-    if (mergedIdList.length > 0) {
-      const mergedDocs = await Assignment.find({ _id: { $in: mergedIdList } })
-        .select("_id batch_id batch_ids release_date")
-        .lean();
-      aidList = mergedDocs
-        .filter((a) => assignmentDocIsPublished(a, now) && assignmentDocMatchesCatalogBatch(a, batchKeyForJs))
-        .map((a) => a._id);
-    }
-    if (!aidList.length) {
-      for (const { sid } of pairs) {
-        solvedMap.set(sid, 0);
-        totalMap.set(sid, 0);
-      }
-      continue;
-    }
-
-    const questions = await AssignmentQuestion.find({ assignment_id: { $in: aidList } })
-      .select("_id assignment_id")
-      .lean();
-
-    const qsByAssignment = new Map();
-    for (const q of questions) {
-      const aid = String(q.assignment_id);
-      if (!qsByAssignment.has(aid)) qsByAssignment.set(aid, []);
-      qsByAssignment.get(aid).push(String(q._id));
-    }
-
-    const assignmentIdsWithQs = [...qsByAssignment.entries()]
-      .filter(([, qids]) => qids.length > 0)
-      .map(([aid]) => aid);
-    const totalAssignments = assignmentIdsWithQs.length;
-
-    const allQids = questions.map((q) => q._id);
-
-    const accepted =
-      allQids.length && studObjectIds.length
-        ? await AssignmentSubmission.find({
-            student_id: { $in: studObjectIds },
-            status: "Accepted",
-            question_id: { $in: allQids },
-          })
-            .select("student_id question_id")
-            .lean()
-        : [];
-
-    const solvedQsByStudent = new Map();
-    for (const row of accepted) {
-      const st = mongoEntityKey(row.student_id);
-      const qid = String(row.question_id);
-      if (!solvedQsByStudent.has(st)) solvedQsByStudent.set(st, new Set());
-      solvedQsByStudent.get(st).add(qid);
-    }
-
-    for (const { sid, oid } of pairs) {
-      totalMap.set(sid, totalAssignments);
-      const stKey = mongoEntityKey(oid);
-      const solvedSet = solvedQsByStudent.get(stKey) || new Set();
-      let solvedAssignmentCount = 0;
-      for (const aid of assignmentIdsWithQs) {
-        const qids = qsByAssignment.get(aid) || [];
-        if (qids.length && qids.every((qid) => solvedSet.has(qid))) {
-          solvedAssignmentCount += 1;
-        }
-      }
-      solvedMap.set(sid, solvedAssignmentCount);
-    }
-  }
-
-  return { solvedMap, totalMap };
 }
 
-async function assignmentProgressForStudentId(studentId, batchKey, now = new Date()) {
-  const maps = await assignmentProgressMapsForStudentRows(
-    [{ _id: studentId, batch_id: batchKey, batch: batchKey }],
-    now
-  );
-  const sid = mongoEntityKey(studentId);
-  return {
-    assignments_solved_count: maps.solvedMap.get(sid) ?? 0,
-    assignments_total_count: maps.totalMap.get(sid) ?? 0,
-  };
+/**
+ * Next available PRIMARY enrollment number for a batch + section: `<LETTER><YY><SS><RR>`.
+ * - LETTER = the batch's single-letter enrollment_prefix. A batch can host a primary enrollment only
+ *   if it has a 1-letter prefix; 2-letter-prefix batches can only be secondary (Add to batch → roll_number).
+ * - YY     = current year (2 digits).
+ * - SS     = the chosen catalog section as 2 digits (its id if numeric, else its 1-based position).
+ * - RR     = next free 2-digit roll within LETTER+YY+SS (max existing + 1).
+ * Throws an Error with a `.code` the caller surfaces.
+ */
+async function generateNextEnrollmentNumber(batchId, sectionId) {
+  await registry.refresh();
+  const bid = String(batchId || "").toLowerCase().trim();
+  const prefix = registry.batchIdToPrefixSync(bid);
+  if (!prefix) {
+    const e = new Error(`Batch "${bid}" has no enrollment prefix — set one in the batch catalog, or add the student as a secondary batch.`);
+    e.code = "NO_PREFIX";
+    throw e;
+  }
+  const letter = prefix.toUpperCase(); // 1+ letters (e.g. I, SU, ADV)
+  const yy = String(new Date().getFullYear()).slice(-2);
+
+  // Resolve the 2-digit section code (SS): the section id if it's already 1–2 digits, else its
+  // 1-based position among the batch's catalog sections (defaults to 01).
+  const sections = registry.getBatchSync(bid)?.sections || [];
+  const rawSection = String(sectionId || "").trim().toLowerCase();
+  let ss;
+  if (/^\d{1,2}$/.test(rawSection)) {
+    ss = rawSection.padStart(2, "0");
+  } else if (rawSection) {
+    const idx = sections.findIndex((s) => String(s.section_id || "").toLowerCase() === rawSection);
+    ss = String((idx >= 0 ? idx : 0) + 1).padStart(2, "0");
+  } else {
+    ss = "01";
+  }
+
+  // Fill the SMALLEST free roll in 01..99 (not max+1) — existing rolls are often scattered with gaps,
+  // and gap-filling keeps every student inside the same 2-digit section code (matches the catalog section).
+  const rx = new RegExp(`^${letter}${yy}${ss}(\\d{2})$`, "i");
+  const rows = await Student.find({ enrollment_number: rx }).select("enrollment_number").lean();
+  const used = new Set();
+  for (const r of rows) {
+    const m = rx.exec(String(r.enrollment_number || ""));
+    if (m) used.add(Number(m[1]));
+  }
+  let next = 1;
+  while (next <= 99 && used.has(next)) next++;
+  if (next > 99) {
+    const e = new Error(`Section ${ss} of "${bid}" is full (all 99 rolls used). Pick a different section.`);
+    e.code = "SECTION_FULL";
+    throw e;
+  }
+  const rr = String(next).padStart(2, "0");
+  return { enrollment_number: `${letter}${yy}${ss}${rr}`, prefix: letter, year: yy, section: ss, roll: rr };
+}
+
+/** GET /admin/students/next-enrollment?batch_id=&section_id= — preview the next primary enrollment number. */
+async function nextEnrollmentNumber(req, res) {
+  const batchId = String(req.query.batch_id || "").trim().toLowerCase();
+  const sectionId = String(req.query.section_id || "").trim();
+  if (!batchId) return sendError(res, 400, "VALIDATION_ERROR", "batch_id is required");
+  try {
+    return sendSuccess(res, await generateNextEnrollmentNumber(batchId, sectionId));
+  } catch (e) {
+    return sendError(res, 400, e.code || "ENROLLMENT_GEN_FAILED", e.message || "Could not generate enrollment number");
+  }
+}
+
+/**
+ * GET /admin/students/lookup?email= — does a student already exist for this email?
+ * Drives the create dialog's branch: exists → Add-to-batch, new → Create.
+ */
+async function lookupStudentByEmail(req, res) {
+  const email = String(req.query.email || "").trim();
+  if (!email) return sendError(res, 400, "VALIDATION_ERROR", "email is required");
+  const student = await Student.findOne({
+    role: "student",
+    email: new RegExp(`^${referralRewards.escapeRegex(email)}$`, "i"),
+  })
+    .select("_id name email enrollment_number")
+    .lean();
+  if (!student) return sendSuccess(res, { exists: false });
+  const enr = await StudentEnrollment.find({ student_id: student._id, status: "active" }).select("batch_id").lean();
+  const batch_ids = [...new Set(enr.map((e) => String(e.batch_id || "").toLowerCase()).filter(Boolean))];
+  return sendSuccess(res, {
+    exists: true,
+    student: {
+      id: String(student._id),
+      name: student.name,
+      email: student.email,
+      enrollment_number: student.enrollment_number || "",
+      batch_ids,
+    },
+  });
 }
 
 async function createStudent(req, res) {
@@ -464,9 +324,9 @@ async function createStudent(req, res) {
     phone_number: z.string().min(6).trim(),
     enrollment_number: z
       .string()
-      // Letter + 6 digits. The specific letter must map to a known batch prefix in the catalog —
+      // Batch prefix (1+ letters) + 6 digits. The prefix must map to a known batch in the catalog —
       // validated by parseEnrollmentNumber below (registry-aware), so new batch types are supported.
-      .regex(/^[A-Za-z]\d{6}$/, "enrollment_number must be a batch letter + 6 digits (e.g. I260105)"),
+      .regex(/^[A-Za-z]+\d{6}$/, "enrollment_number must be a batch prefix + 6 digits (e.g. I260105, SU260206)"),
     enrollment_date: z.coerce.date(),
     school_class: z.number().int().min(5).max(10).optional(),
     school_name: z.string().min(1).max(200).trim(),
@@ -936,14 +796,10 @@ async function getStudent(req, res) {
   const data = studentResponse(doc);
   const refCount = await Student.countDocuments({ referred_by: doc._id });
   const bonus = data.referral_bonus_count ?? 0;
-  const batchKey = String(data.batch_id || data.batch || "").trim().toLowerCase();
   let arenaProgress;
   let assignmentProgress;
-  if (membershipMode() === "legacy") {
-    arenaProgress = await arenaProgressForStudentId(doc._id, batchKey);
-    assignmentProgress = await assignmentProgressForStudentId(doc._id, batchKey, new Date());
-  } else {
-    // M:N: aggregate across the student's active batches via the (now membership-aware) maps.
+  {
+    // M:N: aggregate across the student's active batches via the membership-aware maps.
     const sid = String(doc._id);
     const aMaps = await arenaProgressMapsForStudentRows([doc]);
     arenaProgress = { arena_solved_count: aMaps.solvedMap.get(sid) || 0, arena_questions_total: aMaps.totalMap.get(sid) || 0 };
@@ -993,7 +849,7 @@ async function updateStudent(req, res) {
     phone_number: z.string().min(6).trim().optional(),
     enrollment_number: z
       .string()
-      .regex(/^[A-Za-z]\d{6}$/)
+      .regex(/^[A-Za-z]+\d{6}$/, "enrollment_number must be a batch prefix + 6 digits (e.g. I260105, SU260206)")
       .optional(),
     enrollment_date: z.coerce.date().optional(),
     // Allow 1–12 on update for older records; UI only offers 5–10 for new edits.
@@ -1299,6 +1155,8 @@ async function removeStudentBatch(req, res) {
 
 module.exports = {
   createStudent,
+  nextEnrollmentNumber,
+  lookupStudentByEmail,
   listStudents,
   getStudent,
   updateStudent,

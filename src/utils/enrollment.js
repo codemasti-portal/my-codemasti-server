@@ -34,19 +34,23 @@ function batchNameForPrefix(prefix) {
  */
 function parseEnrollmentNumber(raw) {
   const value = String(raw).trim().toUpperCase();
-  if (!/^[A-Z]\d{6}$/.test(value)) {
+  // Batch prefix = one OR MORE letters (e.g. I, SU, ADV) + exactly 6 digits (YY section roll).
+  // Multi-letter prefixes lift the old single-letter (26-batch) ceiling; the 6 trailing digits parse
+  // unambiguously regardless of prefix length.
+  const m = /^([A-Z]+)(\d{6})$/.exec(value);
+  if (!m) {
     throw new Error(
-      "Invalid enrollment_number. Expected a batch letter + 6 digits (YY section roll), e.g. I260105, S260206, B260702"
+      "Invalid enrollment_number. Expected a batch prefix (letters) + 6 digits (YY section roll), e.g. I260105, SU260206, ADV260702"
     );
   }
-  const prefix = value[0];
+  const prefix = m[1];
   const enrollment_batch_name = batchNameForPrefix(prefix);
   if (!enrollment_batch_name) {
     throw new Error(
-      `Unknown enrollment batch letter "${prefix}". Create a batch with this enrollment_prefix in the batch catalog first.`
+      `Unknown enrollment batch prefix "${prefix}". Create a batch with this enrollment_prefix in the batch catalog first.`
     );
   }
-  const digits = value.slice(1);
+  const digits = m[2];
   const year2 = Number(digits.slice(0, 2));
   const enrollment_year = 2000 + year2;
   const enrollment_section = digits.slice(2, 4);

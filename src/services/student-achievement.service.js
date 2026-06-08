@@ -3,8 +3,7 @@ const Student = require("../models/Student");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
 const StudentAchievementBadge = require("../models/StudentAchievementBadge");
-const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { membershipMode, resolveStudentBatchIds } = require("../utils/student-batch-context");
+const { resolveStudentBatchIds } = require("../utils/student-batch-context");
 const { toIndiaCalendarYmd } = require("../utils/india-time");
 const { ARENA_QUEST_MILESTONES, ARENA_STREAK_BEST_MILESTONES } = require("../config/achievement-badges");
 const badgeDefSvc = require("./achievement-badge-definition.service");
@@ -44,16 +43,8 @@ function longestIstCalendarStreakFromSortedDays(sortedYmD) {
 async function batchArenaQuestionIdsForStudent(studentId) {
   const rawStudent = await Student.findById(studentId).select("batch batch_id enrollment_number").lean();
   if (!rawStudent) return [];
-  // Read-switch: legacy = [single derived batch]; non-legacy = full enrollment-derived set.
-  const mode = membershipMode();
-  let batchIds;
-  if (mode === "legacy") {
-    const s = augmentStudentCatalogFieldsFromEnrollment(rawStudent);
-    const batchId = String(s.batch_id || s.batch || "").toLowerCase().trim();
-    batchIds = batchId ? [batchId] : [];
-  } else {
-    batchIds = (await resolveStudentBatchIds(rawStudent, { mode })).batchIds;
-  }
+  // Membership is the full enrollment-derived batch set.
+  const { batchIds } = await resolveStudentBatchIds(rawStudent);
   if (!batchIds.length) return [];
 
   const questions = await ArenaQuestion.find({

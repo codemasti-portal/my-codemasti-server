@@ -18,7 +18,7 @@ const batchCatalogSchema = new mongoose.Schema(
 
     // --- Data-driven replacements for hardcoded batch maps (Phase 0; all additive & defaulted) ---
     /** Enrollment-number letter for this batch (e.g. "S"/"B"/"I"). Empty = batch has no enrollment-number identity. */
-    enrollment_prefix: { type: String, default: "", uppercase: true, trim: true, maxlength: 2 },
+    enrollment_prefix: { type: String, default: "", uppercase: true, trim: true, maxlength: 6 },
     /** Human tier label (e.g. Beginner/Intermediate/Advanced). Display only. */
     tier_label: { type: String, default: "", trim: true },
     /** Seeded/system batch that must not be deleted (Spark, Builders, Innovators). */

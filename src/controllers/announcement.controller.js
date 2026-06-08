@@ -3,7 +3,7 @@ const Announcement = require("../models/Announcement");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { postedByStudentLabel } = require("../utils/announcementAuthor");
-const { scopeStudentToBatch, membershipKeysOr, membershipMode, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 
 function normSid(v) {
   return String(v ?? "")
@@ -63,11 +63,9 @@ async function list(req, res) {
   const student = await Student.findById(req.user.sub).lean();
   if (student) {
     await scopeStudentToBatch(req, student);
-    if (membershipMode() !== "legacy") {
-      // Per-batch section map so section-scoped announcements match the student's section IN that batch.
-      const { sectionByBatch } = await enrollmentBatchIdsForStudent(student._id);
-      student.__sectionByBatch = sectionByBatch;
-    }
+    // Per-batch section map so section-scoped announcements match the student's section IN that batch.
+    const { sectionByBatch } = await enrollmentBatchIdsForStudent(student._id);
+    student.__sectionByBatch = sectionByBatch;
   }
   const all = await Announcement.find({}).sort({ date: -1 }).lean();
 

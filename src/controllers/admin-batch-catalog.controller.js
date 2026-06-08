@@ -1,6 +1,7 @@
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
 const BatchCatalog = require("../models/BatchCatalog");
+const Course = require("../models/Course");
 const Student = require("../models/Student");
 const Assignment = require("../models/Assignment");
 const { assignmentVisibleToCatalogBatchCountFilter } = require("../utils/assignmentBatchFilter");
@@ -69,7 +70,7 @@ const createBody = z.object({
   name: z.string().min(1).trim(),
   order: z.number().int().optional(),
   sections: z.array(sectionSchema).optional().default([]),
-  enrollment_prefix: z.string().trim().max(2).optional(),
+  enrollment_prefix: z.string().trim().max(6).optional(),
   tier_label: z.string().trim().max(80).optional(),
   include_in_default_views: z.boolean().optional(),
 });
@@ -78,7 +79,7 @@ const updateBody = z.object({
   name: z.string().min(1).trim().optional(),
   order: z.number().int().optional(),
   sections: z.array(sectionSchema).optional(),
-  enrollment_prefix: z.string().trim().max(2).optional(),
+  enrollment_prefix: z.string().trim().max(6).optional(),
   tier_label: z.string().trim().max(80).optional(),
   include_in_default_views: z.boolean().optional(),
 });
@@ -87,8 +88,8 @@ const updateBody = z.object({
 async function validateUniquePrefix(rawPrefix, exceptBatchId = "") {
   const prefix = String(rawPrefix || "").trim().toUpperCase();
   if (!prefix) return { prefix: "" };
-  if (!/^[A-Z]{1,2}$/.test(prefix)) {
-    return { error: "enrollment_prefix must be 1–2 letters (e.g. S, B, I, WK)" };
+  if (!/^[A-Z]{1,6}$/.test(prefix)) {
+    return { error: "enrollment_prefix must be 1–6 letters (e.g. S, B, I, SU, ADV)" };
   }
   // Check the registry seed too — it owns S/B/I even before they're backfilled into the DB,
   // so a new batch can't claim a seeded prefix while the partial-unique DB index can't see it yet.
@@ -239,7 +240,35 @@ async function create(req, res) {
     include_in_default_views: body.include_in_default_views !== false,
   });
   await registry.refresh(true);
-  return sendSuccess(res, serialize(doc), "Batch created");
+
+  // Auto-create a placeholder billing Course linked to this batch so it's immediately enrollable.
+  // Fee is 0 (the monthly invoice scheduler skips fee <= 0), so no invoices go out until a
+  // super-admin sets the real fee in Billing → Courses. Idempotent + best-effort: a failure here
+  // (e.g. a stray course already using this code) must never fail the batch creation itself.
+  let courseAutocreated = false;
+  try {
+    const existingCourse = await Course.findOne({ linked_batch_id: batch_id, is_active: true })
+      .select("_id")
+      .lean();
+    if (!existingCourse) {
+      await Course.create({
+        code: batch_id,
+        name: body.name,
+        linked_batch_id: batch_id,
+        base_fee_paise: 0,
+        billing_mode: "monthly",
+        category: "specialization",
+        is_active: true,
+        created_by: req.staff?.sub || null,
+        updated_by: req.staff?.sub || null,
+      });
+      courseAutocreated = true;
+    }
+  } catch (err) {
+    console.warn("[BATCH_COURSE_AUTOCREATE_FAILED]", batch_id, err?.message || err);
+  }
+
+  return sendSuccess(res, serialize(doc), "Batch created", { course_autocreated: courseAutocreated });
 }
 
 async function update(req, res) {

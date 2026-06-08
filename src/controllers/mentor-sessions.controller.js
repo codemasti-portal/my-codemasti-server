@@ -2,7 +2,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const MentorSlot = require("../models/MentorSlot");
 const MentorSessionJoin = require("../models/MentorSessionJoin");
 const Student = require("../models/Student");
-const { scopeStudentToBatch, membershipKeysOr, membershipMode, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, membershipKeysOr, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 
 function getSessionStartMs(slot) {
   const baseDate = new Date(slot?.date);
@@ -48,9 +48,8 @@ function batchSectionClausesFor(batchIds, sectionForBatch) {
   return clauses;
 }
 
-/** Resolve a (bid) → section function: per-batch section in M:N mode, single section in legacy. */
-async function sectionResolverFor(student, studentSectionId) {
-  if (membershipMode() === "legacy") return () => studentSectionId;
+/** Resolve a (bid) → section function: the student's section IN each batch (enrollment-derived). */
+async function sectionResolverFor(student) {
   const { sectionByBatch } = await enrollmentBatchIdsForStudent(student?._id);
   return (bid) => (sectionByBatch || {})[bid] || "";
 }

@@ -11,7 +11,7 @@ const {
   buildDoubtsUploadFolder,
 } = require("../utils/cloudinary");
 const registry = require("../utils/batch-catalog-registry");
-const { membershipMode, studentIdsInBatches } = require("../utils/student-batch-context");
+const { studentIdsInBatches } = require("../utils/student-batch-context");
 
 function mediaResourceType(mimetype) {
   const type = String(mimetype || "");
@@ -78,23 +78,15 @@ async function resolveDoubtScope(req) {
   return { mode: "none" };
 }
 
-/** Student _ids in a batch scope (mode-gated: legacy primary field vs M:N active enrollments). */
+/** Student _ids active in the given batch scope (M:N enrollment membership). */
 async function studentIdsForBatchScope(batchScope) {
   if (!batchScope.length) return [];
-  if (membershipMode() === "legacy") {
-    const rows = await Student.find({ batch_id: { $in: batchScope } }).select("_id").lean();
-    return rows.map((s) => s._id);
-  }
   return studentIdsInBatches(batchScope);
 }
 
-/** Distinct batch_ids a set of students belong to (to scope a mentor's community channels). */
+/** Distinct batch_ids a set of students are actively enrolled in (to scope a mentor's community channels). */
 async function batchIdsForStudents(studentIds) {
   if (!studentIds.length) return [];
-  if (membershipMode() === "legacy") {
-    const rows = await Student.find({ _id: { $in: studentIds } }).select("batch_id").lean();
-    return [...new Set(rows.map((s) => String(s.batch_id || "").toLowerCase()).filter(Boolean))];
-  }
   const StudentEnrollment = require("../models/StudentEnrollment");
   const rows = await StudentEnrollment.find({ student_id: { $in: studentIds }, status: "active" })
     .select("batch_id")

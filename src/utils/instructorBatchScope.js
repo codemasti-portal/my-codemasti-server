@@ -37,10 +37,6 @@ function studentInAnyAssignedBatch(studentDoc, allowedNormalizedBatchIds) {
  */
 async function studentInAnyAssignedBatchResolved(studentDoc, allowedNormalizedBatchIds) {
   if (!allowedNormalizedBatchIds?.length || !studentDoc?._id) return false;
-  const { membershipMode } = require("./student-batch-context");
-  if (membershipMode() === "legacy") {
-    return studentInAnyAssignedBatch(studentDoc, allowedNormalizedBatchIds);
-  }
   const StudentEnrollment = require("../models/StudentEnrollment");
   const allow = [...new Set(allowedNormalizedBatchIds.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean))];
   if (!allow.length) return false;
