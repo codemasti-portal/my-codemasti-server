@@ -25,13 +25,8 @@ const StudentEnrollment = require("../models/StudentEnrollment");
 const {
   catalogBatchMongoMatchResolved,
   studentsInBatchesFilterResolved,
-  studentIdsInBatches,
 } = require("../utils/student-batch-context");
-const {
-  assignmentPublishedVisibleToCatalogBatch,
-  assignmentDocMatchesCatalogBatch,
-  assignmentDocIsPublished,
-} = require("../utils/assignmentBatchFilter");
+const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
@@ -76,21 +71,25 @@ function arenaQuestionIdsForStudentBatch(batchKey, questions) {
 /**
  * Per-student arena solved counts (distinct accepted questions in their batch catalog).
  */
-async function arenaProgressMapsForStudentRows(studentRows) {
+async function arenaProgressMapsForStudentRows(studentRows, opts = {}) {
   const solvedMap = new Map();
   const totalMap = new Map();
 
-  // Totals/solved span the union of each student's active batches (M:N).
+  // Totals/solved span the union of each student's active batches (M:N). Reuse the caller's shared
+  // enrollment map when provided (listStudents fetches it once) — otherwise fetch it here.
   const rowIds = studentRows.map((s) => s._id);
-  const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
-    .select("student_id batch_id")
-    .lean();
-  const batchesByStudent = new Map();
-  for (const s of studentRows) batchesByStudent.set(String(s._id), new Set());
-  for (const e of enr) {
-    const b = String(e.batch_id || "").toLowerCase().trim();
-    const sid = String(e.student_id);
-    if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
+  let batchesByStudent = opts.batchesByStudent;
+  if (!batchesByStudent) {
+    batchesByStudent = new Map();
+    for (const s of studentRows) batchesByStudent.set(String(s._id), new Set());
+    const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
+      .select("student_id batch_id")
+      .lean();
+    for (const e of enr) {
+      const b = String(e.batch_id || "").toLowerCase().trim();
+      const sid = String(e.student_id);
+      if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
+    }
   }
 
   const allBatchKeys = [...new Set([...batchesByStudent.values()].flatMap((set) => [...set]))].filter(Boolean);
@@ -150,30 +149,52 @@ function mongoEntityKey(id) {
  * Per student: assignments fully solved (every question has an Accepted submission) /
  * total published assignments that have at least one question for their batch.
  */
-async function assignmentProgressMapsForStudentRows(studentRows, now = new Date()) {
+async function assignmentProgressMapsForStudentRows(studentRows, now = new Date(), opts = {}) {
   const solvedMap = new Map();
   const totalMap = new Map();
 
   {
-    // Union of published assignments across each student's active batches (M:N).
+    // Union of published assignments across each student's active batches (M:N). Reuse the caller's
+    // shared enrollment map when provided (listStudents fetches it once) — otherwise fetch it here.
     const rowIds = studentRows.map((s) => s._id);
-    const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
-      .select("student_id batch_id")
-      .lean();
-    const batchesByStudent = new Map();
-    for (const s of studentRows) batchesByStudent.set(String(s._id), new Set());
-    for (const e of enr) {
-      const b = String(e.batch_id || "").toLowerCase().trim();
-      const sid = String(e.student_id);
-      if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
+    let batchesByStudent = opts.batchesByStudent;
+    if (!batchesByStudent) {
+      batchesByStudent = new Map();
+      for (const s of studentRows) batchesByStudent.set(String(s._id), new Set());
+      const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
+        .select("student_id batch_id")
+        .lean();
+      for (const e of enr) {
+        const b = String(e.batch_id || "").toLowerCase().trim();
+        const sid = String(e.student_id);
+        if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
+      }
     }
 
     const allBatchKeys = [...new Set([...batchesByStudent.values()].flatMap((set) => [...set]))].filter(Boolean);
-    const aidsByBatch = new Map();
-    for (const bk of allBatchKeys) {
-      const docs = await Assignment.find(assignmentPublishedVisibleToCatalogBatch(bk, now)).select("_id").lean();
-      aidsByBatch.set(bk, docs.map((d) => String(d._id)));
-    }
+    // ONE query for every published assignment scoped to any of these batches (was a per-batch
+    // Assignment.find loop), then bucket per batch in memory using the SAME scope as the query
+    // (assignmentCatalogBatchScopeOr) so the result is identical.
+    const publishedDocs = allBatchKeys.length
+      ? await Assignment.find({
+          $and: [
+            { release_date: { $lte: now } },
+            { $or: allBatchKeys.flatMap((bk) => assignmentCatalogBatchScopeOr(bk)) },
+          ],
+        })
+          .select("_id release_date batch_id batch_ids")
+          .lean()
+      : [];
+    const docMatchesBatch = (a, bk) => {
+      const primary = String(a.batch_id ?? "").toLowerCase().trim();
+      if (!primary) return true; // batch_id absent/"" → visible to all batches (mirrors the $or scope)
+      if (primary === bk) return true;
+      const arr = Array.isArray(a.batch_ids) ? a.batch_ids.map((x) => String(x ?? "").toLowerCase().trim()) : [];
+      return arr.includes(bk);
+    };
+    const aidsByBatch = new Map(
+      allBatchKeys.map((bk) => [bk, publishedDocs.filter((a) => docMatchesBatch(a, bk)).map((a) => String(a._id))])
+    );
     const allAids = new Set();
     const aidSetByStudent = new Map();
     for (const s of studentRows) {
@@ -600,82 +621,103 @@ async function listStudents(req, res) {
     Student.countDocuments(filter),
   ]);
 
-  // ---- total XP (across all batches) for the displayed students ----
-  const totalXpByStudent = await studentTotalXp(items.map((s) => s._id).filter(Boolean));
+  const uniqIds = (arr) => [...new Map(arr.filter(Boolean).map((id) => [String(id), id])).values()];
+  const pageIds = items.map((s) => s._id).filter(Boolean);
 
-  // ---- batch_rank: rank each displayed student within their batch context, among that batch's ACTIVE
-  // enrollment members (M:N — not the legacy primary-batch grouping). Context = the filtered batch
-  // (batchKey) if set, else the student's primary batch. Ranks by total XP — exact for single-batch
-  // students; a multi-batch student is ranked by their cross-batch total (switch to per-batch XP later
-  // if leaderboard-exact ranking is ever required).
-  const batchRankByStudent = new Map();
+  // ---- ONE active-enrollment fetch for the page → batches + the section held in each batch. Shared
+  // by the arena/assignment progress maps and the response (was fetched 3× before: each map helper
+  // + here). M:N: a multi-batch student shows the right section when a batch tab is selected.
+  const pageEnrollments = pageIds.length
+    ? await StudentEnrollment.find({ student_id: { $in: pageIds }, status: "active" })
+        .select("student_id batch_id section_id")
+        .lean()
+    : [];
+  const batchesByStudent = new Map(items.map((s) => [String(s._id), new Set()]));
+  const batchIdsByStudent = new Map();
+  const sectionByStudentBatch = new Map();
+  for (const e of pageEnrollments) {
+    const sid = String(e.student_id);
+    const b = String(e.batch_id || "").toLowerCase().trim();
+    if (!b) continue;
+    if (batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
+    if (!batchIdsByStudent.has(sid)) batchIdsByStudent.set(sid, []);
+    if (!batchIdsByStudent.get(sid).includes(b)) batchIdsByStudent.get(sid).push(b);
+    sectionByStudentBatch.set(`${sid}:${b}`, String(e.section_id || "").toLowerCase().trim());
+  }
+
+  // batch_rank context per displayed student: the filtered batch (batchKey) if set, else primary.
   const rankBatchByStudent = new Map();
   for (const s of items) {
     const ctx = batchKey || String(s.batch_id || "").toLowerCase().trim();
     if (ctx) rankBatchByStudent.set(String(s._id), ctx);
   }
-  for (const rb of [...new Set(rankBatchByStudent.values())]) {
-    const memberIds = await studentIdsInBatches([rb]);
-    if (!memberIds.length) continue;
-    const [members, memberXp] = await Promise.all([
-      Student.find({ _id: { $in: memberIds } }).select("_id name").lean(),
-      studentTotalXp(memberIds),
+  const rankBatches = [...new Set(rankBatchByStudent.values())];
+
+  // These enrichment phases are mutually independent (they only read `items` + the shared batch maps),
+  // so run them CONCURRENTLY instead of sequentially — the previous version awaited each in turn,
+  // which on a high-latency tier serialized ~a dozen round-trips.
+  const [{ totalXpByStudent, batchRankByStudent }, verifiedByReferrer, arenaMaps, assignmentMaps] =
+    await Promise.all([
+      // ---- total XP (across batches) + batch_rank, from a SINGLE union XP aggregation.
+      // batch_rank ranks each displayed student within their batch context among that batch's ACTIVE
+      // enrollment members (M:N). Members for every rank-batch resolved in one grouped enrollment query;
+      // XP computed once for {displayed students} ∪ {all rank-batch members} and reused for both.
+      (async () => {
+        const memberIdsByBatch = new Map(rankBatches.map((b) => [b, []]));
+        if (rankBatches.length) {
+          const memberEnr = await StudentEnrollment.find({ batch_id: { $in: rankBatches }, status: "active" })
+            .select("student_id batch_id")
+            .lean();
+          for (const e of memberEnr) {
+            const b = String(e.batch_id || "").toLowerCase().trim();
+            if (memberIdsByBatch.has(b) && e.student_id) memberIdsByBatch.get(b).push(e.student_id);
+          }
+        }
+        const allMemberIds = uniqIds([...memberIdsByBatch.values()].flat());
+        const xp = await studentTotalXp(uniqIds([...pageIds, ...allMemberIds]));
+        const nameById = new Map();
+        if (allMemberIds.length) {
+          const memberDocs = await Student.find({ _id: { $in: allMemberIds } }).select("_id name").lean();
+          for (const m of memberDocs) nameById.set(String(m._id), m.name || "");
+        }
+        const rankMap = new Map();
+        for (const rb of rankBatches) {
+          const ranked = uniqIds(memberIdsByBatch.get(rb) || []).map((id) => String(id));
+          if (!ranked.length) continue;
+          ranked.sort((a, b) => {
+            const ax = Number(xp.get(a) || 0);
+            const bx = Number(xp.get(b) || 0);
+            if (bx !== ax) return bx - ax;
+            return String(nameById.get(a) || "").localeCompare(String(nameById.get(b) || ""));
+          });
+          ranked.forEach((sid, idx) => {
+            if (rankBatchByStudent.get(sid) === rb) rankMap.set(sid, idx + 1);
+          });
+        }
+        return { totalXpByStudent: xp, batchRankByStudent: rankMap };
+      })(),
+      // ---- referral counts (how many students each displayed student referred)
+      (async () => {
+        if (!pageIds.length) return new Map();
+        const agg = await Student.aggregate([
+          { $match: { role: "student", referred_by: { $in: pageIds } } },
+          { $group: { _id: "$referred_by", c: { $sum: 1 } } },
+        ]);
+        return new Map(agg.map((row) => [String(row._id), row.c]));
+      })(),
+      // ---- arena + assignment progress (reuse the shared enrollment map; no extra enrollment fetch)
+      items.length
+        ? arenaProgressMapsForStudentRows(items, { batchesByStudent })
+        : Promise.resolve({ solvedMap: new Map(), totalMap: new Map() }),
+      items.length
+        ? assignmentProgressMapsForStudentRows(items, new Date(), { batchesByStudent })
+        : Promise.resolve({ solvedMap: new Map(), totalMap: new Map() }),
     ]);
-    members.sort((a, b) => {
-      const ax = Number(memberXp.get(String(a._id)) || 0);
-      const bx = Number(memberXp.get(String(b._id)) || 0);
-      if (bx !== ax) return bx - ax;
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
-    members.forEach((m, idx) => {
-      const sid = String(m._id);
-      if (rankBatchByStudent.get(sid) === rb) batchRankByStudent.set(sid, idx + 1);
-    });
-  }
 
-  const referrerIds = items.map((s) => s._id).filter(Boolean);
-  let verifiedByReferrer = new Map();
-  if (referrerIds.length) {
-    const agg = await Student.aggregate([
-      { $match: { role: "student", referred_by: { $in: referrerIds } } },
-      { $group: { _id: "$referred_by", c: { $sum: 1 } } },
-    ]);
-    verifiedByReferrer = new Map(agg.map((row) => [String(row._id), row.c]));
-  }
-
-  let arenaSolvedMap = new Map();
-  let arenaTotalMap = new Map();
-  if (items.length) {
-    const maps = await arenaProgressMapsForStudentRows(items);
-    arenaSolvedMap = maps.solvedMap;
-    arenaTotalMap = maps.totalMap;
-  }
-
-  let assignmentSolvedMap = new Map();
-  let assignmentTotalMap = new Map();
-  if (items.length) {
-    const am = await assignmentProgressMapsForStudentRows(items, new Date());
-    assignmentSolvedMap = am.solvedMap;
-    assignmentTotalMap = am.totalMap;
-  }
-
-  // M:N: each student's active batches, plus the section they hold in the filtered batch (so a
-  // multi-batch student shows the right section when a batch tab is selected — e.g. mentor-slot picker).
-  const activeEnrollments = items.length
-    ? await StudentEnrollment.find({ student_id: { $in: items.map((s) => s._id) }, status: "active" })
-        .select("student_id batch_id section_id")
-        .lean()
-    : [];
-  const batchIdsByStudent = new Map();
-  const sectionByStudentBatch = new Map();
-  for (const e of activeEnrollments) {
-    const sid = String(e.student_id);
-    const b = String(e.batch_id || "").toLowerCase().trim();
-    if (!b) continue;
-    if (!batchIdsByStudent.has(sid)) batchIdsByStudent.set(sid, []);
-    if (!batchIdsByStudent.get(sid).includes(b)) batchIdsByStudent.get(sid).push(b);
-    sectionByStudentBatch.set(`${sid}:${b}`, String(e.section_id || "").toLowerCase().trim());
-  }
+  const arenaSolvedMap = arenaMaps.solvedMap;
+  const arenaTotalMap = arenaMaps.totalMap;
+  const assignmentSolvedMap = assignmentMaps.solvedMap;
+  const assignmentTotalMap = assignmentMaps.totalMap;
 
   const data = items.map((s) => {
     const base = studentResponse(s);
