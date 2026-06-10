@@ -550,6 +550,21 @@ const questionBodySchema = z.object({
       })
     )
     .optional(),
+  // Written-answer fields
+  min_word_count:   z.number().int().min(10).max(5000).optional(),
+  max_word_count:   z.number().int().min(50).max(10000).optional(),
+  ideal_answer:     z.string().optional(),
+  expected_topics:  z.array(z.string().trim()).optional(),
+  scoring_rubric:   z
+    .array(
+      z.object({
+        dimension:   z.string().trim().min(1),
+        weight:      z.number().min(0).optional().default(1),
+        max_score:   z.number().min(1).max(10).optional().default(5),
+        description: z.string().optional().default(""),
+      })
+    )
+    .optional(),
 });
 
 async function createAssignmentQuestion(req, res) {

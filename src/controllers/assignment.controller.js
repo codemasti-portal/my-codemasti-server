@@ -13,6 +13,7 @@ const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilte
 const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
 const { executeJsCode } = require("../services/js-executor");
 const { executeOnePython, executeManyPython } = require("../services/python-wasm-executor");
+const { evaluateWrittenAnswer, fallbackWrittenEvaluation } = require("../services/deepseek-evaluator");
 
 const SUPPORTED_LANGUAGES = ["python", "javascript"];
 const MAX_HIDDEN_TESTS = 20;
@@ -472,6 +473,13 @@ async function questionDetail(req, res) {
     code: question.code || "",
     code_language: question.code_language || "",
     quiz_options: Array.isArray(question.quiz_options) ? question.quiz_options : [],
+    // Written-answer fields (ideal_answer intentionally omitted)
+    min_word_count: question.min_word_count ?? 80,
+    max_word_count: question.max_word_count ?? 1000,
+    expected_topics: Array.isArray(question.expected_topics) ? question.expected_topics : [],
+    scoring_rubric: Array.isArray(question.scoring_rubric)
+      ? question.scoring_rubric.map(({ dimension, max_score }) => ({ dimension, max_score }))
+      : [],
   });
 }
 
@@ -679,26 +687,46 @@ async function submit(req, res) {
       evaluatorRaw = "non-ai-local-eval";
     }
   } else if (assignmentType === "written") {
-    const text = String(body.code || "").trim();
-    const wordCount = text ? text.split(/\s+/).length : 0;
-    total = 1;
-    passed = wordCount >= 120 ? 1 : 0;
-    status = passed === 1 ? "Accepted" : "Wrong Answer";
-    testCaseResults = [
-      {
-        label: "Min length check",
-        passed: passed === 1,
-        reason: passed === 1 ? "" : "Please provide at least 120 words.",
-      },
-    ];
-    aiFeedback =
-      passed === 1
-        ? "Submission saved and passed minimum length check."
-        : "Submission saved. Add more detail and resubmit.";
-    aiScore = passed === 1 ? 100 : Math.min(99, Math.max(0, Math.floor((wordCount / 120) * 100)));
-    evaluatorProvider = "local";
-    evaluatorModel = "rule-based";
-    evaluatorRaw = "non-ai-local-eval";
+    const answerText = String(body.code || "").trim();
+    const wordCount  = answerText ? answerText.split(/\s+/).length : 0;
+    const minWords   = Math.max(1, Number(question.min_word_count) || 80);
+
+    if (wordCount < minWords) {
+      // Reject before calling DeepSeek — saves API cost
+      total  = 1;
+      passed = 0;
+      status = "Wrong Answer";
+      testCaseResults = [{ label: "Min length", passed: false, reason: `Please write at least ${minWords} words.` }];
+      aiFeedback      = `Your answer is too short (${wordCount} words). Please write at least ${minWords} words.`;
+      aiScore         = Math.min(59, Math.round((wordCount / minWords) * 60));
+      evaluatorProvider = "local";
+      evaluatorModel    = "rule-based";
+      evaluatorRaw      = "non-ai-local-eval";
+    } else {
+      let writtenResult;
+      try {
+        writtenResult = await evaluateWrittenAnswer({ question, answer: answerText });
+      } catch (evalErr) {
+        console.error("[written-eval] DeepSeek error, using fallback:", evalErr?.message);
+        writtenResult = fallbackWrittenEvaluation({ question, wordCount });
+      }
+
+      total           = 1;
+      passed          = writtenResult.passed;
+      status          = writtenResult.status;
+      testCaseResults = writtenResult.test_case_results;
+      aiFeedback      = writtenResult.feedback;
+      aiScore         = writtenResult.score;
+      evaluatorProvider = writtenResult.provider;
+      evaluatorModel    = writtenResult.model;
+      evaluatorRaw      = writtenResult.raw;
+
+      // Carry forward written-specific fields so they're saved in the submission
+      req._writtenEvalExtra = {
+        rubric_results:    writtenResult.rubric_results    || [],
+        flagged_injection: writtenResult.flagged_injection || false,
+      };
+    }
   }
 
   const submittedAt = new Date();
@@ -741,6 +769,7 @@ async function submit(req, res) {
     // Award XP only if this is the first attempt for this student+question.
     xp_awarded = Number(upsertResult?.upsertedCount || 0) > 0 ? xpCandidate : 0;
   }
+  const writtenExtra = req._writtenEvalExtra || {};
   const submission = await AssignmentSubmission.create({
     assignment_id: req.params.assignmentId,
     question_id: req.params.questionId,
@@ -754,6 +783,8 @@ async function submit(req, res) {
     execution_time_ms: 0,
     memory_mb: 0,
     test_case_results: testCaseResults,
+    rubric_results:    writtenExtra.rubric_results    || [],
+    flagged_injection: writtenExtra.flagged_injection || false,
     ai_feedback: aiFeedback,
     ai_score: aiScore,
     evaluator_provider: evaluatorProvider,
@@ -790,6 +821,7 @@ async function submit(req, res) {
     execution_time_ms: submission.execution_time_ms,
     memory_mb: submission.memory_mb,
     test_case_results: submission.test_case_results,
+    rubric_results: submission.rubric_results || [],
     ai_feedback: submission.ai_feedback || "",
     ai_score: typeof submission.ai_score === "number" ? submission.ai_score : null,
     evaluator_provider: submission.evaluator_provider || "",
@@ -839,6 +871,7 @@ async function submissions(req, res) {
     language: doc.language,
     code: doc.code,
     test_case_results: doc.test_case_results || [],
+    rubric_results: doc.rubric_results || [],
     xp_awarded: typeof doc.xp_awarded === "number" ? doc.xp_awarded : undefined,
     ai_feedback: doc.ai_feedback || "",
     ai_score: typeof doc.ai_score === "number" ? doc.ai_score : null,

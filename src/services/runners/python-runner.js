@@ -97,13 +97,17 @@ async function main() {
   try {
     const { loadPyodide } = require("pyodide");
     pyodide = await loadPyodide({
-      // Silence Pyodide's own stdout/stderr during init
       stdout: () => {},
       stderr: () => {},
     });
   } catch (e) {
+    const msg = String(e.message || e);
+    // Provide a clear hint when deployed on Vercel without includeFiles
+    const hint = msg.includes("pyodide.asm") || msg.includes("Cannot find module")
+      ? " — ensure vercel.json has includeFiles:[\"node_modules/pyodide/**\"]"
+      : "";
     process.stdout.write(
-      JSON.stringify({ error: `Pyodide failed to load: ${e.message || e}`, results: [] })
+      JSON.stringify({ error: `Pyodide failed to load: ${msg}${hint}`, results: [] })
     );
     process.exit(1);
   }
