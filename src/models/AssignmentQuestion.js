@@ -47,6 +47,36 @@ const assignmentQuestionSchema = new mongoose.Schema(
     code: { type: String, default: "" },
     code_language: { type: String, default: "", trim: true },
     quiz_options: { type: [quizOptionSchema], default: [] },
+
+    // ── Written-answer specific ──────────────────────────────────────────────
+    /** Minimum word count accepted before sending to AI evaluator. */
+    min_word_count: { type: Number, default: 80 },
+    /** Hard cap on answer length (words). Excess is truncated before evaluation. */
+    max_word_count: { type: Number, default: 1000 },
+    /** Reference answer for the AI evaluator. NEVER sent to students. */
+    ideal_answer: { type: String, default: "" },
+    /** Key topics/concepts expected in a full-credit answer. */
+    expected_topics: [{ type: String, trim: true }],
+    /**
+     * Analytic scoring rubric — one entry per dimension.
+     * Each dimension contributes (score / max_score * weight) to the total.
+     */
+    scoring_rubric: {
+      type: [
+        {
+          dimension:   { type: String, trim: true, default: "" },
+          weight:      { type: Number, default: 1 },
+          max_score:   { type: Number, default: 5 },
+          description: { type: String, default: "" },
+          _id:         false,
+        },
+      ],
+      default: () => [
+        { dimension: "Correctness",  weight: 2, max_score: 5, description: "Are the facts and concepts accurate?" },
+        { dimension: "Completeness", weight: 2, max_score: 5, description: "Are all expected topics covered?" },
+        { dimension: "Clarity",      weight: 1, max_score: 5, description: "Is the answer well-structured and easy to understand?" },
+      ],
+    },
   },
   { timestamps: true, versionKey: false }
 );
