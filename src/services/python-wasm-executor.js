@@ -19,9 +19,10 @@ const path = require("path");
 
 const RUNNER_PATH = path.join(__dirname, "runners", "python-runner.js");
 
-// Total timeout for the child process (covers Pyodide load + all test cases)
-const DEFAULT_TIMEOUT_MS = 30000; // 30s for batch (Pyodide load ~2s + 5s per test × n)
-const SINGLE_TIMEOUT_MS = 8000;  // 8s for single run (Pyodide load ~2s + 5s exec)
+// Total timeout for the child process (covers Pyodide load + all test cases).
+// On a cold Vercel lambda, Pyodide loads from disk in ~3-4s; leave generous headroom.
+const DEFAULT_TIMEOUT_MS = 25000; // 25s batch — stays comfortably within maxDuration:30
+const SINGLE_TIMEOUT_MS  = 20000; // 20s single run — covers cold-start boot + Pyodide load
 
 /**
  * Spawn the python-runner child process, send it a payload, collect results.

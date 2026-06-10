@@ -34,9 +34,13 @@ const assignmentSubmissionSchema = new mongoose.Schema(
     stderr: { type: String, default: "" },
     ai_feedback: { type: String, default: "" },
     ai_score: { type: Number, default: null },
+    /** Per-dimension rubric results for written assignments (label=dimension name, score/max in reason). */
+    rubric_results: [{ type: mongoose.Schema.Types.Mixed }],
     evaluator_provider: { type: String, default: "" },
     evaluator_model: { type: String, default: "" },
     evaluator_raw: { type: String, default: "" },
+    /** True when the submission's text triggered the injection guard. Score is forced to 0. */
+    flagged_injection: { type: Boolean, default: false },
     submitted_at: { type: Date, default: Date.now, index: true },
   },
   { timestamps: true, versionKey: false }
