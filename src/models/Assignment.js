@@ -21,6 +21,13 @@ const assignmentSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    /** For coding assignments: python or javascript only. */
+    programming_language: {
+      type: String,
+      enum: ["python", "javascript"],
+      default: "python",
+      trim: true,
+    },
     release_date: { type: Date, required: true, index: true },
     deadline_date: { type: Date, required: true, index: true },
     /** Set when students received the “New assignment” in-app notify (immediate or via scheduler); prevents duplicates. */

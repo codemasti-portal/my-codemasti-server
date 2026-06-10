@@ -283,6 +283,7 @@ async function createAssignment(req, res) {
       subject: z.string().min(1).trim(),
       module: z.string().min(1).trim(),
       assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional().default("written"),
+      programming_language: z.enum(["python", "javascript"]).optional().default("python"),
       release_date: z.coerce.date(),
       deadline_date: z.coerce.date(),
       question_count: z.number().int().min(0).max(200).optional().default(0),
@@ -337,6 +338,7 @@ async function createAssignment(req, res) {
       subject: body.subject,
       module: body.module,
       assignment_type: body.assignment_type,
+      programming_language: body.programming_language,
       release_date: body.release_date,
       deadline_date: body.deadline_date,
       resource_url: body.resource_url || "",
@@ -406,6 +408,7 @@ async function updateAssignment(req, res) {
     subject: z.string().min(1).trim().optional(),
     module: z.string().min(1).trim().optional(),
     assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional(),
+    programming_language: z.enum(["python", "javascript"]).optional(),
     release_date: z.coerce.date().optional(),
     deadline_date: z.coerce.date().optional(),
     resource_url: z.string().trim().optional(),
@@ -534,7 +537,7 @@ const questionBodySchema = z.object({
   memory_limit: z.string().optional(),
   execution_mode: z.enum(["full_program", "function_only"]).optional(),
   starter_code: starterCodeSchema,
-  hidden_tests: z.array(z.any()).optional(),
+  hidden_tests: z.array(z.any()).max(20, "Maximum 20 hidden test cases allowed.").optional(),
   question_image_url: z.string().trim().optional(),
   code: z.string().optional(),
   code_language: z.string().trim().optional(),
@@ -595,9 +598,8 @@ async function updateAssignmentQuestion(req, res) {
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
   const { starter_code: starterPatch, ...rest } = body;
   Object.assign(q, rest);
-  if (starterPatch && typeof starterPatch === "object") {
-    const prev = q.toObject().starter_code || {};
-    q.starter_code = { ...prev, ...starterPatch };
+  if (starterPatch !== undefined) {
+    q.starter_code = starterPatch && typeof starterPatch === "object" ? starterPatch : {};
   }
   await q.save();
   return sendSuccess(res, { id: String(q._id), ...q.toObject() }, "Updated");
