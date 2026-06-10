@@ -4,8 +4,6 @@ const starterCodeSchema = new mongoose.Schema(
   {
     python: { type: String, default: "" },
     javascript: { type: String, default: "" },
-    java: { type: String, default: "" },
-    cpp: { type: String, default: "" },
   },
   { _id: false }
 );

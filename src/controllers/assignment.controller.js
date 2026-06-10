@@ -11,9 +11,25 @@ const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollme
 const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
-const { executePythonCode } = require("../services/python-executor-local");
+const { executeJsCode } = require("../services/js-executor");
+const { executeOnePython, executeManyPython } = require("../services/python-wasm-executor");
+
+const SUPPORTED_LANGUAGES = ["python", "javascript"];
+const MAX_HIDDEN_TESTS = 20;
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
+
+/** Accept LLM variations like "function", "func" → "function_only"; else "full_program" */
+function normalizeExecutionMode(value) {
+  const raw = String(value || "").trim().toLowerCase().replace(/[_\s-]/g, "");
+  if (raw === "functiononly" || raw === "function" || raw === "func") return "function_only";
+  return "full_program";
+}
+
+/** Legacy "both" and unknown values map to python. */
+function normalizeProgrammingLanguage(value) {
+  return String(value || "").trim().toLowerCase() === "javascript" ? "javascript" : "python";
+}
 
 function normalizeExpectedOutput(testRow) {
   if (!testRow || typeof testRow !== "object") return "";
@@ -22,40 +38,6 @@ function normalizeExpectedOutput(testRow) {
   return "";
 }
 
-function buildExecutablePythonCode(userCode, stdin, executionMode) {
-  const rawCode = String(userCode || "");
-  if (String(executionMode || "full_program") !== "function_only") return rawCode;
-  const inputLiteral = JSON.stringify(String(stdin || ""));
-  return `${rawCode}
-
-__cm_input = ${inputLiteral}
-__cm_result = None
-try:
-    __cm_result = solve(__cm_input)
-except TypeError:
-    __cm_lines = [line for line in __cm_input.strip().splitlines() if line.strip() != ""]
-    __cm_first = __cm_lines[0].strip() if __cm_lines else ""
-    __cm_arg = __cm_first
-    try:
-        __cm_arg = int(__cm_first)
-    except Exception:
-        try:
-            __cm_arg = float(__cm_first)
-        except Exception:
-            try:
-                import json as __cm_json
-                __cm_arg = __cm_json.loads(__cm_first) if __cm_first else ""
-            except Exception:
-                __cm_arg = __cm_first
-    try:
-        __cm_result = solve(__cm_arg)
-    except TypeError:
-        __cm_result = solve()
-
-if __cm_result is not None:
-    print(__cm_result)
-`;
-}
 
 function fullQuestionXp(xp) {
   return Math.max(0, Math.floor(Number(xp) || 0));
@@ -466,6 +448,7 @@ async function questionDetail(req, res) {
     assignment_id: String(question.assignment_id),
     question_id: String(question._id),
     assignment_type: String(assignment?.assignment_type || "written").toLowerCase(),
+    programming_language: normalizeProgrammingLanguage(assignment?.programming_language),
     assignment_subject: assignment?.subject || "",
     assignment_module: assignment?.module || "",
     assignment_deadline_date: assignment?.deadline_date || null,
@@ -483,7 +466,7 @@ async function questionDetail(req, res) {
     examples: question.examples || [],
     time_limit: question.time_limit,
     memory_limit: question.memory_limit,
-    execution_mode: String(question.execution_mode || "full_program"),
+    execution_mode: normalizeExecutionMode(question.execution_mode),
     starter_code: question.starter_code || {},
     question_image_url: question.question_image_url || "",
     code: question.code || "",
@@ -506,13 +489,25 @@ async function run(req, res) {
   const language = String(req.body.language || "").toLowerCase();
   const code = String(req.body.code || "");
   const stdin = String(req.body.stdin || "");
-  if (language !== "python") {
-    return sendError(res, 400, "LANGUAGE_NOT_SUPPORTED", "Only Python is supported.");
+
+  if (!SUPPORTED_LANGUAGES.includes(language)) {
+    return sendError(res, 400, "LANGUAGE_NOT_SUPPORTED", `Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}.`);
   }
 
+  // Load question to get the correct execution_mode (not from assignment)
+  const question = await AssignmentQuestion.findOne({
+    _id: req.params.questionId,
+    assignment_id: req.params.assignmentId,
+  }).select("execution_mode").lean();
+  const executionMode = normalizeExecutionMode(question?.execution_mode);
+
   try {
-    const executableCode = buildExecutablePythonCode(code, stdin, ok.execution_mode);
-    const result = await executePythonCode({ code: executableCode, stdin, timeoutMs: 5000 });
+    let result;
+    if (language === "javascript") {
+      result = await executeJsCode({ code, stdin, timeoutMs: 5000, executionMode });
+    } else {
+      result = await executeOnePython({ code, stdin, timeoutMs: 8000, executionMode });
+    }
     return sendSuccess(res, {
       stdout: result.output,
       stderr: result.error,
@@ -523,7 +518,7 @@ async function run(req, res) {
   } catch (error) {
     return sendSuccess(res, {
       stdout: "",
-      stderr: error?.message || "Python runtime unavailable",
+      stderr: error?.message || "Execution runtime unavailable",
       execution_time_ms: 0,
       memory_mb: 0,
       status: "ERROR",
@@ -553,15 +548,12 @@ async function submit(req, res) {
     .select("deadline_date assignment_type")
     .lean();
   const assignmentType = String(assignment?.assignment_type || "").toLowerCase();
-  const executionMode = String(question.execution_mode || "full_program");
+  const executionMode = normalizeExecutionMode(question.execution_mode);
 
-  let passed = Math.max(1, Math.min(10, Math.floor(Math.random() * 11)));
-  let total = 10;
-  let status = passed >= 8 ? "Accepted" : "Wrong Answer";
-  let testCaseResults = Array.from({ length: total }, (_, idx) => ({
-    label: `TC #${idx + 1}`,
-    passed: idx < passed,
-  }));
+  let passed = 0;
+  let total = 1;
+  let status = "Wrong Answer";
+  let testCaseResults = [];
   let aiFeedback = "";
   let aiScore = null;
   let evaluatorProvider = "";
@@ -603,50 +595,87 @@ async function submit(req, res) {
     }));
   } else if (assignmentType === "coding") {
     const language = String(body.language || "").toLowerCase();
-    const hiddenTests = Array.isArray(question.hidden_tests) ? question.hidden_tests : [];
-    if (language !== "python") {
-      return sendError(res, 400, "LANGUAGE_NOT_SUPPORTED", "Only Python is supported.");
+    if (!SUPPORTED_LANGUAGES.includes(language)) {
+      return sendError(res, 400, "LANGUAGE_NOT_SUPPORTED", `Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}.`);
+    }
+
+    // Enforce 20 test case limit
+    const allHiddenTests = Array.isArray(question.hidden_tests) ? question.hidden_tests : [];
+    const hiddenTests = allHiddenTests.slice(0, MAX_HIDDEN_TESTS);
+
+    if (hiddenTests.length === 0) {
+      testCaseResults = [{ label: "TC #1", passed: false, reason: "No hidden tests configured." }];
+      total = 1;
+      passed = 0;
+      status = "Wrong Answer";
+      aiFeedback = "No hidden tests are configured for this question yet.";
+      aiScore = 0;
+      evaluatorProvider = "local";
+      evaluatorModel = language === "javascript" ? "js-executor" : "python-wasm";
+      evaluatorRaw = "non-ai-local-eval";
     } else {
-      const normalizedRows = [];
-      for (let idx = 0; idx < hiddenTests.length; idx += 1) {
-        const test = hiddenTests[idx];
-        const input = String(test?.input || "");
-        const expected = normalizeExpectedOutput(test);
-        try {
-          const executableCode = buildExecutablePythonCode(body.code, input, executionMode);
-          const result = await executePythonCode({ code: executableCode, stdin: input, timeoutMs: 5000 });
-          const actual = String(result.output || "").trim();
-          const isPassed = result.success && actual === expected;
-          normalizedRows.push({
-            label: String(test?.label || `TC #${idx + 1}`),
-            passed: isPassed,
-            reason: isPassed
-              ? ""
-              : result.error
-                ? result.error
-                : `Expected "${expected}" but got "${actual}"`,
-          });
-        } catch (error) {
-          normalizedRows.push({
-            label: String(test?.label || `TC #${idx + 1}`),
+      const inputs = hiddenTests.map((t) => String(t?.input || ""));
+      const expectedOutputs = hiddenTests.map((t) => normalizeExpectedOutput(t));
+      const labels = hiddenTests.map((t, idx) => String(t?.label || `TC #${idx + 1}`));
+
+      let execResults;
+      if (language === "javascript") {
+        // JS: run each test case as a separate child_process (fast, no init overhead)
+        const normalizedRows = [];
+        for (let idx = 0; idx < hiddenTests.length; idx += 1) {
+          try {
+            const r = await executeJsCode({ code: body.code, stdin: inputs[idx], timeoutMs: 5000, executionMode });
+            const actual = String(r.output || "").trim();
+            const expected = expectedOutputs[idx];
+            const isPassed = r.success && actual === expected;
+            normalizedRows.push({
+              label: labels[idx],
+              passed: isPassed,
+              reason: isPassed ? "" : r.error ? r.error.trim() : `Expected "${expected}" but got "${actual}"`,
+            });
+          } catch (e) {
+            normalizedRows.push({ label: labels[idx], passed: false, reason: e?.message || "Execution failed" });
+          }
+        }
+        execResults = normalizedRows;
+      } else {
+        // Python: load Pyodide once, run all tests in same child process
+        const batchResult = await executeManyPython({
+          code: body.code,
+          inputs,
+          executionMode,
+          timeoutMs: 8000 + hiddenTests.length * 3000,
+        });
+        if (!batchResult.ok) {
+          execResults = hiddenTests.map((_, idx) => ({
+            label: labels[idx],
             passed: false,
-            reason: error?.message || "Execution failed",
+            reason: batchResult.error || "Execution failed",
+          }));
+        } else {
+          execResults = batchResult.results.map((r, idx) => {
+            const actual = String(r.output || "").trim();
+            const expected = expectedOutputs[idx];
+            const isPassed = r.success && actual === expected;
+            return {
+              label: labels[idx],
+              passed: isPassed,
+              reason: isPassed ? "" : r.error ? r.error.trim() : `Expected "${expected}" but got "${actual}"`,
+            };
           });
         }
       }
-      total = Math.max(1, normalizedRows.length || 1);
-      passed = normalizedRows.filter((row) => row.passed).length;
+
+      total = Math.max(1, execResults.length);
+      passed = execResults.filter((r) => r.passed).length;
       status = passed === total ? "Accepted" : passed === 0 ? "Error" : "Wrong Answer";
-      testCaseResults = normalizedRows.length
-        ? normalizedRows
-        : [{ label: "TC #1", passed: false, reason: "No hidden tests configured." }];
-      aiFeedback =
-        status === "Accepted"
-          ? "All hidden tests passed."
-          : "Some hidden tests failed. Check logic and edge cases.";
+      testCaseResults = execResults;
+      aiFeedback = status === "Accepted"
+        ? "All hidden tests passed."
+        : `${passed}/${total} tests passed. Check edge cases and output format.`;
       aiScore = Math.round((passed / total) * 100);
       evaluatorProvider = "local";
-      evaluatorModel = "python-executor";
+      evaluatorModel = language === "javascript" ? "js-executor" : "python-wasm";
       evaluatorRaw = "non-ai-local-eval";
     }
   } else if (assignmentType === "written") {
@@ -722,12 +751,8 @@ async function submit(req, res) {
     status,
     xp_awarded,
     test_cases_passed: `${passed}/${total}`,
-    execution_time_ms:
-      assignmentType === "coding" || assignmentType === "written"
-        ? 0
-        : 90 + Math.floor(Math.random() * 80),
-    memory_mb:
-      assignmentType === "coding" || assignmentType === "written" ? 0 : 24 + Math.floor(Math.random() * 10),
+    execution_time_ms: 0,
+    memory_mb: 0,
     test_case_results: testCaseResults,
     ai_feedback: aiFeedback,
     ai_score: aiScore,
