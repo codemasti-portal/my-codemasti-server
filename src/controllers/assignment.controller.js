@@ -473,12 +473,15 @@ async function questionDetail(req, res) {
     code: question.code || "",
     code_language: question.code_language || "",
     quiz_options: Array.isArray(question.quiz_options) ? question.quiz_options : [],
-    // Written-answer fields (ideal_answer intentionally omitted)
+    // Written-answer fields (ideal_answer and expected_topics intentionally omitted)
     min_word_count: question.min_word_count ?? 80,
     max_word_count: question.max_word_count ?? 1000,
-    expected_topics: Array.isArray(question.expected_topics) ? question.expected_topics : [],
     scoring_rubric: Array.isArray(question.scoring_rubric)
-      ? question.scoring_rubric.map(({ dimension, max_score }) => ({ dimension, max_score }))
+      ? question.scoring_rubric.map(({ dimension, max_score, description }) => ({
+          dimension,
+          max_score,
+          description: description || "",
+        }))
       : [],
   });
 }
@@ -555,7 +558,8 @@ async function submit(req, res) {
   const assignment = await Assignment.findById(question.assignment_id)
     .select("deadline_date assignment_type")
     .lean();
-  const assignmentType = String(assignment?.assignment_type || "").toLowerCase();
+  // Default to "written" if not set (matches Assignment schema default and questionDetail behavior)
+  const assignmentType = String(assignment?.assignment_type || "written").toLowerCase();
   const executionMode = normalizeExecutionMode(question.execution_mode);
 
   let passed = 0;
@@ -707,7 +711,11 @@ async function submit(req, res) {
       try {
         writtenResult = await evaluateWrittenAnswer({ question, answer: answerText });
       } catch (evalErr) {
-        console.error("[written-eval] DeepSeek error, using fallback:", evalErr?.message);
+        console.error("[written-eval] LLM error — using fallback. status=%s provider=%s message=%s",
+          evalErr?.statusCode ?? "?",
+          evalErr?.provider ?? "unknown",
+          evalErr?.message ?? String(evalErr)
+        );
         writtenResult = fallbackWrittenEvaluation({ question, wordCount });
       }
 
