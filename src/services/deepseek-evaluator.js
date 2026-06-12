@@ -481,30 +481,30 @@ function fallbackWrittenEvaluation({ question, wordCount }) {
 
   const dims = rubric.map((d) => ({
     name:    d.dimension,
-    score:   ratio >= 1 ? Math.floor(d.max_score * 0.6) : 0,
+    score:   null,
     max:     d.max_score,
-    comment: "AI evaluator unavailable — rule-based fallback",
+    comment: "",
   }));
   const test_case_results = dims.map((d) => ({
     label:  d.name,
-    passed: d.score > 0,
-    score:  d.score,
+    passed: false,
+    score:  0,
     max:    d.max,
-    reason: d.comment,
+    reason: "",
   }));
-  const totalScore = ratio >= 1 ? 60 : Math.round(ratio * 60);
+  const totalScore = 0;
   return {
-    status:            totalScore >= 60 ? "Accepted" : "Wrong Answer",
-    passed:            totalScore >= 60 ? 1 : 0,
+    status:            "Wrong Answer",
+    passed:            0,
     total:             1,
-    test_cases_passed: totalScore >= 60 ? "1/1" : "0/1",
+    test_cases_passed: "0/1",
     test_case_results,
     rubric_results:    dims,
     covered_topics:    [],
     missing_topics:    [],
     feedback:          ratio >= 1
-      ? "Evaluation service is temporarily unavailable. Your answer meets the minimum length. Full evaluation will be applied when the service recovers."
-      : `Evaluation service is temporarily unavailable. Please write at least ${minWords} words for a passing grade.`,
+      ? "Your answer was saved! The grading service is temporarily unavailable — check back soon and your score will be updated."
+      : `Your answer was saved! Please write at least ${minWords} words. The grading service will evaluate it once it comes back online.`,
     score:             totalScore,
     flagged_injection: false,
     provider:          "fallback",
