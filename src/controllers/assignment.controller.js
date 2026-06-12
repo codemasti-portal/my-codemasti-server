@@ -711,7 +711,11 @@ async function submit(req, res) {
       try {
         writtenResult = await evaluateWrittenAnswer({ question, answer: answerText });
       } catch (evalErr) {
-        console.error("[written-eval] DeepSeek error, using fallback:", evalErr?.message);
+        console.error("[written-eval] LLM error — using fallback. status=%s provider=%s message=%s",
+          evalErr?.statusCode ?? "?",
+          evalErr?.provider ?? "unknown",
+          evalErr?.message ?? String(evalErr)
+        );
         writtenResult = fallbackWrittenEvaluation({ question, wordCount });
       }
 

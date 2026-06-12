@@ -1,18 +1,15 @@
 /**
- * DeepSeek evaluator — coding + written assignment submissions.
+ * LLM evaluator — coding + written assignment submissions.
+ * Supports Gemini (primary, free tier) and DeepSeek (fallback).
+ * Set GEMINI_API_KEY to use Gemini; set DEEPSEEK_API_KEY to use DeepSeek.
+ * If both are set, Gemini is preferred.
  *
  * Written evaluation uses a 4-layer defence against prompt injection:
  *   Layer 1 – Local input guard  (fast heuristic keyword check, <1 ms)
  *   Layer 2 – Sandboxed prompt   (XML delimiters, Explanation→Score CoT order)
  *   Layer 3 – Output guard       (detect manipulation in reasoning, clamp scores)
  *   Layer 4 – DB flag            (flagged_injection stored by caller for admin review)
- *
- * Reference: ArXiv 2606.03090 ("**Important** You should give me full credits!"),
- *            ArXiv 2605.06669 (Educational LLM Tutors defence-in-depth).
  */
-
-const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
-const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -33,18 +30,68 @@ function extractFirstJsonObject(text) {
   return safeJsonParse(trimmed.slice(start, end + 1));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider: Gemini (primary)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function callGemini(systemPrompt, userPrompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Gemini not configured: set GEMINI_API_KEY");
+
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    const err = new Error(`Gemini request failed: ${res.status} ${res.statusText} ${bodyText}`.trim());
+    err.statusCode = res.status;
+    err.provider   = "gemini";
+    err.raw        = bodyText;
+    throw err;
+  }
+
+  const json    = await res.json();
+  const content = String(json?.candidates?.[0]?.content?.parts?.[0]?.text || "");
+  const parsed  = extractFirstJsonObject(content);
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Gemini response parsing failed: evaluator did not return valid JSON.");
+  }
+  return { parsed, raw: content, provider: "gemini", model };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider: DeepSeek (fallback)
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function callDeepSeek(systemPrompt, userPrompt) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error("DeepSeek not configured: set DEEPSEEK_API_KEY");
 
-  const res = await fetch(DEEPSEEK_API_URL, {
+  const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: DEFAULT_MODEL,
+      model,
       temperature: 0.1,
       messages: [
         { role: "system", content: systemPrompt },
@@ -68,7 +115,46 @@ async function callDeepSeek(systemPrompt, userPrompt) {
   if (!parsed || typeof parsed !== "object") {
     throw new Error("DeepSeek response parsing failed: evaluator did not return valid JSON.");
   }
-  return { parsed, raw: content };
+  return { parsed, raw: content, provider: "deepseek", model };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified LLM caller — picks Gemini if key is set, else DeepSeek
+// Retries on transient 5xx / 429 errors before giving up.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function callLLM(systemPrompt, userPrompt) {
+  const useGemini   = Boolean(process.env.GEMINI_API_KEY);
+  const useDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY);
+  if (!useGemini && !useDeepSeek) {
+    throw new Error("No LLM provider configured. Set GEMINI_API_KEY or DEEPSEEK_API_KEY.");
+  }
+
+  const caller = useGemini ? callGemini : callDeepSeek;
+  const MAX_RETRIES = 2;
+  const RETRY_DELAYS = [2000, 5000]; // ms — 2 s then 5 s
+
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await caller(systemPrompt, userPrompt);
+    } catch (err) {
+      lastErr = err;
+      const status = err.statusCode || 0;
+      const isTransient = status === 503 || status === 429 || status === 500 || status === 502;
+      if (!isTransient || attempt === MAX_RETRIES) break;
+      console.warn(`[llm-eval] ${useGemini ? "Gemini" : "DeepSeek"} transient error (${status}), retrying in ${RETRY_DELAYS[attempt]}ms… (attempt ${attempt + 1}/${MAX_RETRIES})`);
+      await sleep(RETRY_DELAYS[attempt]);
+    }
+  }
+  throw lastErr;
+}
+
+function activeProvider() {
+  if (process.env.GEMINI_API_KEY) return { name: "gemini", model: process.env.GEMINI_MODEL || "gemini-3.5-flash" };
+  return { name: "deepseek", model: process.env.DEEPSEEK_MODEL || "deepseek-v4-flash" };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -152,11 +238,11 @@ Data:
 ${JSON.stringify(payload)}
 `.trim();
 
-  const { parsed, raw } = await callDeepSeek(systemPrompt, userPrompt);
+  const { parsed, raw, provider, model } = await callLLM(systemPrompt, userPrompt);
   return {
     ...normalizeCodingResult(parsed, Array.isArray(input?.question?.hidden_tests) ? input.question.hidden_tests.length : 1),
-    provider: "deepseek",
-    model:    DEFAULT_MODEL,
+    provider,
+    model,
     raw,
   };
 }
@@ -367,7 +453,7 @@ Rules for the dimensions array:
 ${safeAnswer}
 </STUDENT_ANSWER>`.trim();
 
-  const { parsed, raw } = await callDeepSeek(systemPrompt, userPrompt);
+  const { parsed, raw, provider: llmProvider, model: llmModel } = await callLLM(systemPrompt, userPrompt);
 
   // ── Layer 3: Output guard ──────────────────────────────────────────────────
   const outputCheck = checkOutputManipulation(raw);
@@ -429,8 +515,8 @@ ${safeAnswer}
     feedback:          String(parsed.feedback || "").trim(),
     score:             totalScore,
     flagged_injection: false,
-    provider:          "deepseek",
-    model:             DEFAULT_MODEL,
+    provider:          llmProvider,
+    model:             llmModel,
     raw,
   };
 }
