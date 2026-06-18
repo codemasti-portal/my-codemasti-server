@@ -25,6 +25,8 @@ async function list(req, res) {
     body: n.body,
     read: Boolean(n.read_at),
     ref_id: n.ref_id,
+    deep_link: n.deep_link || "",
+    meet_url: n.meet_url || "",
     created_at: n.createdAt,
   }));
 
@@ -39,4 +41,19 @@ async function markRead(req, res) {
   return sendSuccess(res, { id: String(n._id), read: true });
 }
 
-module.exports = { list, markRead };
+/** Mark every unread notification for this student as read in a single query. */
+async function markAllRead(req, res) {
+  const r = await Notification.updateMany(
+    { student_id: req.user.sub, read_at: null },
+    { $set: { read_at: new Date() } }
+  );
+  return sendSuccess(res, { updated: r.modifiedCount ?? 0 }, "Marked all as read");
+}
+
+/** Accurate unread count (not limited to the page the bell fetched). */
+async function unreadCount(req, res) {
+  const count = await Notification.countDocuments({ student_id: req.user.sub, read_at: null });
+  return sendSuccess(res, { count });
+}
+
+module.exports = { list, markRead, markAllRead, unreadCount };

@@ -9,6 +9,7 @@ const notificationSchema = new mongoose.Schema(
         "announcement",
         "system",
         "class_start_10m",
+        "class_live",
         "recording_uploaded",
         "notes_uploaded",
       ],
@@ -17,8 +18,10 @@ const notificationSchema = new mongoose.Schema(
     },
     title: { type: String, required: true, trim: true },
     body: { type: String, default: "" },
-    /** Optional deep link to open inside student portal (e.g. /timetable, /lectures). */
+    /** Portal-relative path to navigate to when the notification is tapped. */
     deep_link: { type: String, default: "", trim: true },
+    /** Optional direct join/action URL (e.g. Google Meet link for class_live / class_start_10m). */
+    meet_url: { type: String, default: "", trim: true },
     read_at: { type: Date, default: null, index: true },
     ref_id: { type: String, default: "" },
 

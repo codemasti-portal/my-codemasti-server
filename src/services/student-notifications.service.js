@@ -104,6 +104,7 @@ async function createNotificationOnce({
   title,
   body,
   deep_link,
+  meet_url,
   ref_id,
 }) {
   try {
@@ -113,6 +114,7 @@ async function createNotificationOnce({
       title,
       body,
       deep_link: deep_link || "",
+      meet_url: meet_url || "",
       ref_id: ref_id || "",
       dedupe_key: dedupeKey || "",
     });
@@ -137,6 +139,7 @@ async function notifyStudentsForSlot({
   title,
   body,
   deep_link,
+  meet_url,
   dedupePrefix,
   email,
 }) {
@@ -159,6 +162,7 @@ async function notifyStudentsForSlot({
       title,
       body,
       deep_link,
+      meet_url,
       ref_id: String(slot._id),
     });
     if (!res.created) continue;
@@ -255,8 +259,79 @@ function buildResourceUploadedEmail({ studentName, slot, kind }) {
   return { subject, htmlContent, textContent };
 }
 
+/** Immediate "class starting soon" when admin schedules within the imminent window. */
+async function notifyStudentsClassStartingSoon({ slot, minutesUntil, whenText }) {
+  const { buildClassStartReminderCopy } = require("../utils/timetable-slot-start");
+  const mins = Number.isFinite(minutesUntil) ? minutesUntil : 10;
+  const when = whenText || fmtWhenLocal(slot?.class_date, slot?.time);
+  const { title, body } = buildClassStartReminderCopy(mins, slot, when);
+  const meet = String(slot?.meet_link || "").trim();
+  return notifyStudentsForSlot({
+    slot,
+    type: "class_start_10m",
+    title,
+    body,
+    deep_link: "/timetable",
+    meet_url: meet,
+    dedupePrefix: "class10m",
+    email: ({ student }) => buildClassStart10mEmail({ studentName: student?.name, slot }),
+  });
+}
+
+/** Schedule change notifications (new / updated / cancelled). Skips create/update when class is imminent. */
+async function notifyStudentsTimetableSchedule({ slot, action }) {
+  const {
+    timetableScheduleTitle,
+    timetableScheduleBody,
+    isClassImminent,
+    isClassInFuture,
+    normalizeTimeString,
+  } = require("../utils/timetable-slot-start");
+
+  const batchId = String(slot?.batch_id || "").trim().toLowerCase();
+  if (!batchId) return { created: 0 };
+
+  if (action !== "deleted") {
+    if (!isClassInFuture(slot)) return { created: 0 };
+    if (isClassImminent(slot)) return { created: 0 };
+  }
+
+  const sectionId = String(slot?.section_id || "").trim().toLowerCase();
+  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
+  const students = await Student.find(studentFilter).select("_id").lean();
+  if (!students.length) return { created: 0 };
+
+  const title = timetableScheduleTitle(action);
+  const body = timetableScheduleBody(slot, action);
+  const slotId = String(slot._id || slot.id || "").trim();
+  const dedupeAction = action === "deleted" ? "cancelled" : action;
+  let created = 0;
+
+  for (const s of students) {
+    const dedupeKey =
+      action === "updated"
+        ? `timetableSchedule:updated:${slotId}:${String(s._id)}:${String(slot.class_date || "")}:${normalizeTimeString(slot.time)}`
+        : `timetableSchedule:${dedupeAction}:${slotId}:${String(s._id)}`;
+    const res = await createNotificationOnce({
+      studentId: s._id,
+      dedupeKey,
+      type: "system",
+      title,
+      body,
+      deep_link: "/timetable",
+      meet_url: "",
+      ref_id: slotId ? `timetable-slot:${slotId}` : "",
+    });
+    if (res.created) created += 1;
+  }
+
+  return { created };
+}
+
 module.exports = {
   notifyStudentsForSlot,
+  notifyStudentsClassStartingSoon,
+  notifyStudentsTimetableSchedule,
   buildClassStart10mEmail,
   buildResourceUploadedEmail,
   fmtWhenLocal,

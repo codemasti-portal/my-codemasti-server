@@ -16,12 +16,15 @@ const Notification = require("../models/Notification");
 const { sendSimpleEmail } = require("../services/brevo");
 const {
   notifyStudentsForSlot,
+  notifyStudentsClassStartingSoon,
+  notifyStudentsTimetableSchedule,
   buildResourceUploadedEmail,
   fmtWhenLocal,
 } = require("../services/student-notifications.service");
 const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
+  buildMeetLinkUpdatedEmail,
 } = require("../services/instructor-notifications.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
@@ -86,6 +89,8 @@ async function resolveStaffDisplayName(req) {
   return "";
 }
 
+const { normalizeTimeString, minutesUntilClassStart, IMMINENT_CLASS_MINUTES, parseSlotStart } = require("../utils/timetable-slot-start");
+
 function weekdayFromDateString(dateStr) {
   const raw = String(dateStr || "").trim();
   if (!raw) return "";
@@ -96,27 +101,33 @@ function weekdayFromDateString(dateStr) {
   return dt.toLocaleDateString("en-US", { weekday: "long" });
 }
 
-async function fanoutTimetableSlotNotification(slot, action) {
-  const batchId = String(slot?.batch_id || "").trim().toLowerCase();
-  if (!batchId) return;
-  const sectionId = String(slot?.section_id || "").trim().toLowerCase();
-  const title = "Timetable updated";
-  const body = `${slot.subject} on ${slot.day} (${slot.time}) by ${slot.teacher} was ${action}.`;
-  const refId = `timetable-slot:${String(slot._id)}`;
+/**
+ * Student timetable notifications: schedule fan-out or imminent class reminder (never both).
+ * - created/updated >15 min away → "New class scheduled" / "Class schedule updated"
+ * - created/updated ≤15 min away → single "Class starts soon" reminder (marks 10m sent)
+ * - deleted → "Class cancelled" (always)
+ */
+async function handleStudentTimetableNotifications(slot, action) {
+  if (action === "deleted") {
+    await notifyStudentsTimetableSchedule({ slot, action: "deleted" });
+    return;
+  }
 
-  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
-  const students = await Student.find(studentFilter).select("_id").lean();
-  if (!students.length) return;
+  const mins = minutesUntilClassStart(slot);
+  if (mins !== null && mins > 0 && mins <= IMMINENT_CLASS_MINUTES) {
+    const whenText = fmtWhenLocal(slot.class_date, slot.time);
+    await notifyStudentsClassStartingSoon({ slot, minutesUntil: mins, whenText });
+    const slotId = slot._id || slot.id;
+    if (slotId) {
+      await TimetableSlot.updateOne(
+        { _id: slotId },
+        { $set: { student_reminder_10m_sent_at: new Date() } }
+      );
+    }
+    return;
+  }
 
-  const docs = students.map((s) => ({
-    student_id: s._id,
-    type: "system",
-    title,
-    body,
-    read_at: null,
-    ref_id: refId,
-  }));
-  await Notification.insertMany(docs, { ordered: false });
+  await notifyStudentsTimetableSchedule({ slot, action });
 }
 
 async function fanoutMentorSlotNotification(slot) {
@@ -282,7 +293,7 @@ async function createAssignment(req, res) {
       section_id: z.string().trim().optional().default(""),
       subject: z.string().min(1).trim(),
       module: z.string().min(1).trim(),
-      assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional().default("written"),
+      assignment_type: z.enum(["quiz", "coding", "written", "web", "project", "other"]).optional().default("written"),
       programming_language: z.enum(["python", "javascript"]).optional().default("python"),
       release_date: z.coerce.date(),
       deadline_date: z.coerce.date(),
@@ -407,7 +418,7 @@ async function updateAssignment(req, res) {
     section_id: z.string().trim().optional(),
     subject: z.string().min(1).trim().optional(),
     module: z.string().min(1).trim().optional(),
-    assignment_type: z.enum(["quiz", "coding", "written", "project", "other"]).optional(),
+    assignment_type: z.enum(["quiz", "coding", "written", "web", "project", "other"]).optional(),
     programming_language: z.enum(["python", "javascript"]).optional(),
     release_date: z.coerce.date().optional(),
     deadline_date: z.coerce.date().optional(),
@@ -539,6 +550,7 @@ const questionBodySchema = z.object({
   starter_code: starterCodeSchema,
   hidden_tests: z.array(z.any()).max(20, "Maximum 20 hidden test cases allowed.").optional(),
   question_image_url: z.string().trim().optional(),
+  question_video_url: z.string().trim().optional(),
   code: z.string().optional(),
   code_language: z.string().trim().optional(),
   quiz_options: z
@@ -565,6 +577,23 @@ const questionBodySchema = z.object({
       })
     )
     .optional(),
+  // Web (HTML/CSS) fields
+  html_starter:     z.string().optional().default(""),
+  css_starter:      z.string().optional().default(""),
+  dom_tests: z
+    .array(
+      z.object({
+        label:          z.string().trim().min(1),
+        check_type:     z.enum(["element_exists","element_text","element_attribute","element_count","css_rule_exists","css_property"]),
+        selector:       z.string().optional().default(""),
+        expected_value: z.string().optional().default(""),
+        attribute_name: z.string().optional().default(""),
+        property_name:  z.string().optional().default(""),
+        expected_count: z.number().int().min(0).optional().default(0),
+      })
+    )
+    .max(30, "Maximum 30 DOM checks allowed.")
+    .optional(),
 });
 
 async function createAssignmentQuestion(req, res) {
@@ -583,6 +612,9 @@ async function createAssignmentQuestion(req, res) {
     name: computedName,
     starter_code: body.starter_code || {},
     hidden_tests: body.hidden_tests || [],
+    dom_tests: body.dom_tests || [],
+    html_starter: body.html_starter || "",
+    css_starter: body.css_starter || "",
   });
   return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
 }
@@ -707,6 +739,7 @@ const arenaBodySchema = z.object({
   starter_code: starterCodeSchema,
   hidden_tests: z.array(z.any()).optional(),
   question_image_url: z.string().trim().nullable().optional(),
+  question_video_url: z.string().trim().nullable().optional(),
   quiz_options: z
     .array(
       z.object({
@@ -1058,10 +1091,25 @@ async function listTimetableSchedule(req, res) {
 
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendSuccess(res, []);
+    const instructorId = String(req.staff?.sub || "").trim();
+    // Require at least one identity signal; missing both means the profile is incomplete.
+    if (!ownName && !instructorId) return sendSuccess(res, []);
     if (!instructorBatches?.length) return sendSuccess(res, []);
     filter.batch_id = { $in: instructorBatches };
-    filter.teacher = { $regex: new RegExp(`^${escapeRegex(ownName)}$`, "i") };
+    // Match by staff_id (set when admin picks instructor from dropdown) OR by display name.
+    // This is more resilient: staff_id survives instructor name changes; name match is the legacy fallback.
+    const orClauses = [];
+    if (instructorId && mongoose.isValidObjectId(instructorId)) {
+      orClauses.push({ staff_id: new mongoose.Types.ObjectId(instructorId) });
+    }
+    if (ownName) {
+      orClauses.push({ teacher: { $regex: new RegExp(`^${escapeRegex(ownName)}$`, "i") } });
+    }
+    if (orClauses.length === 1) {
+      Object.assign(filter, orClauses[0]);
+    } else {
+      filter.$or = orClauses;
+    }
   } else if (instructorBatches !== null) {
     if (!instructorBatches.length) return sendSuccess(res, []);
     filter.batch_id = { $in: instructorBatches };
@@ -1108,6 +1156,7 @@ async function createTimetableSlot(req, res) {
     subject: z.string().min(1).trim(),
     topic: z.string().optional().default(""),
     teacher: z.string().min(1).trim(),
+    staff_id: z.string().optional(),
     meet_link: z.string().url().min(1).trim(),
     recording_link: z.string().optional().default(""),
     notes_link: z.string().optional().default(""),
@@ -1116,6 +1165,8 @@ async function createTimetableSlot(req, res) {
     notify_resource_by_email: z.boolean().optional().default(false),
   });
   const body = schema.parse(req.body);
+  // Normalize time string to ensure consistent format stored in DB (e.g. "11:35-12:5" → "11:35-12:05").
+  body.time = normalizeTimeString(body.time);
   const notifyResourceByEmail = body.notify_resource_by_email === true;
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
@@ -1126,6 +1177,9 @@ async function createTimetableSlot(req, res) {
       return sendError(res, 403, "FORBIDDEN", "Timetable slot must be in one of your assigned batches");
     }
     body.teacher = ownName;
+    // Always bind the creating instructor's ID for reliable notification routing.
+    // The staff JWT payload carries the id as `sub` (there is no `_id` on req.staff).
+    body.staff_id = String(req.staff.sub || "");
   }
   const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id], body.subject);
   if (!subjCheck.ok) return;
@@ -1133,6 +1187,7 @@ async function createTimetableSlot(req, res) {
   const derivedDay = weekdayFromDateString(body.class_date);
   if (!derivedDay) return sendError(res, 400, "VALIDATION_ERROR", "Invalid class_date");
 
+  const mongoose = require("mongoose");
   const docs = [
     {
     batch_id: body.batch_id.toLowerCase().trim(),
@@ -1143,6 +1198,7 @@ async function createTimetableSlot(req, res) {
     subject: body.subject.trim(),
     topic: String(body.topic || "").trim(),
     teacher: body.teacher.trim(),
+    staff_id: body.staff_id && mongoose.isValidObjectId(body.staff_id) ? body.staff_id : null,
     meet_link: body.meet_link.trim(),
     recording_link: String(body.recording_link || "").trim(),
     notes_link: String(body.notes_link || "").trim(),
@@ -1152,9 +1208,17 @@ async function createTimetableSlot(req, res) {
 
   const created = await TimetableSlot.insertMany(docs, { ordered: false });
   for (const row of created) {
-    await fanoutTimetableSlotNotification(row.toObject(), "created");
     const slot = row.toObject();
-    if (String(slot.recording_link || "").trim()) {
+    const hasRecording = Boolean(String(slot.recording_link || "").trim());
+    const hasNotes = Boolean(String(slot.notes_link || "").trim());
+
+    // Only send generic timetable-created notification when no resources are attached.
+    // If resources are already present, the specific resource notifications below are sent instead.
+    if (!hasRecording && !hasNotes) {
+      await handleStudentTimetableNotifications(slot, "created");
+    }
+
+    if (hasRecording) {
       const whenText = fmtWhenLocal(slot.class_date, slot.time);
       await notifyStudentsForSlot({
         slot,
@@ -1167,8 +1231,18 @@ async function createTimetableSlot(req, res) {
           ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "recording" })
           : null,
       });
+      await notifyInstructorsForSlot({
+        slot,
+        event_type: "timetable_recording_uploaded",
+        title: "Recording uploaded",
+        message: `Recording link added for ${slot.subject} (${whenText}).`,
+        action_url: slot.recording_link || "",
+        emailBuilder: notifyResourceByEmail
+          ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "recording" })
+          : undefined,
+      });
     }
-    if (String(slot.notes_link || "").trim()) {
+    if (hasNotes) {
       const whenText = fmtWhenLocal(slot.class_date, slot.time);
       await notifyStudentsForSlot({
         slot,
@@ -1180,6 +1254,16 @@ async function createTimetableSlot(req, res) {
         email: notifyResourceByEmail
           ? ({ student }) => buildResourceUploadedEmail({ studentName: student?.name, slot, kind: "notes" })
           : null,
+      });
+      await notifyInstructorsForSlot({
+        slot,
+        event_type: "timetable_notes_uploaded",
+        title: "Notes uploaded",
+        message: `Notes link added for ${slot.subject} (${whenText}).`,
+        action_url: slot.notes_link || "",
+        emailBuilder: notifyResourceByEmail
+          ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "notes" })
+          : undefined,
       });
     }
   }
@@ -1196,6 +1280,7 @@ async function updateTimetableSlot(req, res) {
     subject: z.string().optional(),
     topic: z.string().optional(),
     teacher: z.string().optional(),
+    staff_id: z.string().optional(),
     meet_link: z.string().url().optional(),
     recording_link: z.string().optional(),
     notes_link: z.string().optional(),
@@ -1210,6 +1295,11 @@ async function updateTimetableSlot(req, res) {
   const prevTime = String(doc.time || "").trim();
   const prevRecording = String(doc.recording_link || "").trim();
   const prevNotes = String(doc.notes_link || "").trim();
+  const prevMeetLink = String(doc.meet_link || "").trim();
+  const prevStaffId = String(doc.staff_id || "").trim();
+  const prevTeacher = String(doc.teacher || "").trim().toLowerCase();
+  const had60mReminderSent = Boolean(doc.instructor_reminder_60m_sent_at);
+  const emailed60mMeetLink = String(doc.instructor_reminder_60m_meet_link || "").trim();
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
@@ -1228,6 +1318,7 @@ async function updateTimetableSlot(req, res) {
   }
   if (body.batch_id !== undefined) doc.batch_id = body.batch_id.toLowerCase().trim();
   if (body.section_id !== undefined) doc.section_id = (body.section_id || "").toLowerCase().trim();
+  if (body.time !== undefined) body.time = normalizeTimeString(body.time);
   if (body.class_date !== undefined) {
     doc.class_date = body.class_date.trim();
     const d = weekdayFromDateString(doc.class_date);
@@ -1245,26 +1336,94 @@ async function updateTimetableSlot(req, res) {
   if (body.subject !== undefined) doc.subject = body.subject.trim();
   if (body.topic !== undefined) doc.topic = String(body.topic || "").trim();
   if (body.teacher !== undefined) doc.teacher = body.teacher.trim();
+  if (body.staff_id !== undefined) {
+    const mongoose = require("mongoose");
+    doc.staff_id = body.staff_id && mongoose.isValidObjectId(body.staff_id) ? body.staff_id : null;
+  }
   if (body.meet_link !== undefined) doc.meet_link = body.meet_link.trim();
   if (body.recording_link !== undefined) doc.recording_link = String(body.recording_link || "").trim();
   if (body.notes_link !== undefined) doc.notes_link = String(body.notes_link || "").trim();
   if (body.is_taken !== undefined) doc.is_taken = Boolean(body.is_taken);
 
-  // If the scheduled time changes, allow reminders to fire again for the new start time.
   const nextClassDate = String(doc.class_date || "").trim();
   const nextTime = String(doc.time || "").trim();
-  if (prevClassDate !== nextClassDate || prevTime !== nextTime) {
+  const nextStaffId = String(doc.staff_id || "").trim();
+  const nextTeacher = String(doc.teacher || "").trim().toLowerCase();
+  const scheduleChanged = prevClassDate !== nextClassDate || prevTime !== nextTime;
+  // The class was reassigned to a different instructor.
+  const instructorChanged = prevStaffId !== nextStaffId || prevTeacher !== nextTeacher;
+
+  if (scheduleChanged) {
+    // New start time → let every reminder (students + instructor) fire again.
     doc.student_reminder_10m_sent_at = null;
     doc.instructor_reminder_10m_sent_at = null;
+    doc.instructor_reminder_60m_sent_at = null;
+    doc.instructor_reminder_60m_meet_link = "";
     doc.meet_link_missing_10m_alert_sent_at = null;
+    doc.class_live_sent_at = null;
+  } else if (instructorChanged) {
+    // Same time, different instructor → re-send the 1-hour email to the NEW instructor.
+    doc.instructor_reminder_60m_sent_at = null;
+    doc.instructor_reminder_60m_meet_link = "";
   }
 
   await doc.save();
-  await fanoutTimetableSlotNotification(doc.toObject(), "updated");
 
-  // Student reminders: fire only when link becomes available for the first time.
+  // Instructor already got the 1-hour reminder and ONLY the Meet link changed → send them
+  // the corrected link immediately. (Skipped on a schedule or instructor change — those reset
+  // the marker above, so the full 1-hour email re-fires with the new link instead.)
+  const nextMeetLink = String(doc.meet_link || "").trim();
+  if (
+    !scheduleChanged &&
+    !instructorChanged &&
+    had60mReminderSent &&
+    nextMeetLink &&
+    nextMeetLink !== prevMeetLink &&
+    nextMeetLink !== emailed60mMeetLink
+  ) {
+    const startsAt = parseSlotStart(doc.class_date, doc.time);
+    if (startsAt && startsAt.getTime() > Date.now()) {
+      const updatedSlot = doc.toObject();
+      const whenText = fmtWhenLocal(updatedSlot.class_date, updatedSlot.time);
+      try {
+        await notifyInstructorsForSlot({
+          slot: updatedSlot,
+          event_type: "timetable_meet_link_updated",
+          title: "Meet link updated",
+          message: `The Meet link for ${updatedSlot.subject} (${whenText}) was updated. New link: ${nextMeetLink}`,
+          action_url: "/dashboard/instructor/timetable?focus=today",
+          emailBuilder: ({ staff }) => buildMeetLinkUpdatedEmail({ staffName: staff?.name, slot: updatedSlot }),
+        });
+        await TimetableSlot.updateOne(
+          { _id: doc._id },
+          { $set: { instructor_reminder_60m_meet_link: nextMeetLink } }
+        );
+      } catch (e) {
+        console.error("[INSTRUCTOR_MEET_LINK_UPDATED_FAILED]", e?.message || e);
+      }
+    }
+  }
+
+  // Determine what actually changed.
   const nextRecording = String(doc.recording_link || "").trim();
   const nextNotes = String(doc.notes_link || "").trim();
+  const onlyResourcesChanged =
+    !prevRecording && !prevNotes && (nextRecording || nextNotes) &&
+    body.batch_id === undefined &&
+    body.section_id === undefined &&
+    body.class_date === undefined &&
+    body.time === undefined &&
+    body.subject === undefined &&
+    body.topic === undefined &&
+    body.teacher === undefined &&
+    body.meet_link === undefined &&
+    body.is_taken === undefined;
+
+  // Skip the generic "timetable updated" notification when ONLY resource links were added — the
+  // more specific recording_uploaded / notes_uploaded notifications will fire below instead.
+  if (!onlyResourcesChanged) {
+    await handleStudentTimetableNotifications(doc.toObject(), "updated");
+  }
   const slot = doc.toObject();
   const whenText = fmtWhenLocal(slot.class_date, slot.time);
 
@@ -1286,6 +1445,7 @@ async function updateTimetableSlot(req, res) {
       event_type: "timetable_recording_uploaded",
       title: "Recording uploaded",
       message: `Recording link added for ${slot.subject} (${whenText}).`,
+      action_url: nextRecording,
       emailBuilder: notifyResourceByEmail
         ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "recording" })
         : undefined,
@@ -1309,6 +1469,7 @@ async function updateTimetableSlot(req, res) {
       event_type: "timetable_notes_uploaded",
       title: "Notes uploaded",
       message: `Notes link added for ${slot.subject} (${whenText}).`,
+      action_url: nextNotes,
       emailBuilder: notifyResourceByEmail
         ? ({ staff }) => buildInstructorResourceEmail({ staffName: staff?.name, slot, kind: "notes" })
         : undefined,
@@ -1330,7 +1491,7 @@ async function deleteTimetableSlot(req, res) {
   }
   const r = await TimetableSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Slot not found");
-  await fanoutTimetableSlotNotification(doc, "deleted");
+  await handleStudentTimetableNotifications(doc, "deleted");
   return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 

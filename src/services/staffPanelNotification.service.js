@@ -35,6 +35,7 @@ async function createNotification(payload) {
     recipient_id: payload.recipient_id ? toObjectId(payload.recipient_id) : null,
     source: payload.source || "manual",
     event_type: payload.event_type || "",
+    action_url: String(payload.action_url || "").trim(),
     dedupe_key: String(payload.dedupe_key || "").trim(),
     created_by: payload.created_by ? toObjectId(payload.created_by) : null,
   });
@@ -99,6 +100,7 @@ async function listVisibleForStaff(staffId, staffRole, { limit = 40, skip = 0 } 
         created_at: row.createdAt,
         source: row.source,
         event_type: row.event_type,
+        action_url: row.action_url || "",
       };
     });
 }

@@ -15,6 +15,8 @@ const staffPanelNotificationSchema = new mongoose.Schema(
     recipient_id: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null, index: true },
     source: { type: String, enum: SOURCES, default: "manual", index: true },
     event_type: { type: String, default: "", trim: true, maxlength: 80 },
+    /** Optional direct action URL rendered as a button in the bell (e.g. Google Meet link). */
+    action_url: { type: String, default: "", trim: true, maxlength: 500 },
     /** Optional key to prevent duplicate event notifications. */
     dedupe_key: { type: String, default: "", trim: true, maxlength: 160 },
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },

@@ -13,8 +13,6 @@ router.post("/me/mark-all-read", requireStaffAuth, controller.postMarkAllRead);
 router.post("/me/clear-all", requireStaffAuth, controller.postClearAll);
 
 router.post("/", ...manage, controller.adminCreate);
-router.post("/student-broadcasts", ...manage, controller.studentBroadcastCreate);
-router.get("/student-broadcasts", ...manage, controller.studentBroadcastList);
 router.get("/admin", ...manage, controller.adminList);
 router.patch("/admin/:id", ...manage, controller.adminPatch);
 router.delete("/admin/:id", ...manage, controller.adminDelete);
