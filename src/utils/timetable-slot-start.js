@@ -2,6 +2,55 @@
 const IMMINENT_CLASS_MINUTES = 15;
 
 /**
+ * IANA timezone the class_date + time strings are written in (e.g. "11:35-12:05" means
+ * 11:35 in this zone). Defaults to Asia/Kolkata. MUST NOT depend on the server's own
+ * timezone — Vercel runs functions in UTC, so naive parsing would be off by the offset.
+ */
+function getClassTimeZone() {
+  return (
+    String(process.env.CLASS_TIMEZONE || process.env.GOOGLE_CALENDAR_TIME_ZONE || "Asia/Kolkata").trim() ||
+    "Asia/Kolkata"
+  );
+}
+
+/** Offset (ms) of `timeZone` from UTC at the given UTC instant. e.g. Asia/Kolkata → +19800000 (5h30m). */
+function zoneOffsetMs(timeZone, utcMs) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const map = {};
+  for (const p of dtf.formatToParts(new Date(utcMs))) {
+    if (p.type !== "literal") map[p.type] = p.value;
+  }
+  const asIfUtc = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour),
+    Number(map.minute),
+    Number(map.second)
+  );
+  return asIfUtc - utcMs;
+}
+
+/**
+ * Convert wall-clock components (meant to be in `timeZone`) to the correct UTC Date.
+ * Works on any server timezone. (Asia/Kolkata has no DST, so the offset is exact.)
+ */
+function wallTimeInZoneToDate(y, m, d, hh, mm, timeZone) {
+  const utcGuess = Date.UTC(y, m - 1, d, hh, mm, 0, 0);
+  const offsetMs = zoneOffsetMs(timeZone, utcGuess);
+  return new Date(utcGuess - offsetMs);
+}
+
+/**
  * Pad single-digit minutes in time strings: "12:5" → "12:05"
  */
 function normalizeTimeString(raw) {
@@ -11,8 +60,9 @@ function normalizeTimeString(raw) {
 }
 
 /**
- * Parse class_date + time label into a local Date, or null.
- * Supports 24h "11:35-12:05" / "11:35 – 12:05" and 12h "09:00 AM - 10:00 AM".
+ * Parse class_date + time label into a UTC Date (interpreting the wall time in the
+ * class timezone), or null. Supports 24h "11:35-12:05" / "11:35 – 12:05" and
+ * 12h "09:00 AM - 10:00 AM".
  */
 function parseSlotStart(classDateStr, timeLabel) {
   const rawDate = String(classDateStr || "").trim();
@@ -20,9 +70,10 @@ function parseSlotStart(classDateStr, timeLabel) {
   const [y, m, d] = rawDate.slice(0, 10).split("-").map((v) => Number(v));
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
 
+  const tz = getClassTimeZone();
   const raw = normalizeTimeString(timeLabel);
   const m24 = raw.match(/([01]?\d|2[0-3]):([0-5]\d)/);
-  if (m24) return new Date(y, m - 1, d, Number(m24[1]), Number(m24[2]), 0, 0);
+  if (m24) return wallTimeInZoneToDate(y, m, d, Number(m24[1]), Number(m24[2]), tz);
 
   const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
   if (m12) {
@@ -34,7 +85,7 @@ function parseSlotStart(classDateStr, timeLabel) {
     } else if (hh !== 12) {
       hh += 12;
     }
-    return new Date(y, m - 1, d, hh, mm, 0, 0);
+    return wallTimeInZoneToDate(y, m, d, hh, mm, tz);
   }
   return null;
 }

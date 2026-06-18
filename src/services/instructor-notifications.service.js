@@ -158,6 +158,73 @@ function buildClassStart10mEmail({ staffName, slot }) {
   return { subject, htmlContent, textContent };
 }
 
+function buildClassStart60mEmail({ staffName, slot }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Reminder: your class starts in 1 hour (${slot.subject || "Class"})`;
+  const meet = String(slot.meet_link || "").trim();
+  const timetableUrl = portalLink("/timetable");
+  const htmlContent = renderEmailTemplate({
+    title: "Your class starts in 1 hour",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: meet
+      ? "Your class starts in about an hour. Use the button below to open the Meet link when it's time."
+      : "Your class starts in about an hour. The Meet link isn't set yet — please add it in the timetable.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+    ],
+    primaryAction: meet ? { label: "Open Meet link", href: meet } : null,
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "Your class starts in about 1 hour.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `Topic: ${slot.topic || "N/A"}`,
+    `When: ${whenText}`,
+    `Meet link: ${meet || "Not set yet — please add it in the timetable"}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
+function buildMeetLinkUpdatedEmail({ staffName, slot }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Meet link updated for your class (${slot.subject || "Class"})`;
+  const meet = String(slot.meet_link || "").trim();
+  const timetableUrl = portalLink("/timetable");
+  const htmlContent = renderEmailTemplate({
+    title: "Meet link updated",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: "The Meet link for your upcoming class has changed. Please use the new link below.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+    ],
+    primaryAction: meet ? { label: "Open new Meet link", href: meet } : null,
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "The Meet link for your upcoming class has changed.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `When: ${whenText}`,
+    `New Meet link: ${meet || "Not set"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
 function buildResourceUploadedEmail({ staffName, slot, kind }) {
   const whenText = fmtWhenLocal(slot.class_date, slot.time);
   const isNotes = kind === "notes";
@@ -230,6 +297,8 @@ async function notifyInstructorsForSlot({ slot, event_type, title, message, acti
 module.exports = {
   notifyInstructorsForSlot,
   buildClassStart10mEmail,
+  buildClassStart60mEmail,
+  buildMeetLinkUpdatedEmail,
   buildResourceUploadedEmail,
   fmtWhenLocal,
   resolveInstructorRecipientsByName,

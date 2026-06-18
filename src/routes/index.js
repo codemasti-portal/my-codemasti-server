@@ -16,6 +16,7 @@ const doubtsRoutes = require("./modules/doubts.routes");
 const supportRoutes = require("./modules/support.routes");
 const notificationsRoutes = require("./modules/notifications.routes");
 const staffPanelNotificationsRoutes = require("./modules/staff-panel-notifications.routes");
+const internalRoutes = require("./modules/internal.routes");
 const referralRoutes = require("./modules/referral.routes");
 const studentBillingRoutes = require("./modules/student-billing.routes");
 const adminBillingRoutes = require("./modules/admin-billing.routes");
@@ -43,6 +44,7 @@ router.use("/doubts", doubtsRoutes);
 router.use("/support", supportRoutes);
 router.use("/notifications", notificationsRoutes);
 router.use("/staff/panel-notifications", staffPanelNotificationsRoutes);
+router.use("/internal", internalRoutes);
 router.use("/referral", referralRoutes);
 
 module.exports = router;

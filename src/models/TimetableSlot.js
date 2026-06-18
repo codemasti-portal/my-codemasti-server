@@ -28,6 +28,11 @@ const timetableSlotSchema = new mongoose.Schema(
     student_reminder_10m_sent_at: { type: Date, default: null },
     instructor_reminder_10m_sent_at: { type: Date, default: null },
 
+    /** One-time "class starts in ~1 hour" reminder email to the instructor. */
+    instructor_reminder_60m_sent_at: { type: Date, default: null },
+    /** Meet link value at the moment the 1-hour instructor email was sent (to detect later changes). */
+    instructor_reminder_60m_meet_link: { type: String, default: "", trim: true },
+
     /** One-time "class is now live" notification sent at the scheduled start time. */
     class_live_sent_at: { type: Date, default: null },
 

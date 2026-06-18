@@ -24,6 +24,7 @@ const {
 const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
+  buildMeetLinkUpdatedEmail,
 } = require("../services/instructor-notifications.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
@@ -88,7 +89,7 @@ async function resolveStaffDisplayName(req) {
   return "";
 }
 
-const { normalizeTimeString, minutesUntilClassStart, IMMINENT_CLASS_MINUTES } = require("../utils/timetable-slot-start");
+const { normalizeTimeString, minutesUntilClassStart, IMMINENT_CLASS_MINUTES, parseSlotStart } = require("../utils/timetable-slot-start");
 
 function weekdayFromDateString(dateStr) {
   const raw = String(dateStr || "").trim();
@@ -1294,6 +1295,11 @@ async function updateTimetableSlot(req, res) {
   const prevTime = String(doc.time || "").trim();
   const prevRecording = String(doc.recording_link || "").trim();
   const prevNotes = String(doc.notes_link || "").trim();
+  const prevMeetLink = String(doc.meet_link || "").trim();
+  const prevStaffId = String(doc.staff_id || "").trim();
+  const prevTeacher = String(doc.teacher || "").trim().toLowerCase();
+  const had60mReminderSent = Boolean(doc.instructor_reminder_60m_sent_at);
+  const emailed60mMeetLink = String(doc.instructor_reminder_60m_meet_link || "").trim();
   if (req.staff?.role === "instructor") {
     const ownName = await resolveStaffDisplayName(req);
     if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
@@ -1339,17 +1345,64 @@ async function updateTimetableSlot(req, res) {
   if (body.notes_link !== undefined) doc.notes_link = String(body.notes_link || "").trim();
   if (body.is_taken !== undefined) doc.is_taken = Boolean(body.is_taken);
 
-  // If the scheduled time changes, allow reminders to fire again for the new start time.
   const nextClassDate = String(doc.class_date || "").trim();
   const nextTime = String(doc.time || "").trim();
-  if (prevClassDate !== nextClassDate || prevTime !== nextTime) {
+  const nextStaffId = String(doc.staff_id || "").trim();
+  const nextTeacher = String(doc.teacher || "").trim().toLowerCase();
+  const scheduleChanged = prevClassDate !== nextClassDate || prevTime !== nextTime;
+  // The class was reassigned to a different instructor.
+  const instructorChanged = prevStaffId !== nextStaffId || prevTeacher !== nextTeacher;
+
+  if (scheduleChanged) {
+    // New start time → let every reminder (students + instructor) fire again.
     doc.student_reminder_10m_sent_at = null;
     doc.instructor_reminder_10m_sent_at = null;
+    doc.instructor_reminder_60m_sent_at = null;
+    doc.instructor_reminder_60m_meet_link = "";
     doc.meet_link_missing_10m_alert_sent_at = null;
     doc.class_live_sent_at = null;
+  } else if (instructorChanged) {
+    // Same time, different instructor → re-send the 1-hour email to the NEW instructor.
+    doc.instructor_reminder_60m_sent_at = null;
+    doc.instructor_reminder_60m_meet_link = "";
   }
 
   await doc.save();
+
+  // Instructor already got the 1-hour reminder and ONLY the Meet link changed → send them
+  // the corrected link immediately. (Skipped on a schedule or instructor change — those reset
+  // the marker above, so the full 1-hour email re-fires with the new link instead.)
+  const nextMeetLink = String(doc.meet_link || "").trim();
+  if (
+    !scheduleChanged &&
+    !instructorChanged &&
+    had60mReminderSent &&
+    nextMeetLink &&
+    nextMeetLink !== prevMeetLink &&
+    nextMeetLink !== emailed60mMeetLink
+  ) {
+    const startsAt = parseSlotStart(doc.class_date, doc.time);
+    if (startsAt && startsAt.getTime() > Date.now()) {
+      const updatedSlot = doc.toObject();
+      const whenText = fmtWhenLocal(updatedSlot.class_date, updatedSlot.time);
+      try {
+        await notifyInstructorsForSlot({
+          slot: updatedSlot,
+          event_type: "timetable_meet_link_updated",
+          title: "Meet link updated",
+          message: `The Meet link for ${updatedSlot.subject} (${whenText}) was updated. New link: ${nextMeetLink}`,
+          action_url: "/dashboard/instructor/timetable?focus=today",
+          emailBuilder: ({ staff }) => buildMeetLinkUpdatedEmail({ staffName: staff?.name, slot: updatedSlot }),
+        });
+        await TimetableSlot.updateOne(
+          { _id: doc._id },
+          { $set: { instructor_reminder_60m_meet_link: nextMeetLink } }
+        );
+      } catch (e) {
+        console.error("[INSTRUCTOR_MEET_LINK_UPDATED_FAILED]", e?.message || e);
+      }
+    }
+  }
 
   // Determine what actually changed.
   const nextRecording = String(doc.recording_link || "").trim();
