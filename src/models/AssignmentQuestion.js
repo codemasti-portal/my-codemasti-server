@@ -1,5 +1,27 @@
 const mongoose = require("mongoose");
 
+const domTestSchema = new mongoose.Schema(
+  {
+    label: { type: String, required: true, trim: true },
+    check_type: {
+      type: String,
+      required: true,
+      enum: ["element_exists", "element_text", "element_attribute", "element_count", "css_rule_exists", "css_property"],
+    },
+    /** CSS selector used for DOM queries. */
+    selector: { type: String, default: "", trim: true },
+    /** Expected value for text/attribute/css checks. */
+    expected_value: { type: String, default: "", trim: true },
+    /** For element_attribute: which attribute to check (e.g. "class", "href"). */
+    attribute_name: { type: String, default: "", trim: true },
+    /** For css_property: which CSS property to check (e.g. "display", "color"). */
+    property_name: { type: String, default: "", trim: true },
+    /** For element_count: expected number of matching elements. */
+    expected_count: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
 const starterCodeSchema = new mongoose.Schema(
   {
     python: { type: String, default: "" },
@@ -42,11 +64,21 @@ const assignmentQuestionSchema = new mongoose.Schema(
     starter_code: { type: starterCodeSchema, default: () => ({}) },
     hidden_tests: [{ type: mongoose.Schema.Types.Mixed }],
     question_image_url: { type: String, default: "", trim: true },
+    /** Optional video (e.g. a short clip of the expected result) shown to students. */
+    question_video_url: { type: String, default: "", trim: true },
     /** Optional code snippet rendered as a highlighted block. We add the ``` fences at render time —
      * LLMs are unreliable at producing backticks inside JSON, so authors/LLMs supply plain code + language. */
     code: { type: String, default: "" },
     code_language: { type: String, default: "", trim: true },
     quiz_options: { type: [quizOptionSchema], default: [] },
+
+    // ── Web (HTML/CSS) specific ──────────────────────────────────────────────
+    /** Starter HTML code given to the student (pre-filled in editor). */
+    html_starter: { type: String, default: "" },
+    /** Starter CSS code given to the student (pre-filled in editor). */
+    css_starter: { type: String, default: "" },
+    /** Auto-grading checks. Only labels are sent to students — selectors/check_type are server-only. */
+    dom_tests: { type: [domTestSchema], default: [] },
 
     // ── Written-answer specific ──────────────────────────────────────────────
     /** Minimum word count accepted before sending to AI evaluator. */

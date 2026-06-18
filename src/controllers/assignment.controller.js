@@ -14,6 +14,7 @@ const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
 const { executeJsCode } = require("../services/js-executor");
 const { executeOnePython, executeManyPython } = require("../services/python-wasm-executor");
 const { evaluateWrittenAnswer, fallbackWrittenEvaluation } = require("../services/deepseek-evaluator");
+const { evaluateWebSubmission } = require("../services/web-evaluator");
 
 const SUPPORTED_LANGUAGES = ["python", "javascript"];
 const MAX_HIDDEN_TESTS = 20;
@@ -470,6 +471,7 @@ async function questionDetail(req, res) {
     execution_mode: normalizeExecutionMode(question.execution_mode),
     starter_code: question.starter_code || {},
     question_image_url: question.question_image_url || "",
+    question_video_url: question.question_video_url || "",
     code: question.code || "",
     code_language: question.code_language || "",
     quiz_options: Array.isArray(question.quiz_options) ? question.quiz_options : [],
@@ -482,6 +484,13 @@ async function questionDetail(req, res) {
           max_score,
           description: description || "",
         }))
+      : [],
+    // Web (HTML/CSS) fields — sent to student for display.
+    // dom_tests: only labels exposed; selectors/check_type/expected_value are server-only.
+    html_starter: question.html_starter || "",
+    css_starter: question.css_starter || "",
+    dom_test_labels: Array.isArray(question.dom_tests)
+      ? question.dom_tests.map((t) => ({ label: t.label }))
       : [],
   });
 }
@@ -539,8 +548,11 @@ async function run(req, res) {
 
 async function submit(req, res) {
   const schema = z.object({
-    language: z.string().min(1),
-    code: z.string().min(1),
+    language: z.string().optional().default(""),
+    code: z.string().optional().default(""),
+    // Web assignments send html/css instead of language+code.
+    html: z.string().optional().default(""),
+    css: z.string().optional().default(""),
   });
   const body = schema.parse(req.body);
 
@@ -735,6 +747,68 @@ async function submit(req, res) {
         flagged_injection: writtenResult.flagged_injection || false,
       };
     }
+  } else if (assignmentType === "web") {
+    const htmlInput = String(body.html || "").trim();
+    const cssInput  = String(body.css  || "").trim();
+
+    // Web assignments are always HTML + CSS together — require at least one to be non-empty.
+    if (!htmlInput && !cssInput) {
+      return sendError(res, 400, "MISSING_CODE", "HTML and/or CSS content is required for this question.");
+    }
+
+    const domTests = Array.isArray(question.dom_tests) ? question.dom_tests : [];
+
+    if (domTests.length === 0) {
+      // No checks configured — accept submission without grading.
+      total  = 0;
+      passed = 0;
+      status = "Accepted";
+      testCaseResults = [];
+      aiFeedback      = "Submitted — no auto-checks configured for this question.";
+      aiScore         = 100;
+      evaluatorProvider = "local";
+      evaluatorModel    = "web-evaluator";
+      evaluatorRaw      = "no-dom-tests";
+    } else {
+      try {
+        const evalResult = evaluateWebSubmission({
+          html: htmlInput,
+          css: cssInput,
+          domTests,
+        });
+        passed = evalResult.passed;
+        total  = evalResult.total;
+        status = passed === total ? "Accepted" : passed === 0 ? "Error" : "Wrong Answer";
+        testCaseResults = evalResult.results;
+        aiFeedback = status === "Accepted"
+          ? "All checks passed — great work!"
+          : `${passed}/${total} checks passed. Review the failing checks and adjust your code.`;
+        aiScore = total > 0 ? Math.round((passed / total) * 100) : 100;
+        evaluatorProvider = "local";
+        evaluatorModel    = "web-evaluator";
+        evaluatorRaw      = "cheerio+css-tree";
+      } catch (evalErr) {
+        if (evalErr.statusCode === 413) {
+          return sendError(res, 413, "SUBMISSION_TOO_LARGE", evalErr.message);
+        }
+        console.error("[web-eval] Evaluator error:", evalErr?.message || evalErr);
+        total  = 1;
+        passed = 0;
+        status = "Error";
+        testCaseResults = [{ label: "Evaluation", passed: false, reason: "Evaluation failed — please try again." }];
+        aiFeedback      = "Could not evaluate submission. Please try again.";
+        aiScore         = 0;
+        evaluatorProvider = "local";
+        evaluatorModel    = "web-evaluator";
+        evaluatorRaw      = "error";
+      }
+    }
+
+    // Carry forward web-specific payload so it's stored correctly in the submission.
+    req._webEvalExtra = {
+      code: JSON.stringify({ html: htmlInput, css: cssInput }),
+      language: "web",
+    };
   }
 
   const submittedAt = new Date();
@@ -778,12 +852,13 @@ async function submit(req, res) {
     xp_awarded = Number(upsertResult?.upsertedCount || 0) > 0 ? xpCandidate : 0;
   }
   const writtenExtra = req._writtenEvalExtra || {};
+  const webExtra = req._webEvalExtra || {};
   const submission = await AssignmentSubmission.create({
     assignment_id: req.params.assignmentId,
     question_id: req.params.questionId,
     student_id: req.user.sub,
-    language: body.language,
-    code: body.code,
+    language: webExtra.language || body.language,
+    code: webExtra.code || body.code,
     attempt_no: attemptNo,
     status,
     xp_awarded,

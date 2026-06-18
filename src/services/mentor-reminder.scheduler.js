@@ -82,7 +82,7 @@ async function sendMissingMeetLinkAlert(slot) {
     is_active: true,
     name: mentorName,
   })
-    .select("email name")
+    .select("_id email name")
     .lean();
   const adminRecipients = await Staff.find({
     role: { $in: ["super_admin", "admin"] },
@@ -90,11 +90,39 @@ async function sendMissingMeetLinkAlert(slot) {
   })
     .select("email name")
     .lean();
-  const all = [...mentorRecipients, ...adminRecipients].filter((r) => r.email);
-  if (!all.length) return false;
 
   const startsAt = parseSessionStart(slot.date, slot.time);
   const whenText = startsAt ? startsAt.toLocaleString() : `${new Date(slot.date).toLocaleDateString()} ${slot.time}`;
+  const slotId = String(slot._id);
+  const panelTitle = "Meet link missing — mentor session";
+  const panelMessage = `Mentor session by ${mentorName} starts in ~15 minutes (${whenText}) but has no meet link.`;
+
+  // Staff panel notification for the mentor themselves.
+  for (const r of mentorRecipients) {
+    await emitEventNotification({
+      audience: "individual",
+      recipient_id: String(r._id),
+      title: panelTitle,
+      message: panelMessage,
+      category: "alerts",
+      event_type: "mentor_session_meet_missing_15m",
+      dedupe_key: `mentor_meet_missing:${slotId}:${String(r._id)}`,
+    });
+  }
+  // Staff panel notification broadcast to admins.
+  await emitEventNotification({
+    audience: "role",
+    target_roles: ["super_admin", "admin"],
+    title: panelTitle,
+    message: panelMessage,
+    category: "alerts",
+    event_type: "mentor_session_meet_missing_15m",
+    dedupe_key: `mentor_meet_missing:${slotId}:role:admin`,
+  });
+
+  const all = [...mentorRecipients, ...adminRecipients].filter((r) => r.email);
+  if (!all.length) return true; // panel notifications were sent; email is best-effort
+
   const subject = "Action required: Meet link missing for upcoming mentor session";
   const htmlContent = `
     <div style="font-family:Arial,sans-serif;color:#111">

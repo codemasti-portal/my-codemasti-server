@@ -5,34 +5,9 @@ const {
   buildClassStart10mEmail: buildInstructorClassStart10mEmail,
 } = require("./instructor-notifications.service");
 const { emitEventNotification } = require("./staffPanelNotification.service");
+const { parseSlotStart, buildClassStartReminderCopy } = require("../utils/timetable-slot-start");
 
 const CHECK_INTERVAL_MS = 60 * 1000;
-
-function parseSlotStart(classDateStr, timeLabel) {
-  const rawDate = String(classDateStr || "").trim();
-  if (!rawDate) return null;
-  const [y, m, d] = rawDate.slice(0, 10).split("-").map((v) => Number(v));
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-
-  const raw = String(timeLabel || "").trim();
-  // Supports 24h "21:29 – 22:00" / "21:29 - 22:00" and 12h "09:00 AM - 10:00 AM" (we take first time).
-  const m24 = raw.match(/([01]?\d|2[0-3]):([0-5]\d)/);
-  if (m24) return new Date(y, m - 1, d, Number(m24[1]), Number(m24[2]), 0, 0);
-
-  const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (m12) {
-    let hh = Number(m12[1]);
-    const mm = Number(m12[2]);
-    const period = String(m12[3]).toUpperCase();
-    if (period === "AM") {
-      if (hh === 12) hh = 0;
-    } else if (hh !== 12) {
-      hh += 12;
-    }
-    return new Date(y, m - 1, d, hh, mm, 0, 0);
-  }
-  return null;
-}
 
 async function runReminderTick() {
   const now = new Date();
@@ -55,10 +30,11 @@ async function runReminderTick() {
       { student_reminder_10m_sent_at: null },
       { instructor_reminder_10m_sent_at: null },
       { meet_link_missing_10m_alert_sent_at: null },
+      { class_live_sent_at: null },
     ],
   })
     .select(
-      "_id batch_id section_id class_date time subject topic teacher meet_link student_reminder_10m_sent_at instructor_reminder_10m_sent_at meet_link_missing_10m_alert_sent_at"
+      "_id batch_id section_id class_date time subject topic teacher staff_id meet_link student_reminder_10m_sent_at instructor_reminder_10m_sent_at meet_link_missing_10m_alert_sent_at class_live_sent_at"
     )
     .lean();
 
@@ -139,12 +115,15 @@ async function runReminderTick() {
       );
       if (claimed.modifiedCount === 1) {
         try {
+          const minsUntil = Math.max(1, Math.round((startsAt.getTime() - now.getTime()) / 60_000));
+          const { title, body } = buildClassStartReminderCopy(minsUntil, slot, whenText);
           await notifyStudentsForSlot({
             slot,
             type: "class_start_10m",
-            title: "Class starts in 10 minutes",
-            body: `Your class ${slot.subject} starts in 10 minutes (${whenText}).`,
+            title,
+            body,
             deep_link: "/timetable",
+            meet_url: meet,
             dedupePrefix: "class10m",
             email: ({ student }) => buildClassStart10mEmail({ studentName: student?.name, slot }),
           });
@@ -154,6 +133,32 @@ async function runReminderTick() {
             () => {}
           );
           console.error("[STUDENT_CLASS_10M_REMINDER_FAILED]", e?.message || e);
+        }
+      }
+    }
+
+    // "Class is now live" — fires within 5 minutes after scheduled start (requires meet link).
+    if (meetAvailable && !slot.class_live_sent_at) {
+      if (startsAt <= now && now <= new Date(startsAt.getTime() + 5 * 60 * 1000)) {
+        const claimed = await TimetableSlot.updateOne(
+          { _id: slot._id, class_live_sent_at: null },
+          { $set: { class_live_sent_at: new Date() } }
+        );
+        if (claimed.modifiedCount === 1) {
+          try {
+            await notifyStudentsForSlot({
+              slot,
+              type: "class_live",
+              title: "Class is live now!",
+              body: `${slot.subject} is live now. Join via Meet link.`,
+              deep_link: "/timetable",
+              meet_url: meet,
+              dedupePrefix: "classLive",
+            });
+          } catch (e) {
+            await TimetableSlot.updateOne({ _id: slot._id }, { $set: { class_live_sent_at: null } }).catch(() => {});
+            console.error("[STUDENT_CLASS_LIVE_FAILED]", e?.message || e);
+          }
         }
       }
     }
@@ -172,7 +177,10 @@ async function runReminderTick() {
             title: "Class starts in 10 minutes",
             message: `${slot.subject} starts in 10 minutes (${whenText}). Batch: ${slot.batch_id}${
               slot.section_id ? `, Section: ${slot.section_id}` : ""
-            }.`,
+            }.${meet ? ` Meet: ${meet}` : ""}`,
+            // Link to the timetable page (with focus=today) so the instructor lands on the right screen.
+            // The meet link is included in the message body for quick access.
+            action_url: "/dashboard/instructor/timetable?focus=today",
             emailBuilder: ({ staff }) => buildInstructorClassStart10mEmail({ staffName: staff?.name, slot }),
           });
           if (!notified) {

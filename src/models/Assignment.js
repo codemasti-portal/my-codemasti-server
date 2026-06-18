@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const ASSIGNMENT_TYPES = ["quiz", "coding", "written", "project", "other"];
+const ASSIGNMENT_TYPES = ["quiz", "coding", "written", "web", "project", "other"];
 
 const assignmentSchema = new mongoose.Schema(
   {

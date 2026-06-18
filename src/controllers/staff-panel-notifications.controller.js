@@ -4,12 +4,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const StaffPanelNotification = require("../models/StaffPanelNotification");
 const StaffPanelNotificationState = require("../models/StaffPanelNotificationState");
 const Staff = require("../models/Staff");
-const Student = require("../models/Student");
-const Notification = require("../models/Notification");
-const StudentBroadcastLog = require("../models/StudentBroadcastLog");
 const svc = require("../services/staffPanelNotification.service");
-
-const INSERT_CHUNK = 500;
 
 const ROLE_ENUM = z.enum(["super_admin", "admin", "instructor", "mentor"]);
 const AUDIENCE_ENUM = z.enum(["global", "role", "individual"]);
@@ -175,74 +170,6 @@ async function adminDelete(req, res) {
   return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 
-const studentBroadcastSchema = z.object({
-  title: z.string().min(2).max(200).trim(),
-  message: z.string().min(1).max(4000).trim(),
-});
-
-/**
- * Fan-out one in-app notification per student (existing student /v1/notifications API).
- * ref_id stores the broadcast log id for traceability.
- */
-async function studentBroadcastCreate(req, res) {
-  const body = studentBroadcastSchema.parse(req.body);
-  const students = await Student.find({ role: "student" }).select("_id").lean();
-  const recipientCount = students.length;
-
-  const log = await StudentBroadcastLog.create({
-    title: body.title,
-    message: body.message,
-    recipient_count: recipientCount,
-    created_by: staffSub(req) || null,
-  });
-  const refId = String(log._id);
-
-  const docs = students.map((s) => ({
-    student_id: s._id,
-    type: "system",
-    title: body.title,
-    body: body.message,
-    read_at: null,
-    ref_id: refId,
-  }));
-
-  for (let i = 0; i < docs.length; i += INSERT_CHUNK) {
-    const slice = docs.slice(i, i + INSERT_CHUNK);
-    if (slice.length) await Notification.insertMany(slice, { ordered: false });
-  }
-
-  return sendSuccess(
-    res,
-    {
-      id: refId,
-      recipient_count: recipientCount,
-      title: body.title,
-    },
-    recipientCount
-      ? `Sent to ${recipientCount} student${recipientCount === 1 ? "" : "s"}`
-      : "No student accounts — log entry created only"
-  );
-}
-
-async function studentBroadcastList(req, res) {
-  const page = Math.max(1, Number(req.query.page || 1));
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
-  const skip = (page - 1) * limit;
-  const [rows, total] = await Promise.all([
-    StudentBroadcastLog.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-    StudentBroadcastLog.countDocuments({}),
-  ]);
-  const data = rows.map((row) => ({
-    id: String(row._id),
-    title: row.title,
-    message: row.message,
-    recipient_count: row.recipient_count,
-    created_by: row.created_by ? String(row.created_by) : "",
-    created_at: row.createdAt,
-  }));
-  return sendSuccess(res, data, "", { page, limit, total });
-}
-
 module.exports = {
   listMine,
   unreadCount,
@@ -253,6 +180,4 @@ module.exports = {
   adminList,
   adminPatch,
   adminDelete,
-  studentBroadcastCreate,
-  studentBroadcastList,
 };

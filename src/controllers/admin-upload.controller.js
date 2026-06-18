@@ -124,12 +124,12 @@ async function uploadAssignmentQuestionAsset(req, res) {
     return sendError(res, 400, "FILE_REQUIRED", 'Expected multipart field "file"');
   }
   const resourceType = resourceTypeForAdminFile(req.file.mimetype);
-  if (resourceType !== "image") {
-    return sendError(res, 400, "INVALID_FILE", "Only JPEG, PNG, WebP, GIF images are allowed for question media");
+  if (resourceType !== "image" && resourceType !== "video") {
+    return sendError(res, 400, "INVALID_FILE", "Only images (JPEG/PNG/WebP/GIF) or videos (MP4/MOV/MKV/WEBM) are allowed for question media");
   }
   try {
-    const folder = buildAssignmentQuestionUploadFolder("image");
-    const result = await uploadBufferToFolder(req.file.buffer, "image", folder, {
+    const folder = buildAssignmentQuestionUploadFolder(resourceType);
+    const result = await uploadBufferToFolder(req.file.buffer, resourceType, folder, {
       filenameOverride: req.file.originalname || "",
     });
     return sendSuccess(

@@ -94,7 +94,6 @@ function renderEmailTemplate({ title, greeting, intro, details, primaryAction, s
 async function resolveInstructorRecipientsByName(name) {
   const n = String(name || "").trim();
   if (!n) return [];
-  // Match by exact name like mentor scheduler does. (We can improve later by storing staff_id in slot.)
   const rows = await Staff.find({
     role: { $in: ["instructor", "mentor"] },
     is_active: true,
@@ -103,6 +102,26 @@ async function resolveInstructorRecipientsByName(name) {
     .select("_id name email role")
     .lean();
   return rows || [];
+}
+
+async function resolveInstructorRecipientsForSlot(slot) {
+  // Prefer direct staff_id lookup — avoids name-collision bugs entirely.
+  if (slot.staff_id) {
+    const mongoose = require("mongoose");
+    const staffId = slot.staff_id;
+    if (mongoose.isValidObjectId(String(staffId))) {
+      const row = await Staff.findOne({
+        _id: staffId,
+        role: { $in: ["instructor", "mentor"] },
+        is_active: true,
+      })
+        .select("_id name email role")
+        .lean();
+      if (row) return [row];
+    }
+  }
+  // Fall back to name matching (legacy slots without staff_id).
+  return resolveInstructorRecipientsByName(slot.teacher);
 }
 
 function buildClassStart10mEmail({ staffName, slot }) {
@@ -171,8 +190,8 @@ function buildResourceUploadedEmail({ staffName, slot, kind }) {
   return { subject, htmlContent, textContent };
 }
 
-async function notifyInstructorsForSlot({ slot, event_type, title, message, emailBuilder }) {
-  const recipients = await resolveInstructorRecipientsByName(slot.teacher);
+async function notifyInstructorsForSlot({ slot, event_type, title, message, action_url, emailBuilder }) {
+  const recipients = await resolveInstructorRecipientsForSlot(slot);
   if (!recipients.length) return { notified: 0, emailed: 0 };
 
   let notified = 0;
@@ -188,6 +207,7 @@ async function notifyInstructorsForSlot({ slot, event_type, title, message, emai
       message,
       category: "alerts",
       event_type,
+      action_url: action_url || "",
       dedupe_key: dedupeKey,
     });
     notified += 1;
@@ -213,5 +233,6 @@ module.exports = {
   buildResourceUploadedEmail,
   fmtWhenLocal,
   resolveInstructorRecipientsByName,
+  resolveInstructorRecipientsForSlot,
 };
 

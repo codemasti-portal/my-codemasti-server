@@ -17,6 +17,8 @@ const timetableSlotSchema = new mongoose.Schema(
     subject: { type: String, required: true, trim: true, index: true },
     topic: { type: String, default: "", trim: true },
     teacher: { type: String, required: true, trim: true },
+    /** Optional reference to the Staff document. When set, instructor notifications use ID-based lookup (more reliable than name matching). */
+    staff_id: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null, index: true },
     meet_link: { type: String, default: "", trim: true },
     recording_link: { type: String, default: "", trim: true },
     notes_link: { type: String, default: "", trim: true },
@@ -25,6 +27,9 @@ const timetableSlotSchema = new mongoose.Schema(
     /** One-time “class starts in ~10 minutes” reminders (prevent duplicate emails on each poll tick). */
     student_reminder_10m_sent_at: { type: Date, default: null },
     instructor_reminder_10m_sent_at: { type: Date, default: null },
+
+    /** One-time "class is now live" notification sent at the scheduled start time. */
+    class_live_sent_at: { type: Date, default: null },
 
     /** One-time alert when meet_link is missing near start time. */
     meet_link_missing_10m_alert_sent_at: { type: Date, default: null },
