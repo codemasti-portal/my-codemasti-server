@@ -166,13 +166,15 @@ async function verifyOtp(req, res) {
 
   const staff = staffPublicFields(staffDoc);
   const sub = String(staffDoc._id);
+  const tv = Number(staffDoc.token_version || 0);
   const access_token = signAccessToken({
     sub,
     role: staffDoc.role,
     email: staffDoc.email,
     staff: true,
+    tv,
   });
-  const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true });
+  const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true, tv });
   await StaffOtpRequest.updateOne({ _id: record._id }, { $set: { used_at: new Date() } });
   await Staff.updateOne({ _id: sub }, { $set: buildLoginMeta(req) });
 
@@ -207,8 +209,9 @@ async function loginWithPassword(req, res) {
   }
   const staff = staffPublicFields(staffDoc);
   const sub = String(staffDoc._id);
-  const access_token = signAccessToken({ sub, role: staffDoc.role, email: staffDoc.email, staff: true });
-  const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true });
+  const tv = Number(staffDoc.token_version || 0);
+  const access_token = signAccessToken({ sub, role: staffDoc.role, email: staffDoc.email, staff: true, tv });
+  const refresh_token = signRefreshToken({ sub, type: "refresh", staff: true, tv });
   await Staff.updateOne({ _id: sub }, { $set: buildLoginMeta(req) });
   return sendSuccess(res, {
     access_token,
@@ -267,6 +270,8 @@ async function setPasswordFromSignup(req, res) {
   if (!staff || !staff.is_active) return sendError(res, 404, "STAFF_NOT_FOUND", "Staff not found");
   staff.password_hash = bcrypt.hashSync(body.new_password, 10);
   staff.password_set_by_user = true;
+  // Invalidate any tokens issued before this password change.
+  staff.token_version = Number(staff.token_version || 0) + 1;
   await staff.save();
   return sendSuccess(res, {}, "Password created successfully.");
 }
@@ -318,6 +323,8 @@ async function resetPassword(req, res) {
   if (!staff || !staff.is_active) return sendError(res, 404, "STAFF_NOT_FOUND", "Staff not found");
   staff.password_hash = bcrypt.hashSync(body.new_password, 10);
   staff.password_set_by_user = true;
+  // Invalidate any tokens issued before this password change.
+  staff.token_version = Number(staff.token_version || 0) + 1;
   await staff.save();
   return sendSuccess(res, {}, "Password reset successfully.");
 }
@@ -396,6 +403,8 @@ async function updateMyPasswordWithOtp(req, res) {
   if (!staff || !staff.is_active) return sendError(res, 404, "STAFF_NOT_FOUND", "Staff not found");
   staff.password_hash = bcrypt.hashSync(body.new_password, 10);
   staff.password_set_by_user = true;
+  // Invalidate any tokens issued before this password change.
+  staff.token_version = Number(staff.token_version || 0) + 1;
   await staff.save();
   return sendSuccess(res, {}, "Password updated successfully.");
 }
@@ -430,17 +439,25 @@ async function refreshToken(req, res) {
   if (!staffDoc || !staffDoc.is_active) {
     return sendError(res, 401, "UNAUTHORIZED", "Staff not found for token");
   }
+  // A logout, password change, or being disabled bumps token_version — a refresh token issued
+  // before that no longer matches and is rejected here, instead of silently minting a fresh
+  // access token for a session that was supposed to have been cut off.
+  if (Number(decoded.tv || 0) !== Number(staffDoc.token_version || 0)) {
+    return sendError(res, 401, "UNAUTHORIZED", "Session has been signed out. Please log in again.");
+  }
 
   const access_token = signAccessToken({
     sub: String(staffDoc._id),
     role: staffDoc.role,
     email: staffDoc.email,
     staff: true,
+    tv: Number(staffDoc.token_version || 0),
   });
   return sendSuccess(res, { access_token, expires_in_sec: 3600 });
 }
 
-function logout(_req, res) {
+async function logout(req, res) {
+  await Staff.updateOne({ _id: req.staff.sub }, { $inc: { token_version: 1 } });
   return sendSuccess(res, {}, "Logged out");
 }
 

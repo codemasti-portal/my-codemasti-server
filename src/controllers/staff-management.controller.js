@@ -359,7 +359,12 @@ async function setActive(req, res) {
   }
   await Staff.updateOne(
     { _id: target._id },
-    { $set: { is_active: body.is_active, account_status: body.is_active ? "active" : "inactive" } }
+    {
+      $set: { is_active: body.is_active, account_status: body.is_active ? "active" : "inactive" },
+      // Bump on every active-status flip (not just disabling) so a disable-then-re-enable cycle
+      // can't accidentally resurrect a token that was issued before the disable.
+      $inc: { token_version: 1 },
+    }
   );
   return sendSuccess(res, { id: String(target._id), is_active: body.is_active }, "Updated");
 }

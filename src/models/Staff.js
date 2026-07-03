@@ -37,6 +37,10 @@ const staffSchema = new mongoose.Schema(
     admin_notes: { type: String, default: "", trim: true },
     last_updated_by_admin: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },
     is_active: { type: Boolean, default: true },
+    /** Bumped on logout, password change, or being disabled — invalidates every token issued
+     * before the bump (embedded as the `tv` claim), so those actions take effect immediately
+     * instead of waiting out the token's natural expiry. */
+    token_version: { type: Number, default: 0 },
   },
   { timestamps: true, versionKey: false }
 );
