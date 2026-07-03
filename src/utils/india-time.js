@@ -62,15 +62,26 @@ function indiaThisYearSubmittedMatch(now = new Date()) {
   return { submitted_at: { $gte: start, $lt: end } };
 }
 
-/** Week starts Monday 00:00 IST. */
-function indiaThisWeekSubmittedMatch(now = new Date()) {
+/** Start of the current Monday-00:00-IST week, as an absolute instant. */
+function indiaWeekStartInstant(now = new Date()) {
   const { year, month, day } = indiaYmdFromDate(now);
   const startOfTodayIst = new Date(`${year}-${pad(month)}-${pad(day)}T00:00:00+05:30`);
   const wk = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short" }).format(startOfTodayIst);
   const mon0 = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[wk] ?? 0;
-  const weekStart = new Date(startOfTodayIst.getTime() - mon0 * 86400000);
+  return new Date(startOfTodayIst.getTime() - mon0 * 86400000);
+}
+
+/** Week starts Monday 00:00 IST. */
+function indiaThisWeekSubmittedMatch(now = new Date()) {
+  const weekStart = indiaWeekStartInstant(now);
   const weekEnd = new Date(weekStart.getTime() + 7 * 86400000);
   return { submitted_at: { $gte: weekStart, $lt: weekEnd } };
+}
+
+/** Stable "YYYY-MM-DD" key (the Monday date) identifying the current IST week — used to dedupe
+ * weekly-scoped awards (e.g. "Closed the Gap", "The Climb") without a separate period table. */
+function indiaWeekKey(now = new Date()) {
+  return toIndiaCalendarYmd(indiaWeekStartInstant(now));
 }
 
 /** Exclusive end instant for period "YYYY-MM" in IST (= eligible to finalize once `now >=` this). */
@@ -130,6 +141,8 @@ module.exports = {
   indiaThisMonthSubmittedMatch,
   indiaThisYearSubmittedMatch,
   indiaThisWeekSubmittedMatch,
+  indiaWeekStartInstant,
+  indiaWeekKey,
   indianPeriodFirstInstantAfterClosed,
   isIndianCalendarPeriodEligibleForFinalization,
   recentClosedIndianMonthPeriods,

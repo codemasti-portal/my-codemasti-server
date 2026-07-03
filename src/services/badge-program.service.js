@@ -13,7 +13,7 @@ const {
   indianPeriodFirstInstantAfterClosed,
   recentClosedIndianMonthPeriods,
 } = require("../utils/india-time");
-const { buildRowsForSubmittedFilter } = require("../controllers/leaderboard.controller");
+const { buildRowsForSubmittedFilter, computeStudentXpForPeriod } = require("./xp-aggregation.service");
 
 const AWARD_KINDS = new Set([
   "arena_distinct_solved",
@@ -174,8 +174,13 @@ async function grantArenaOrLifetimeProgramBadge(studentId, programLean, opts = {
   const lifetimeMerged = opts.lifetimeMerged instanceof Map ? opts.lifetimeMerged : null;
 
   if (kind === "student_total_xp_milestone") {
-    const merged = lifetimeMerged || (await buildRowsForSubmittedFilter({}));
-    const xpTotal = Math.max(0, Number(merged.get(String(sid))?.xp || 0));
+    // Admin re-scan (awardAllStudentsForPublishedProgram) passes a shared, pre-computed
+    // full-cohort merge so every student in the scan reuses one aggregation. The per-submission
+    // trigger path (no lifetimeMerged) computes just this one student's XP directly instead —
+    // cheap enough to call fresh every time, no cache needed.
+    const xpTotal = lifetimeMerged
+      ? Math.max(0, Number(lifetimeMerged.get(String(sid))?.xp || 0))
+      : Math.max(0, await computeStudentXpForPeriod(sid, {}));
     if (xpTotal < threshold) return false;
 
     const already = await StudentAchievementBadge.exists({
@@ -254,7 +259,7 @@ async function grantArenaOrLifetimeProgramBadge(studentId, programLean, opts = {
   return false;
 }
 
-async function grantMonthlyXpProgramsForStudent(studentId, programLean, mergedCache) {
+async function grantMonthlyXpProgramsForStudent(studentId, programLean, opts = {}) {
   const sid = String(studentId);
   if (!mongoose.Types.ObjectId.isValid(sid)) return false;
   const oid = new mongoose.Types.ObjectId(sid);
@@ -265,7 +270,11 @@ async function grantMonthlyXpProgramsForStudent(studentId, programLean, mergedCa
   const now = new Date();
   let grantedAny = false;
 
-  const cache = mergedCache instanceof Map ? mergedCache : new Map();
+  // Admin re-scan (awardAllStudentsForPublishedProgram) passes a shared cohortCache Map so every
+  // student in the scan reuses one full-cohort aggregation per period. The per-submission trigger
+  // path (no cohortCache) computes just this one student's XP directly per period instead — no
+  // cohort scan, cheap enough to call fresh every time.
+  const cohortCache = opts.cohortCache instanceof Map ? opts.cohortCache : null;
   const periods = recentClosedIndianMonthPeriods(18, now);
 
   for (const period of periods) {
@@ -278,16 +287,24 @@ async function grantMonthlyXpProgramsForStudent(studentId, programLean, mergedCa
     });
     if (exists) continue;
 
-    let merged = cache.get(period);
-    if (!merged) {
-      const p = parsePeriodYm(period);
-      if (!p) continue;
-      merged = await buildRowsForSubmittedFilter(submittedAtIndiaCalendarMonth(p.y, p.mo));
-      cache.set(period, merged);
-    }
+    const p = parsePeriodYm(period);
+    if (!p) continue;
+    const periodMatch = submittedAtIndiaCalendarMonth(p.y, p.mo);
 
-    const xpRow = merged.get(String(sid));
-    const xp = Math.max(0, Number(xpRow?.xp || 0));
+    let xp;
+    if (cohortCache) {
+      // `periods` only ever contains CLOSED IST months (recentClosedIndianMonthPeriods), so this
+      // XP total can never change once computed — safe to compute once per period and reuse
+      // across every student in this one re-scan call.
+      let merged = cohortCache.get(period);
+      if (!merged) {
+        merged = await buildRowsForSubmittedFilter(periodMatch);
+        cohortCache.set(period, merged);
+      }
+      xp = Math.max(0, Number(merged.get(sid)?.xp || 0));
+    } else {
+      xp = Math.max(0, await computeStudentXpForPeriod(sid, periodMatch));
+    }
     if (xp < threshold) continue;
 
     try {
@@ -324,22 +341,31 @@ async function grantProgramBadgeIfEligible(studentId, programLean, opts = {}) {
 
 async function ensurePublishedProgramBadgesForStudent(studentId) {
   const programs = await BadgeProgram.find({ status: "published" }).lean();
-  const monthlyCache = new Map();
-  let lifetimeMerged = null;
   for (const p of programs) {
-    if (String(p.award_rule_kind) === "assignment_monthly_ist_xp") {
-      /* eslint-disable no-await-in-loop */
-      await grantMonthlyXpProgramsForStudent(studentId, p, monthlyCache);
-      /* eslint-enable no-await-in-loop */
-    } else if (String(p.award_rule_kind) === "student_total_xp_milestone") {
-      if (!lifetimeMerged) lifetimeMerged = await buildRowsForSubmittedFilter({});
-      /* eslint-disable no-await-in-loop */
-      await grantArenaOrLifetimeProgramBadge(studentId, p, { lifetimeMerged });
-      /* eslint-enable no-await-in-loop */
-    } else {
-      /* eslint-disable no-await-in-loop */
-      await grantArenaOrLifetimeProgramBadge(studentId, p);
-      /* eslint-enable no-await-in-loop */
+    // Isolate each program: a single throwing/expensive program must not abort evaluation of
+    // every OTHER published program for this student, and must not turn this call into a
+    // hard failure for callers that await it (e.g. the achievements endpoint). Each check below
+    // is a cheap single-student query (no cross-cohort scan), so there's nothing to cache here.
+    try {
+      if (String(p.award_rule_kind) === "assignment_monthly_ist_xp") {
+        /* eslint-disable no-await-in-loop */
+        await grantMonthlyXpProgramsForStudent(studentId, p);
+        /* eslint-enable no-await-in-loop */
+      } else {
+        /* eslint-disable no-await-in-loop */
+        await grantArenaOrLifetimeProgramBadge(studentId, p);
+        /* eslint-enable no-await-in-loop */
+      }
+    } catch (err) {
+      console.error(
+        "[BADGE_PROGRAM_EVAL_FAILED]",
+        JSON.stringify({
+          student_id: String(studentId),
+          badge_code: p.badge_code,
+          award_rule_kind: p.award_rule_kind,
+          error: err?.message || String(err),
+        })
+      );
     }
   }
 }
@@ -352,10 +378,10 @@ async function awardAllStudentsForPublishedProgram(programId) {
   let hints = 0;
 
   if (String(program.award_rule_kind) === "assignment_monthly_ist_xp") {
-    const mergedCache = new Map();
+    const cohortCache = new Map();
     for (const s of students) {
       /* eslint-disable no-await-in-loop */
-      const ok = await grantMonthlyXpProgramsForStudent(String(s._id), program, mergedCache);
+      const ok = await grantMonthlyXpProgramsForStudent(String(s._id), program, { cohortCache });
       if (ok) hints += 1;
       /* eslint-enable no-await-in-loop */
     }
@@ -524,7 +550,7 @@ async function syncEarnedProgramBadgesFromProgram(programDoc) {
   return { student_badges_updated: n };
 }
 
-async function deleteBadgeProgram(programId) {
+async function deleteBadgeProgram(programId, opts = {}) {
   const sid = String(programId || "").trim();
   if (!mongoose.Types.ObjectId.isValid(sid)) {
     return { ok: false, removed_student_badges: 0 };
@@ -533,6 +559,17 @@ async function deleteBadgeProgram(programId) {
   if (!doc) return { ok: false, removed_student_badges: 0 };
 
   const code = String(doc.badge_code || "").trim().toLowerCase();
+  const earnedCount = code
+    ? await StudentAchievementBadge.countDocuments({ badge_code: code, category: "program" })
+    : 0;
+
+  // A published badge that students have already earned needs an explicit, informed
+  // confirmation (the caller must pass force:true after showing the real count) — deleting it
+  // silently strips the badge from every student who earned it, with no way to undo.
+  if (doc.status === "published" && earnedCount > 0 && !opts.force) {
+    return { ok: false, code: "CONFIRM_REQUIRED", earned_count: earnedCount, removed_student_badges: 0 };
+  }
+
   let removed = 0;
   if (code) {
     const result = await StudentAchievementBadge.deleteMany({ badge_code: code, category: "program" });

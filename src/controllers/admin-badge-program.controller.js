@@ -1,5 +1,6 @@
 const { sendSuccess, sendError } = require("../utils/response");
 const BadgeProgram = require("../models/BadgeProgram");
+const StudentAchievementBadge = require("../models/StudentAchievementBadge");
 const badgeProgramSvc = require("../services/badge-program.service");
 
 function mapProgramLean(row) {
@@ -34,7 +35,20 @@ async function list(req, res) {
     const q = {};
     if (status === "published" || status === "draft") q.status = status;
     const rows = await BadgeProgram.find(q).sort({ updatedAt: -1 }).lean();
-    const data = rows.map((r) => mapProgramLean(r));
+
+    const codes = [...new Set(rows.map((r) => String(r.badge_code || "").trim().toLowerCase()).filter(Boolean))];
+    const counts = codes.length
+      ? await StudentAchievementBadge.aggregate([
+          { $match: { badge_code: { $in: codes }, category: "program" } },
+          { $group: { _id: "$badge_code", n: { $sum: 1 } } },
+        ])
+      : [];
+    const earnedByCode = new Map(counts.map((c) => [String(c._id), Number(c.n || 0)]));
+
+    const data = rows.map((r) => ({
+      ...mapProgramLean(r),
+      earned_count: earnedByCode.get(String(r.badge_code || "").trim().toLowerCase()) || 0,
+    }));
     return sendSuccess(res, data);
   } catch (err) {
     return sendError(res, 500, "BADGE_PROGRAM_LIST_FAILED", err?.message || "Failed to list badges");
@@ -59,7 +73,10 @@ async function create(req, res) {
     let awardSummary = null;
     let profileSync = null;
     if (body.publish_now) {
-      await badgeProgramSvc.updateProgram(doc._id, {}, { publish: true });
+      // Pass the full body (not {}) so monthly_evaluation/monthly_custom_dom (and any other
+      // rule fields) the admin just chose survive this publish step instead of being reset
+      // to normalizeMonthlyFields()'s defaults.
+      await badgeProgramSvc.updateProgram(doc._id, body, { publish: true });
       doc = await BadgeProgram.findById(doc._id);
       awardSummary = await badgeProgramSvc.awardAllStudentsForPublishedProgram(doc._id);
       profileSync = doc ? await badgeProgramSvc.syncEarnedProgramBadgesFromProgram(doc) : null;
@@ -158,8 +175,18 @@ async function reawardPublished(req, res) {
 async function remove(req, res) {
   try {
     const id = String(req.params.id || "").trim();
-    const summary = await badgeProgramSvc.deleteBadgeProgram(id);
+    const force = String(req.query.force || "").toLowerCase() === "true";
+    const summary = await badgeProgramSvc.deleteBadgeProgram(id, { force });
     if (!summary.ok) {
+      if (summary.code === "CONFIRM_REQUIRED") {
+        return sendError(
+          res,
+          409,
+          "CONFIRM_REQUIRED",
+          `This badge has already been earned by ${summary.earned_count} student(s). Confirm to delete it and remove it from their profiles too.`,
+          { earned_count: summary.earned_count }
+        );
+      }
       return sendError(res, 404, "BADGE_PROGRAM_NOT_FOUND", "Badge not found.");
     }
     return sendSuccess(

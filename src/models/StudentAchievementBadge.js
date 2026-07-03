@@ -9,7 +9,7 @@ const studentAchievementBadgeSchema = new mongoose.Schema(
     badge_code: { type: String, required: true, trim: true },
     category: {
       type: String,
-      enum: ["arena_quests", "arena_streak", "program"],
+      enum: ["arena_quests", "arena_streak", "program", "leaderboard_gap", "leaderboard_climb", "persistence"],
       required: true,
     },
     title: { type: String, required: true, trim: true },

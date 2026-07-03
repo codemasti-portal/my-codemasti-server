@@ -157,6 +157,23 @@ async function catalogBatchMongoMatchResolved(batchId) {
   return { _id: { $in: await studentIdsInBatches([batchId]) } };
 }
 
+/**
+ * Same "one board" resolution as the leaderboard's default (primary batch, else first) — used
+ * wherever a batch-scoped roster is needed without an explicit requested-batch override (Rarity
+ * Tags, the "Closed the Gap" badge check). The leaderboard controller keeps its own version since
+ * it additionally supports an explicit `?batch_id=` override from a client-side batch switcher.
+ */
+async function resolveDefaultBatchBoard(studentLean) {
+  const { batchIds } = await resolveStudentBatchIds(studentLean?._id);
+  if (!batchIds.length) return { board: null, ids: [], batchName: "" };
+  const primary = String(studentLean?.batch_id || "").toLowerCase().trim();
+  const board = (primary && batchIds.includes(primary) && primary) || batchIds[0];
+  const ids = await studentIdsInBatches([board]);
+  // eslint-disable-next-line global-require -- lazy to sidestep any load-order assumptions on the registry
+  const registry = require("./batch-catalog-registry");
+  return { board, ids, batchName: registry.displayNameSync(board) || board };
+}
+
 /** Full Student.find filter for a set of batches + section (mirrors studentsInCatalogBatchesFilter). */
 async function studentsInBatchesFilterResolved(batchKeys, opts = {}) {
   const ids = await studentIdsInBatches(batchKeys, opts);
@@ -195,4 +212,5 @@ module.exports = {
   catalogBatchMongoMatchResolved,
   studentsInBatchesFilterResolved,
   catalogBatchStudentFilterResolved,
+  resolveDefaultBatchBoard,
 };

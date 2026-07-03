@@ -8,7 +8,7 @@ const {
   recentClosedIndianMonthPeriods,
   isIndianCalendarPeriodEligibleForFinalization,
 } = require("../utils/india-time");
-const { buildRowsForSubmittedFilter } = require("../controllers/leaderboard.controller");
+const { buildRowsForSubmittedFilter } = require("./xp-aggregation.service");
 const badgeDefSvc = require("./achievement-badge-definition.service");
 
 function parsePeriod(period) {

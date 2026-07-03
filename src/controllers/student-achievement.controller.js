@@ -1,9 +1,12 @@
 const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
+const StudentAchievementBadge = require("../models/StudentAchievementBadge");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { resolveDefaultBatchBoard } = require("../utils/student-batch-context");
 const monthlySvc = require("../services/monthly-leaderboard-badge.service");
 const achievementSvc = require("../services/student-achievement.service");
 const badgeProgramSvc = require("../services/badge-program.service");
+const weeklyClimbSvc = require("../services/weekly-climb-badge.service");
 
 async function combinedAchievements(req, res) {
   try {
@@ -16,14 +19,29 @@ async function combinedAchievements(req, res) {
 
     await Promise.all([
       achievementSvc.ensureMilestoneBadges(req.user.sub),
+      achievementSvc.ensureGapOvertakeBadge(req.user.sub),
       badgeProgramSvc.ensurePublishedProgramBadgesForStudent(req.user.sub),
       monthlySvc.ensureRecentMonthsForScope(scopeKey, 6),
+      weeklyClimbSvc.ensureRecentWeeksForStudent(s, 6),
     ]);
 
-    const [milestonesLean, monthlyLean] = await Promise.all([
+    const [milestonesLean, monthlyLean, batchScope] = await Promise.all([
       achievementSvc.listMilestoneBadgesForStudent(req.user.sub),
       monthlySvc.listBadgesForStudent(req.user.sub),
+      resolveDefaultBatchBoard(s),
     ]);
+
+    const codes = [...new Set(milestonesLean.map((r) => String(r.badge_code || "").trim().toLowerCase()).filter(Boolean))];
+    const rarityCounts =
+      codes.length && batchScope.ids.length
+        ? await StudentAchievementBadge.aggregate([
+            { $match: { badge_code: { $in: codes }, student_id: { $in: batchScope.ids } } },
+            { $group: { _id: "$badge_code", n: { $sum: 1 } } },
+          ])
+        : [];
+    const rarityByCode = new Map(rarityCounts.map((c) => [String(c._id), Number(c.n || 0)]));
+    const batch_size = batchScope.ids.length;
+    const batch_name = batchScope.batchName;
 
     const milestones = milestonesLean.map((row) => ({
       badge_code: row.badge_code,
@@ -38,6 +56,9 @@ async function combinedAchievements(req, res) {
       custom_image_url: row.custom_image_url || "",
       badge_layout:
         row.badge_layout && typeof row.badge_layout === "object" ? row.badge_layout : null,
+      earned_count_in_batch: batch_size ? rarityByCode.get(String(row.badge_code || "").trim().toLowerCase()) || 0 : 0,
+      batch_size,
+      batch_name,
     }));
 
     const monthly_leaderboard = monthlyLean.map((w) => ({

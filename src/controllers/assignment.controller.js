@@ -891,8 +891,15 @@ async function submit(req, res) {
     setImmediate(() => {
       Promise.all([
         achievementSvc.ensureMilestoneBadges(req.user.sub),
+        achievementSvc.ensureGapOvertakeBadge(req.user.sub),
+        achievementSvc.ensureRecoveredBadgeForAssignment(req.user.sub, req.params.questionId),
         badgeProgramSvc.ensurePublishedProgramBadgesForStudent(req.user.sub),
-      ]).catch(() => {});
+      ]).catch((err) => {
+        console.error(
+          "[BADGE_CHECK_FAILED]",
+          JSON.stringify({ student_id: String(req.user.sub), source: "assignment_submit", error: err?.message || String(err) })
+        );
+      });
     });
   }
 
