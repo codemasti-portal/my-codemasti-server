@@ -100,6 +100,8 @@ router.delete(
 );
 router.get("/assignments/:assignmentId/questions", ...manageAssignments, catalog.listAssignmentQuestions);
 router.post("/assignments/:assignmentId/questions", ...manageAssignments, catalog.createAssignmentQuestion);
+// Authoring aid: dry-run web dom_tests against a reference solution (no DB access).
+router.post("/web-checks/verify", ...manageAssignments, catalog.verifyWebChecks);
 
 router.get("/assignments", ...manageAssignments, catalog.listAssignments);
 router.post("/assignments", ...manageAssignments, catalog.createAssignment);

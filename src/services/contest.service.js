@@ -2,7 +2,7 @@ const Contest = require("../models/Contest");
 const ScorecardTest = require("../models/ScorecardTest");
 const { getContestPhase, countdownSeconds } = require("../utils/contestPhase");
 const { buildContestResultsUrl } = require("../utils/contestResultsUrl");
-const { membershipKeysOr } = require("../utils/student-batch-context");
+const { membershipKeysOr, historicalEnrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 
 function normSectionId(v) {
   return String(v ?? "")
@@ -31,12 +31,28 @@ function batchMatches(student, contest) {
   return studentBatches.includes(cbatch);
 }
 
-function isContestVisibleToStudent(student, contest, now = new Date()) {
+/**
+ * True if `contest.batch_id` is one the student has ever belonged to (active OR completed
+ * enrollment) but is NOT currently active in. Used only to unlock PAST contests for students
+ * who've moved on from a batch — never live/upcoming ones, which stay gated to active membership.
+ */
+function isLapsedBatchMatch(student, contest, historicalBatchIds) {
+  if (batchMatches(student, contest)) return false; // already an active match, not "lapsed"
+  const cbatch = normalizeBatchId(contest.batch_id);
+  return Boolean(cbatch) && (historicalBatchIds || []).includes(cbatch);
+}
+
+function isContestVisibleToStudent(student, contest, now = new Date(), { historicalBatchIds } = {}) {
   if (!contest.is_published) return false;
-  if (!batchMatches(student, contest)) return false;
+  const activeMatch = batchMatches(student, contest);
+  const lapsedMatch = !activeMatch && isLapsedBatchMatch(student, contest, historicalBatchIds);
+  if (!activeMatch && !lapsedMatch) return false;
   if (!sectionAllows(student, contest)) return false;
   const { phase } = getContestPhase(contest, now);
-  return phase !== "hidden";
+  if (phase === "hidden") return false;
+  // A lapsed enrollment only ever surfaces contests that have already ended.
+  if (lapsedMatch && phase !== "results") return false;
+  return true;
 }
 
 function sanitizeUrlsForPhase(contest, phase) {
@@ -133,20 +149,25 @@ async function loadTestsMap(testIds) {
   return new Map(rows.map((t) => [String(t._id), t]));
 }
 
-async function listContestsForStudent(student, { now = new Date(), includeEndedDays = 30 } = {}) {
+async function listContestsForStudent(student, { now = new Date() } = {}) {
   const batchIds = membershipKeysOr(student, [normalizeBatchId(student?.batch_id)].filter(Boolean));
-  if (!batchIds.length) return [];
+  // An explicit course-switcher pick means "show me only this one" — never widen it back out to
+  // the student's other (current or past) batches, even for history.
+  const explicit = Boolean(student && student.__membershipExplicit);
+  const historicalBatchIds = explicit
+    ? []
+    : (await historicalEnrollmentBatchIdsForStudent(student?._id)).batchIds;
+  const allBatchIds = [...new Set([...batchIds, ...historicalBatchIds])];
+  if (!allBatchIds.length) return [];
 
-  const cutoff = new Date(now.getTime() - includeEndedDays * 24 * 60 * 60 * 1000);
   const rows = await Contest.find({
     is_published: true,
-    batch_id: { $in: batchIds },
-    end_at: { $gte: cutoff },
+    batch_id: { $in: allBatchIds },
   })
     .sort({ start_at: -1 })
     .lean();
 
-  const visible = rows.filter((c) => isContestVisibleToStudent(student, c, now));
+  const visible = rows.filter((c) => isContestVisibleToStudent(student, c, now, { historicalBatchIds }));
   const tests = await loadTestsMap(visible.map((c) => c.test_id));
   return visible.map((c) => toStudentContestRow(c, tests.get(String(c.test_id)), now, student));
 }

@@ -131,7 +131,9 @@ function noteVisibleToStudent(note, student) {
   const tb = note.target_batch_ids || [];
   const ts = note.target_section_refs || [];
   if (tb.length === 0 && (!ts || ts.length === 0)) return true;
-  const batchIds = studentBatchCandidates(student);
+  // Use the resolved membership set (same as the list filter) so open/download agrees with what the
+  // list shows and honors the selected batch — not the legacy single-batch enrollment labels.
+  const batchIds = membershipKeysOr(student, studentBatchCandidates(student));
   const sid = String(student?.section_id || student?.enrollment_section || "")
     .toLowerCase()
     .trim();

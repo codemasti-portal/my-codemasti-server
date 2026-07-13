@@ -11,6 +11,7 @@ const Note = require("../models/Note");
 const Student = require("../models/Student");
 const Notification = require("../models/Notification");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
+const { studentIdsInBatches } = require("../utils/student-batch-context");
 const { validateBatchSubject, invalidSubjectMessage } = require("../utils/catalog-subjects");
 
 /** Single-source-of-truth subject guard for notes (subject must be in the targeted batch(es) catalog). */
@@ -61,13 +62,40 @@ function studentMatchesNoteAudience(student, note) {
   return false;
 }
 
+/**
+ * Student ids actually enrolled (active) in a note's targeted batch(es)/section(s), from the M:N
+ * StudentEnrollment source of truth. Returns null for legacy/untargeted notes (visible to all —
+ * the label matcher already handles that). Catches secondary-batch students the single-batch
+ * label matcher misses.
+ */
+async function enrollmentRecipientIdsForNote(note) {
+  const targetBatchIds = (note?.target_batch_ids || [])
+    .map((x) => String(x || "").trim().toLowerCase())
+    .filter(Boolean);
+  const targetRefs = (note?.target_section_refs || [])
+    .map((r) => ({ batch_id: String(r?.batch_id || "").trim().toLowerCase(), section_id: normSectionId(r?.section_id || "") }))
+    .filter((r) => r.batch_id && r.section_id);
+  if (!targetBatchIds.length && !targetRefs.length) return null;
+  const ids = new Set();
+  if (targetBatchIds.length) {
+    (await studentIdsInBatches(targetBatchIds)).forEach((id) => ids.add(String(id)));
+  }
+  for (const r of targetRefs) {
+    (await studentIdsInBatches([r.batch_id], { sectionId: r.section_id })).forEach((id) => ids.add(String(id)));
+  }
+  return ids;
+}
+
 async function fanoutNoteNotification(noteDoc, action = "added") {
   if (!noteDoc) return;
   const students = await Student.find({})
     .select("_id batch batch_id section_id enrollment_section enrollment_number enrollment_batch_name enrollment_batch_prefix")
     .lean();
-  const matched = students.filter((s) =>
-    studentMatchesNoteAudience(augmentStudentCatalogFieldsFromEnrollment(s), noteDoc)
+  const enrollIds = await enrollmentRecipientIdsForNote(noteDoc);
+  const matched = students.filter(
+    (s) =>
+      studentMatchesNoteAudience(augmentStudentCatalogFieldsFromEnrollment(s), noteDoc) ||
+      (enrollIds && enrollIds.has(String(s._id)))
   );
   if (!matched.length) return;
 
@@ -120,13 +148,30 @@ function studentMatchesAnnouncement(student, ann) {
   return sectionIds.includes(stSection);
 }
 
+/**
+ * Student ids actually enrolled (active) in a batch-scoped announcement's batch/section(s), from
+ * the M:N StudentEnrollment source of truth. Returns null for global announcements (all students —
+ * the matcher already handles that). Catches secondary-batch students the single-batch matcher misses.
+ */
+async function enrollmentRecipientIdsForAnnouncement(ann) {
+  if (!ann || ann.scope !== "batch") return null;
+  const batchId = String(ann.batch_id || "").trim().toLowerCase();
+  if (!batchId) return null;
+  const sectionIds = Array.isArray(ann.section_ids) ? ann.section_ids.map(normSectionId).filter(Boolean) : [];
+  const ids = await studentIdsInBatches([batchId], sectionIds.length ? { sectionIds } : {});
+  return new Set(ids.map(String));
+}
+
 async function fanoutAnnouncementNotification(annDoc) {
   if (!annDoc || !isPublishedNow(annDoc.date)) return;
 
   const students = await Student.find({ role: "student" })
     .select("_id batch batch_id section_id enrollment_section enrollment_number")
     .lean();
-  const matched = students.filter((s) => studentMatchesAnnouncement(s, annDoc));
+  const enrollIds = await enrollmentRecipientIdsForAnnouncement(annDoc);
+  const matched = students.filter(
+    (s) => studentMatchesAnnouncement(s, annDoc) || (enrollIds && enrollIds.has(String(s._id)))
+  );
   if (!matched.length) return;
   const refId = String(annDoc._id);
   const matchedIds = matched.map((s) => s._id);

@@ -79,6 +79,9 @@ const assignmentQuestionSchema = new mongoose.Schema(
     css_starter: { type: String, default: "" },
     /** Auto-grading checks. Only labels are sent to students — selectors/check_type are server-only. */
     dom_tests: { type: [domTestSchema], default: [] },
+    /** Author-only reference solution (a correct answer) used to verify dom_tests at authoring time. NEVER sent to students. */
+    solution_html: { type: String, default: "" },
+    solution_css: { type: String, default: "" },
 
     // ── Written-answer specific ──────────────────────────────────────────────
     /** Minimum word count accepted before sending to AI evaluator. */

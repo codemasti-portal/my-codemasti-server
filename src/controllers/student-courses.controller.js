@@ -106,11 +106,11 @@ async function listMyCourses(req, res) {
       };
     })
     .filter((r) => r.course) // skip enrollments whose course was deleted
-    // Hide completed/cancelled enrollments by default — they're admin bookkeeping
-    // (e.g. auto-completed when admin renamed the student's enrollment_number).
-    // EXCEPTION: keep them visible if they have pending invoices, so the student
-    // can still see and pay outstanding dues from a previous program.
-    .filter((r) => r.status === "active" || r.pending_invoice_count > 0);
+    // Completed enrollments stay visible — a finished program is exactly where a student
+    // wants to see their past invoices/receipts, not just outstanding ones. Only cancelled
+    // enrollments (admin bookkeeping, e.g. a mistaken signup) are hidden by default, unless
+    // they still have pending invoices the student needs to resolve.
+    .filter((r) => r.status !== "cancelled" || r.pending_invoice_count > 0);
 
   rows.sort((a, b) => {
     const sa = STATUS_RANK[a.status] ?? 99;
