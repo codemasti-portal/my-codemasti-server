@@ -106,6 +106,40 @@ async function resolveStudentBatchContext(req, student) {
 }
 
 /**
+ * Same as enrollmentBatchIdsForStudent, but also includes "completed" enrollments —
+ * i.e. every batch the student has EVER belonged to, not just their current one(s).
+ * For HISTORY only (past contests, past invoices): a lapsed/completed enrollment must
+ * never grant access to anything happening now or in the future, only to records from
+ * when the enrollment was still active. Callers are responsible for that phase/date gate.
+ */
+async function historicalEnrollmentBatchIdsForStudent(studentId) {
+  if (!studentId) return { batchIds: [] };
+  const rows = await StudentEnrollment.find({
+    student_id: studentId,
+    status: { $in: ["active", "completed"] },
+  })
+    .select("batch_id course_id")
+    .lean();
+  const ids = new Set();
+  const needCourse = [];
+  for (const r of rows) {
+    const bid = String(r.batch_id || "").toLowerCase().trim();
+    if (bid) ids.add(bid);
+    else if (r.course_id) needCourse.push(r);
+  }
+  if (needCourse.length) {
+    const courseIds = [...new Set(needCourse.map((r) => String(r.course_id)))];
+    const courses = await Course.find({ _id: { $in: courseIds } }).select("linked_batch_id").lean();
+    const byId = new Map(courses.map((c) => [String(c._id), String(c.linked_batch_id || "").toLowerCase().trim()]));
+    for (const r of needCourse) {
+      const bid = byId.get(String(r.course_id));
+      if (bid) ids.add(bid);
+    }
+  }
+  return { batchIds: [...ids] };
+}
+
+/**
  * Resolves AND, when an explicit pick is present, overrides student.batch_id +
  * clears enrollment_number on the in-memory student doc so downstream helpers
  * naturally scope to the chosen batch.
@@ -120,6 +154,11 @@ async function scopeStudentToBatch(req, student) {
   // Attach the resolved membership set so the sync chokepoint (catalogBatchIdsFromStudentLean) returns it.
   if (student) {
     student.__membershipBatchIds = ctx.batchIds;
+    // True when the student (via the course switcher) explicitly scoped this request to ONE
+    // specific batch. Callers that widen visibility across a student's OTHER batches (e.g. past
+    // contests from a batch they've since left) must skip that widening when this is true —
+    // an explicit pick means "show me only this course," full stop.
+    student.__membershipExplicit = ctx.explicit;
   }
   return ctx;
 }
@@ -206,6 +245,7 @@ module.exports = {
   resolveStudentBatchContext,
   scopeStudentToBatch,
   enrollmentBatchIdsForStudent,
+  historicalEnrollmentBatchIdsForStudent,
   resolveStudentBatchIds,
   membershipKeysOr,
   studentIdsInBatches,

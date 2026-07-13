@@ -3,7 +3,7 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Student = require("../models/Student");
 const Contest = require("../models/Contest");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { scopeStudentToBatch } = require("../utils/student-batch-context");
+const { scopeStudentToBatch, historicalEnrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
 const {
   listContestsForStudent,
   pickDashboardContestCard,
@@ -37,7 +37,12 @@ async function getMyContest(req, res) {
 
   const row = await Contest.findById(req.params.id).lean();
   if (!row) return sendError(res, 404, "NOT_FOUND", "Contest not found");
-  if (!isContestVisibleToStudent(student, row, new Date())) {
+  // Explicit course-switcher pick = "only this course" — no widening to other batches, even past ones.
+  const explicit = Boolean(student && student.__membershipExplicit);
+  const { batchIds: historicalBatchIds } = explicit
+    ? { batchIds: [] }
+    : await historicalEnrollmentBatchIdsForStudent(student?._id);
+  if (!isContestVisibleToStudent(student, row, new Date(), { historicalBatchIds })) {
     return sendError(res, 404, "NOT_FOUND", "Contest not found");
   }
 

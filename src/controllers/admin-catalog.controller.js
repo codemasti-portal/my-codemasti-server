@@ -31,6 +31,7 @@ const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = r
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 const googleMeetCal = require("../services/google-calendar-meet.service");
 const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
+const { evaluateWebSubmission } = require("../services/web-evaluator");
 const { ROLES } = require("../utils/rbac");
 const {
   getInstructorAssignedBatchIds,
@@ -580,6 +581,9 @@ const questionBodySchema = z.object({
   // Web (HTML/CSS) fields
   html_starter:     z.string().optional().default(""),
   css_starter:      z.string().optional().default(""),
+  // Author-only reference solution used to verify dom_tests; never sent to students.
+  solution_html:    z.string().optional().default(""),
+  solution_css:     z.string().optional().default(""),
   dom_tests: z
     .array(
       z.object({
@@ -665,6 +669,48 @@ async function deleteAssignmentQuestion(req, res) {
   await AssignmentSubmission.deleteMany({ question_id: questionId });
   await AssignmentQuestion.deleteOne({ _id: questionId });
   return sendSuccess(res, { id: questionId }, "Deleted");
+}
+
+/**
+ * Authoring aid: run the SAME web grader students hit against a reference solution,
+ * so an author can confirm their dom_tests actually pass on a correct answer before
+ * shipping. Stateless — nothing is read from or written to the database.
+ */
+const verifyWebChecksSchema = z.object({
+  html: z.string().optional().default(""),
+  css: z.string().optional().default(""),
+  dom_tests: z
+    .array(
+      z.object({
+        label: z.string().optional().default(""),
+        check_type: z.string(),
+        selector: z.string().optional().default(""),
+        expected_value: z.string().optional().default(""),
+        attribute_name: z.string().optional().default(""),
+        property_name: z.string().optional().default(""),
+        expected_count: z.number().int().min(0).optional().default(0),
+      })
+    )
+    .max(30, "Maximum 30 checks.")
+    .optional()
+    .default([]),
+});
+
+async function verifyWebChecks(req, res) {
+  const body = verifyWebChecksSchema.parse(req.body);
+  try {
+    const result = evaluateWebSubmission({
+      html: body.html,
+      css: body.css,
+      domTests: body.dom_tests,
+    });
+    return sendSuccess(res, result);
+  } catch (e) {
+    if (e && e.statusCode === 413) {
+      return sendError(res, 413, "SUBMISSION_TOO_LARGE", e.message);
+    }
+    return sendError(res, 400, "VERIFY_FAILED", e?.message || "Could not verify checks.");
+  }
 }
 
 /** —— Arena —— */
@@ -1843,6 +1889,7 @@ module.exports = {
   getAssignmentQuestion,
   updateAssignmentQuestion,
   deleteAssignmentQuestion,
+  verifyWebChecks,
   listArenaQuestions,
   getArenaQuestion,
   createArenaQuestion,
