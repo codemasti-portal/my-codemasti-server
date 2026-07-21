@@ -35,6 +35,8 @@ const arenaQuestionSchema = new mongoose.Schema(
     quiz_options: [
       {
         text: { type: String, default: "" },
+        /** Optional multi-line code snippet for this option (plain; fenced at render, language auto-detected). */
+        code: { type: String, default: "" },
         image_url: { type: String, default: "" },
         is_correct: { type: Boolean, default: false },
       },
