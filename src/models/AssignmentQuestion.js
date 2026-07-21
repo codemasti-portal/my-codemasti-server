@@ -33,6 +33,10 @@ const starterCodeSchema = new mongoose.Schema(
 const quizOptionSchema = new mongoose.Schema(
   {
     text: { type: String, default: "", trim: true },
+    /** Optional multi-line code snippet for this option. Stored plain; the ``` fences are
+     * added at render time (client), like the question-level `code` field. No language stored —
+     * the renderer auto-detects. */
+    code: { type: String, default: "" },
     image_url: { type: String, default: "", trim: true },
     is_correct: { type: Boolean, default: false },
   },

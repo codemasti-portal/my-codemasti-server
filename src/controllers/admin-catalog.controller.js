@@ -558,6 +558,7 @@ const questionBodySchema = z.object({
     .array(
       z.object({
         text: z.string().trim().optional().default(""),
+        code: z.string().optional().default(""),
         image_url: z.string().trim().optional().default(""),
         is_correct: z.boolean().optional().default(false),
       })
@@ -790,6 +791,7 @@ const arenaBodySchema = z.object({
     .array(
       z.object({
         text: z.string().trim().optional().default(""),
+        code: z.string().optional().default(""),
         image_url: z.string().trim().nullable().optional().default(null),
         is_correct: z.boolean().optional().default(false),
       })
