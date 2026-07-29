@@ -56,6 +56,7 @@ async function emitEventNotification(payload) {
       recipient_id: payload.recipient_id,
       source: "event",
       event_type: payload.event_type || "",
+      action_url: payload.action_url || "",
       dedupe_key: payload.dedupe_key || "",
       created_by: payload.created_by || null,
     });

@@ -56,6 +56,9 @@ function wallTimeInZoneToDate(y, m, d, hh, mm, timeZone) {
 function normalizeTimeString(raw) {
   return String(raw || "")
     .trim()
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u2013\u2014\u2212]/g, "-")
+    .replace(/\s+/g, " ")
     .replace(/:(\d)(?!\d)/g, ":0$1");
 }
 
@@ -72,14 +75,12 @@ function parseSlotStart(classDateStr, timeLabel) {
 
   const tz = getClassTimeZone();
   const raw = normalizeTimeString(timeLabel);
-  const m24 = raw.match(/([01]?\d|2[0-3]):([0-5]\d)/);
-  if (m24) return wallTimeInZoneToDate(y, m, d, Number(m24[1]), Number(m24[2]), tz);
-
-  const m12 = raw.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (m12) {
-    let hh = Number(m12[1]);
-    const mm = Number(m12[2]);
-    const period = String(m12[3]).toUpperCase();
+  const parse12hStart = raw.match(/^\s*(\d{1,2}):([0-5]\d)\s*(AM|PM)\b/i);
+  if (parse12hStart) {
+    let hh = Number(parse12hStart[1]);
+    const mm = Number(parse12hStart[2]);
+    const period = String(parse12hStart[3]).toUpperCase();
+    if (hh < 1 || hh > 12) return null;
     if (period === "AM") {
       if (hh === 12) hh = 0;
     } else if (hh !== 12) {
@@ -87,7 +88,30 @@ function parseSlotStart(classDateStr, timeLabel) {
     }
     return wallTimeInZoneToDate(y, m, d, hh, mm, tz);
   }
+
+  const parse24hStart = raw.match(/^\s*([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (parse24hStart) {
+    return wallTimeInZoneToDate(y, m, d, Number(parse24hStart[1]), Number(parse24hStart[2]), tz);
+  }
   return null;
+}
+
+function formatDateYmdInClassTimeZone(dateValue) {
+  const d = new Date(dateValue);
+  if (Number.isNaN(d.getTime())) return "";
+  const tz = getClassTimeZone();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const map = {};
+  for (const p of parts) {
+    if (p.type !== "literal") map[p.type] = p.value;
+  }
+  if (!map.year || !map.month || !map.day) return "";
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
 /**
@@ -159,8 +183,10 @@ function timetableScheduleBody(slot, action) {
 
 module.exports = {
   IMMINENT_CLASS_MINUTES,
+  getClassTimeZone,
   normalizeTimeString,
   parseSlotStart,
+  formatDateYmdInClassTimeZone,
   minutesUntilClassStart,
   isClassImminent,
   isClassInFuture,

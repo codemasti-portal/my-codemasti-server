@@ -1,21 +1,28 @@
 const MentorSlot = require("../models/MentorSlot");
 const Staff = require("../models/Staff");
+const Student = require("../models/Student");
+const Notification = require("../models/Notification");
 const { sendSimpleEmail } = require("./brevo");
 const { emitEventNotification } = require("./staffPanelNotification.service");
+const { studentsInBatchesFilterResolved } = require("../utils/student-batch-context");
+const {
+  parseSlotStart,
+  formatDateYmdInClassTimeZone,
+  getClassTimeZone,
+} = require("../utils/timetable-slot-start");
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 
 function parseSessionStart(dateValue, timeLabel) {
-  const base = new Date(dateValue);
-  if (Number.isNaN(base.getTime())) return null;
-  const raw = String(timeLabel || "").trim();
-  const m24 = raw.match(/([01]?\d|2[0-3]):([0-5]\d)/);
-  if (!m24) {
-    return new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0, 0);
-  }
-  const hh = Number(m24[1]);
-  const mm = Number(m24[2]);
-  return new Date(base.getFullYear(), base.getMonth(), base.getDate(), hh, mm, 0, 0);
+  const dateYmd = formatDateYmdInClassTimeZone(dateValue);
+  if (!dateYmd) return null;
+  return parseSlotStart(dateYmd, timeLabel);
+}
+
+function formatMentorWhen(startsAt, fallbackDate, fallbackTime) {
+  if (!startsAt) return `${new Date(fallbackDate).toLocaleDateString()} ${fallbackTime || ""}`.trim();
+  const tz = getClassTimeZone();
+  return startsAt.toLocaleString(undefined, { timeZone: tz });
 }
 
 async function sendMentorReminder(slot) {
@@ -31,10 +38,11 @@ async function sendMentorReminder(slot) {
   if (!recipients.length) return false;
 
   const startsAt = parseSessionStart(slot.date, slot.time);
-  const whenText = startsAt ? startsAt.toLocaleString() : `${new Date(slot.date).toLocaleDateString()} ${slot.time}`;
+  const whenText = formatMentorWhen(startsAt, slot.date, slot.time);
   const title = "Mentor session starts in 15 minutes";
   const message = `Your mentor session starts in 15 minutes at ${whenText}.`;
 
+  const slotId = String(slot._id);
   for (const recipient of recipients) {
     await emitEventNotification({
       audience: "individual",
@@ -43,6 +51,7 @@ async function sendMentorReminder(slot) {
       message: `${message} Meet link: ${slot.meet_link || "Not set"}`,
       category: "alerts",
       event_type: "mentor_session_reminder_15m",
+      dedupe_key: `mentor_session_reminder_15m:${slotId}:${String(recipient._id)}`,
     });
 
     if (recipient.email) {
@@ -74,6 +83,98 @@ async function sendMentorReminder(slot) {
   return true;
 }
 
+/** Same target resolution used at publish-time (admin-catalog.controller.js) — individual > batch/section. */
+async function resolveMentorSlotStudents(slot) {
+  const targetStudentIds = Array.isArray(slot?.target_student_ids)
+    ? slot.target_student_ids.map((id) => String(id)).filter(Boolean)
+    : [];
+  const targetBatchIds = Array.isArray(slot?.target_batch_ids)
+    ? slot.target_batch_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+  const targetSectionIds = Array.isArray(slot?.target_section_ids)
+    ? slot.target_section_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  if (targetStudentIds.length > 0) {
+    return Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id name email").lean();
+  }
+  if (targetBatchIds.length > 0) {
+    const filter = await studentsInBatchesFilterResolved(targetBatchIds, {
+      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
+    });
+    return Student.find(filter).select("_id name email").lean();
+  }
+  return [];
+}
+
+async function insertNotificationsIgnoringDuplicates(docs) {
+  if (!docs.length) return;
+  try {
+    await Notification.insertMany(docs, { ordered: false });
+  } catch (e) {
+    const writeErrors = e?.writeErrors || e?.result?.result?.writeErrors;
+    const isDupOnly = Array.isArray(writeErrors)
+      ? writeErrors.every((we) => (we?.code ?? we?.err?.code) === 11000)
+      : e?.code === 11000;
+    if (!isDupOnly) throw e;
+  }
+}
+
+/**
+ * Students were previously only ever told once, at publish time, that a mentor session exists —
+ * no reminder as it approaches (unlike regular classes, which get a 10-min "starts soon" ping).
+ * Mirrors that behavior for mentor sessions at the same 15-minute mark the mentor is reminded.
+ */
+async function sendStudentMentorReminder(slot, whenText) {
+  const students = await resolveMentorSlotStudents(slot);
+  if (!students.length) return;
+
+  const slotId = String(slot._id);
+  const meet = String(slot.meet_link || "").trim();
+  const title = "Mentor session starts in 15 minutes";
+  const body = `Your mentor session with ${slot.mentor_name} starts in 15 minutes (${whenText}).`;
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: `mentor-slot:${slotId}`,
+    meet_url: meet,
+    dedupe_key: `mentorSessionReminder15m:${slotId}:${String(s._id)}`,
+  }));
+  await insertNotificationsIgnoringDuplicates(docs);
+
+  if (!meet) return;
+  for (const s of students) {
+    const toEmail = String(s.email || "").trim();
+    if (!toEmail) continue;
+    try {
+      const subject = "Reminder: your mentor session starts in 15 minutes";
+      const htmlContent = `
+        <div style="font-family:Arial,sans-serif;color:#111">
+          <h2 style="margin:0 0 12px">Mentor session reminder</h2>
+          <p>Hello ${s.name || "Student"},</p>
+          <p>Your mentor session with <strong>${slot.mentor_name}</strong> starts in <strong>15 minutes</strong>.</p>
+          <ul>
+            <li><strong>Start:</strong> ${whenText}</li>
+            <li><strong>Meet link:</strong> ${meet}</li>
+          </ul>
+        </div>
+      `.trim();
+      const textContent = [
+        `Hello ${s.name || "Student"},`,
+        `Your mentor session with ${slot.mentor_name} starts in 15 minutes.`,
+        `Start: ${whenText}`,
+        `Meet link: ${meet}`,
+      ].join("\n");
+      await sendSimpleEmail({ toEmail, subject, htmlContent, textContent });
+    } catch (e) {
+      console.error("[STUDENT_MENTOR_REMINDER_EMAIL_FAILED]", e?.message || e);
+    }
+  }
+}
+
 async function sendMissingMeetLinkAlert(slot) {
   const mentorName = String(slot?.mentor_name || "").trim();
   if (!mentorName) return false;
@@ -92,7 +193,7 @@ async function sendMissingMeetLinkAlert(slot) {
     .lean();
 
   const startsAt = parseSessionStart(slot.date, slot.time);
-  const whenText = startsAt ? startsAt.toLocaleString() : `${new Date(slot.date).toLocaleDateString()} ${slot.time}`;
+  const whenText = formatMentorWhen(startsAt, slot.date, slot.time);
   const slotId = String(slot._id);
   const panelTitle = "Meet link missing — mentor session";
   const panelMessage = `Mentor session by ${mentorName} starts in ~15 minutes (${whenText}) but has no meet link.`;
@@ -164,7 +265,7 @@ async function runReminderTick() {
     date: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
   })
     .select(
-      "_id mentor_name date time meet_link publish_date reminder_15m_sent_at meet_link_missing_alert_15m_sent_at target_batch_ids target_section_ids"
+      "_id mentor_name date time meet_link publish_date reminder_15m_sent_at meet_link_missing_alert_15m_sent_at target_batch_ids target_section_ids target_student_ids"
     )
     .lean();
 
@@ -173,30 +274,59 @@ async function runReminderTick() {
     if (!startsAt) continue;
     if (!(startsAt > now && startsAt <= upper)) continue;
     const missingMeetLink = !String(slot.meet_link || "").trim();
+
     if (missingMeetLink && !slot.meet_link_missing_alert_15m_sent_at) {
-      try {
-        const alerted = await sendMissingMeetLinkAlert(slot);
-        if (alerted) {
+      // Claim first (atomic), then send — so an overlapping/retried cron tick can never
+      // double-fire this alert even if two ticks race on the same slot.
+      const claimed = await MentorSlot.updateOne(
+        { _id: slot._id, meet_link_missing_alert_15m_sent_at: null },
+        { $set: { meet_link_missing_alert_15m_sent_at: new Date() } }
+      );
+      if (claimed.modifiedCount === 1) {
+        try {
+          const alerted = await sendMissingMeetLinkAlert(slot);
+          // No mentor name to resolve recipients from — roll back so a later tick can
+          // retry once the slot is fixed, instead of silently skipping it forever.
+          if (!alerted) {
+            await MentorSlot.updateOne(
+              { _id: slot._id },
+              { $set: { meet_link_missing_alert_15m_sent_at: null } }
+            );
+          }
+        } catch (e) {
           await MentorSlot.updateOne(
-            { _id: slot._id, meet_link_missing_alert_15m_sent_at: null },
-            { $set: { meet_link_missing_alert_15m_sent_at: new Date() } }
-          );
+            { _id: slot._id },
+            { $set: { meet_link_missing_alert_15m_sent_at: null } }
+          ).catch(() => {});
+          console.error("[MENTOR_MISSING_LINK_ALERT_FAILED]", e?.message || e);
         }
-      } catch (e) {
-        console.error("[MENTOR_MISSING_LINK_ALERT_FAILED]", e?.message || e);
       }
       continue;
     }
-    try {
-      const sent = await sendMentorReminder(slot);
-      if (sent) {
-        await MentorSlot.updateOne(
-          { _id: slot._id, reminder_15m_sent_at: null },
-          { $set: { reminder_15m_sent_at: new Date() } }
-        );
+
+    if (!slot.reminder_15m_sent_at) {
+      const claimed = await MentorSlot.updateOne(
+        { _id: slot._id, reminder_15m_sent_at: null },
+        { $set: { reminder_15m_sent_at: new Date() } }
+      );
+      if (claimed.modifiedCount === 1) {
+        try {
+          const sent = await sendMentorReminder(slot);
+          if (!sent) {
+            await MentorSlot.updateOne({ _id: slot._id }, { $set: { reminder_15m_sent_at: null } });
+          }
+        } catch (e) {
+          await MentorSlot.updateOne({ _id: slot._id }, { $set: { reminder_15m_sent_at: null } }).catch(() => {});
+          console.error("[MENTOR_15M_REMINDER_FAILED]", e?.message || e);
+        }
+        // Best-effort: a failure here shouldn't roll back the mentor's reminder above (already
+        // sent/deduped) — dedupe_key makes this safe to simply retry-log rather than reclaim.
+        try {
+          await sendStudentMentorReminder(slot, formatMentorWhen(startsAt, slot.date, slot.time));
+        } catch (e) {
+          console.error("[STUDENT_MENTOR_REMINDER_FAILED]", e?.message || e);
+        }
       }
-    } catch (e) {
-      console.error("[MENTOR_15M_REMINDER_FAILED]", e?.message || e);
     }
   }
 }
@@ -213,4 +343,4 @@ function startMentorReminderScheduler() {
   return timer;
 }
 
-module.exports = { startMentorReminderScheduler };
+module.exports = { startMentorReminderScheduler, runReminderTick };
