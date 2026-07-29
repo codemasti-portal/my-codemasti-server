@@ -42,6 +42,8 @@ const batchListRead = [
 ];
 /** Batch hub: single batch + roster — admin panel only */
 const batchHubRead = adminPanelRead;
+/** Mentor self-service: read-only access to the mentor's OWN sessions only. */
+const mentorSelfRead = [requireStaffAuth, requireStaffRoles([ROLES.MENTOR])];
 const viewStudents = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const adminOnly = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
 
@@ -137,6 +139,7 @@ router.patch("/timetable/events/:id", ...manageTimetable, catalog.updateTimetabl
 router.delete("/timetable/events/:id", ...manageTimetable, catalog.deleteTimetableEvent);
 
 router.get("/mentor-slots", ...adminPanelRead, catalog.listMentorSlotsAdmin);
+router.get("/mentor-slots/mine", ...mentorSelfRead, catalog.listMentorSlotsMine);
 router.post("/mentor-slots", ...manageContent, catalog.createMentorSlot);
 router.get("/mentor-slots/:id", ...adminPanelRead, catalog.getMentorSlot);
 router.patch("/mentor-slots/:id", ...manageContent, catalog.updateMentorSlot);

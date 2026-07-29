@@ -25,7 +25,9 @@ const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
   buildMeetLinkUpdatedEmail,
+  buildClassCancelledEmail,
 } = require("../services/instructor-notifications.service");
+const { emitEventNotification } = require("../services/staffPanelNotification.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
@@ -90,7 +92,13 @@ async function resolveStaffDisplayName(req) {
   return "";
 }
 
-const { normalizeTimeString, minutesUntilClassStart, IMMINENT_CLASS_MINUTES, parseSlotStart } = require("../utils/timetable-slot-start");
+const {
+  normalizeTimeString,
+  minutesUntilClassStart,
+  IMMINENT_CLASS_MINUTES,
+  parseSlotStart,
+  formatDateYmdInClassTimeZone,
+} = require("../utils/timetable-slot-start");
 
 function weekdayFromDateString(dateStr) {
   const raw = String(dateStr || "").trim();
@@ -105,7 +113,8 @@ function weekdayFromDateString(dateStr) {
 /**
  * Student timetable notifications: schedule fan-out or imminent class reminder (never both).
  * - created/updated >15 min away → "New class scheduled" / "Class schedule updated"
- * - created/updated ≤15 min away → single "Class starts soon" reminder (marks 10m sent)
+ * - created/updated ≤15 min away → single "Class starts soon" reminder
+ *   (marks 10m sent only when Meet link is present; otherwise cron can still send join-ready reminder later)
  * - deleted → "Class cancelled" (always)
  */
 async function handleStudentTimetableNotifications(slot, action) {
@@ -119,7 +128,9 @@ async function handleStudentTimetableNotifications(slot, action) {
     const whenText = fmtWhenLocal(slot.class_date, slot.time);
     await notifyStudentsClassStartingSoon({ slot, minutesUntil: mins, whenText });
     const slotId = slot._id || slot.id;
-    if (slotId) {
+    const meet = String(slot.meet_link || "").trim();
+    // Match scheduler: only mark 10m sent when Meet exists so cron can send join reminder after link is added.
+    if (slotId && meet) {
       await TimetableSlot.updateOne(
         { _id: slotId },
         { $set: { student_reminder_10m_sent_at: new Date() } }
@@ -155,7 +166,8 @@ async function fanoutMentorSlotNotification(slot) {
   if (!students.length) return;
   const title = "New mentor session published";
   const body = `${slot.mentor_name} mentor session on ${new Date(slot.date).toLocaleDateString()} at ${slot.time}.`;
-  const refId = `mentor-slot:${String(slot._id)}`;
+  const slotId = String(slot._id);
+  const refId = `mentor-slot:${slotId}`;
   const docs = students.map((s) => ({
     student_id: s._id,
     type: "system",
@@ -163,8 +175,107 @@ async function fanoutMentorSlotNotification(slot) {
     body,
     read_at: null,
     ref_id: refId,
+    dedupe_key: `mentorSlotPublished:${slotId}:${String(s._id)}`,
   }));
-  await Notification.insertMany(docs, { ordered: false });
+  await insertNotificationsIgnoringDuplicates(docs);
+}
+
+/**
+ * Bulk-insert Notification docs, tolerating duplicate dedupe_key errors (e.g. if a fan-out
+ * runs twice for the same slot/student). Only rethrows genuinely unexpected errors.
+ */
+async function insertNotificationsIgnoringDuplicates(docs) {
+  if (!docs.length) return;
+  try {
+    await Notification.insertMany(docs, { ordered: false });
+  } catch (e) {
+    const writeErrors = e?.writeErrors || e?.result?.result?.writeErrors;
+    const isDupOnly = Array.isArray(writeErrors)
+      ? writeErrors.every((we) => (we?.code ?? we?.err?.code) === 11000)
+      : e?.code === 11000;
+    if (!isDupOnly) throw e;
+  }
+}
+
+/** Mentor session cancellation: tell the targeted students (in-app) and the mentor (panel + email). */
+async function notifyMentorSlotCancelled(slot) {
+  const slotId = String(slot._id);
+  const whenText = `${new Date(slot.date).toLocaleDateString()} at ${slot.time}`;
+
+  const targetStudentIds = Array.isArray(slot?.target_student_ids)
+    ? slot.target_student_ids.map((id) => String(id)).filter(Boolean)
+    : [];
+  const targetBatchIds = Array.isArray(slot?.target_batch_ids)
+    ? slot.target_batch_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+  const targetSectionIds = Array.isArray(slot?.target_section_ids)
+    ? slot.target_section_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  let students = [];
+  if (targetStudentIds.length > 0) {
+    students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
+  } else if (targetBatchIds.length > 0) {
+    const filter = await studentsInBatchesFilterResolved(targetBatchIds, {
+      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
+    });
+    students = await Student.find(filter).select("_id").lean();
+  }
+  if (students.length) {
+    const title = "Mentor session cancelled";
+    const body = `${slot.mentor_name} mentor session on ${whenText} was cancelled.`;
+    const refId = `mentor-slot:${slotId}`;
+    const docs = students.map((s) => ({
+      student_id: s._id,
+      type: "system",
+      title,
+      body,
+      read_at: null,
+      ref_id: refId,
+      dedupe_key: `mentorSlotCancelled:${slotId}:${String(s._id)}`,
+    }));
+    await insertNotificationsIgnoringDuplicates(docs);
+  }
+
+  const mentorName = String(slot?.mentor_name || "").trim();
+  if (!mentorName) return;
+  const recipients = await Staff.find({
+    role: { $in: ["mentor", "instructor"] },
+    is_active: true,
+    name: mentorName,
+  })
+    .select("_id name email")
+    .lean();
+  for (const r of recipients) {
+    await emitEventNotification({
+      audience: "individual",
+      recipient_id: String(r._id),
+      title: "Mentor session cancelled",
+      message: `Your mentor session on ${whenText} was cancelled.`,
+      category: "alerts",
+      event_type: "mentor_session_cancelled",
+      dedupe_key: `mentor_session_cancelled:${slotId}:${String(r._id)}`,
+    });
+    if (r.email) {
+      try {
+        const subject = `Mentor session cancelled (${whenText})`;
+        const htmlContent = `
+          <div style="font-family:Arial,sans-serif;color:#111">
+            <h2 style="margin:0 0 12px">Mentor session cancelled</h2>
+            <p>Hello ${r.name || mentorName},</p>
+            <p>Your mentor session scheduled for <strong>${whenText}</strong> has been cancelled.</p>
+          </div>
+        `.trim();
+        const textContent = [
+          `Hello ${r.name || mentorName},`,
+          `Your mentor session scheduled for ${whenText} has been cancelled.`,
+        ].join("\n");
+        await sendSimpleEmail({ toEmail: r.email, subject, htmlContent, textContent });
+      } catch (e) {
+        console.error("[MENTOR_SESSION_CANCELLED_EMAIL_FAILED]", e?.message || e);
+      }
+    }
+  }
 }
 
 async function notifyMentorPublishEmail(slot) {
@@ -1540,6 +1651,19 @@ async function deleteTimetableSlot(req, res) {
   const r = await TimetableSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Slot not found");
   await handleStudentTimetableNotifications(doc, "deleted");
+  // Instructor was previously never told their class was cancelled — only students were.
+  try {
+    await notifyInstructorsForSlot({
+      slot: doc,
+      event_type: "timetable_class_cancelled",
+      title: "Class cancelled",
+      message: `${doc.subject}${doc.topic ? ` — ${doc.topic}` : ""} on ${fmtWhenLocal(doc.class_date, doc.time)} was cancelled.`,
+      action_url: "/dashboard/instructor/timetable",
+      emailBuilder: ({ staff }) => buildClassCancelledEmail({ staffName: staff?.name, slot: doc }),
+    });
+  } catch (e) {
+    console.error("[INSTRUCTOR_CLASS_CANCELLED_NOTIFY_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 
@@ -1642,10 +1766,32 @@ async function deleteTimetableEvent(req, res) {
 /** —— Mentor slots —— */
 async function listMentorSlotsAdmin(req, res) {
   const { page, limit, skip } = paginate(req);
-  const [items, total] = await Promise.all([
-    MentorSlot.find({}).sort({ date: 1 }).skip(skip).limit(limit).lean(),
-    MentorSlot.countDocuments({}),
-  ]);
+  const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
+  const month = Number(req.query.month || 0);
+  let year = Number(req.query.year || 0);
+  if (month >= 1 && month <= 12 && !(year >= 1900 && year <= 9999)) {
+    year = new Date().getFullYear();
+  }
+  const filter = {};
+  if (batch_id) filter.target_batch_ids = batch_id;
+
+  // `date` is a real timestamp (unlike TimetableSlot.class_date, a plain YYYY-MM-DD string), so a
+  // month filter has to be evaluated in the class's timezone rather than as a naive UTC regex/range
+  // — otherwise a late-evening IST session near month-end could get bucketed into the wrong month.
+  let items;
+  let total;
+  if (year >= 1900) {
+    const prefix = month >= 1 && month <= 12 ? `${year}-${String(month).padStart(2, "0")}` : `${String(year)}-`;
+    const all = await MentorSlot.find(filter).sort({ date: 1 }).lean();
+    const matched = all.filter((m) => formatDateYmdInClassTimeZone(m.date).startsWith(prefix));
+    total = matched.length;
+    items = matched.slice(skip, skip + limit);
+  } else {
+    [items, total] = await Promise.all([
+      MentorSlot.find(filter).sort({ date: 1 }).skip(skip).limit(limit).lean(),
+      MentorSlot.countDocuments(filter),
+    ]);
+  }
   return sendSuccess(
     res,
     items.map((m) => ({
@@ -1667,6 +1813,52 @@ async function listMentorSlotsAdmin(req, res) {
     })),
     "",
     { page, limit, total }
+  );
+}
+
+/**
+ * Mentor self-service: read-only list of the caller's OWN sessions (matched by mentor_name,
+ * same identity match used by the reminder scheduler / notifications). No CRUD — mirrors the
+ * read-only instructor timetable pattern.
+ */
+async function listMentorSlotsMine(req, res) {
+  const ownName = await resolveStaffDisplayName(req);
+  if (!ownName) return sendSuccess(res, []);
+
+  const schema = z.object({
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  });
+  const query = schema.parse(req.query);
+  const now = new Date();
+  const fromDefault = new Date(now);
+  fromDefault.setDate(fromDefault.getDate() - 30);
+  const toDefault = new Date(now);
+  toDefault.setDate(toDefault.getDate() + 120);
+  const from = query.from ? new Date(`${query.from}T00:00:00.000Z`) : fromDefault;
+  const to = query.to ? new Date(`${query.to}T23:59:59.999Z`) : toDefault;
+
+  const filter = {
+    mentor_name: { $regex: new RegExp(`^${escapeRegex(ownName)}$`, "i") },
+    date: { $gte: from, $lte: to },
+  };
+  const items = await MentorSlot.find(filter).sort({ date: 1 }).limit(300).lean();
+  return sendSuccess(
+    res,
+    items.map((m) => ({
+      id: String(m._id),
+      subject: m.subject,
+      mentor_name: m.mentor_name,
+      mentor_info: m.mentor_info || "",
+      date: m.date,
+      publish_date: m.publish_date || null,
+      time: m.time,
+      duration_minutes: Number(m.duration_minutes || 60),
+      meet_link: m.meet_link || "",
+      target_batch_ids: Array.isArray(m.target_batch_ids) ? m.target_batch_ids : [],
+      target_section_ids: Array.isArray(m.target_section_ids) ? m.target_section_ids : [],
+      target_student_count: Array.isArray(m.target_student_ids) ? m.target_student_ids.length : 0,
+    }))
   );
 }
 
@@ -1875,8 +2067,17 @@ async function provisionTimetableGoogleMeet(req, res) {
 }
 
 async function deleteMentorSlot(req, res) {
+  const doc = await MentorSlot.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
   const r = await MentorSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
+  // Previously deleting a mentor slot notified nobody at all — neither the targeted students
+  // nor the mentor who may have already been told (and emailed) about the original session.
+  try {
+    await notifyMentorSlotCancelled(doc);
+  } catch (e) {
+    console.error("[MENTOR_SLOT_CANCELLED_NOTIFY_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 
@@ -1916,6 +2117,7 @@ module.exports = {
   updateTimetableEvent,
   deleteTimetableEvent,
   listMentorSlotsAdmin,
+  listMentorSlotsMine,
   getMentorSlot,
   createMentorSlot,
   updateMentorSlot,

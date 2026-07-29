@@ -3,24 +3,13 @@ const MentorSlot = require("../models/MentorSlot");
 const MentorSessionJoin = require("../models/MentorSessionJoin");
 const Student = require("../models/Student");
 const { scopeStudentToBatch, membershipKeysOr, enrollmentBatchIdsForStudent } = require("../utils/student-batch-context");
+const { parseSlotStart, formatDateYmdInClassTimeZone } = require("../utils/timetable-slot-start");
 
 function getSessionStartMs(slot) {
-  const baseDate = new Date(slot?.date);
-  if (Number.isNaN(baseDate.getTime())) return NaN;
-  const rawTime = String(slot?.time || "").trim();
-  const m24 = rawTime.match(/([01]?\d|2[0-3]):([0-5]\d)/);
-  if (!m24) return baseDate.getTime();
-  const hh = Number(m24[1]);
-  const mm = Number(m24[2]);
-  return new Date(
-    baseDate.getFullYear(),
-    baseDate.getMonth(),
-    baseDate.getDate(),
-    hh,
-    mm,
-    0,
-    0
-  ).getTime();
+  const dateYmd = formatDateYmdInClassTimeZone(slot?.date);
+  if (!dateYmd) return NaN;
+  const startsAt = parseSlotStart(dateYmd, slot?.time);
+  return startsAt ? startsAt.getTime() : NaN;
 }
 
 /** Mentor-slot $or clauses for a student's batches (read-switch: one batch in legacy, full set in M:N). */

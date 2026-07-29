@@ -225,6 +225,36 @@ function buildMeetLinkUpdatedEmail({ staffName, slot }) {
   return { subject, htmlContent, textContent };
 }
 
+function buildClassCancelledEmail({ staffName, slot }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Class cancelled: ${slot.subject || "Class"} (${whenText})`;
+  const timetableUrl = portalLink("/timetable");
+  const htmlContent = renderEmailTemplate({
+    title: "Class cancelled",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: "The following class has been removed from the schedule.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+    ],
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "The following class has been cancelled.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `When: ${whenText}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
 function buildResourceUploadedEmail({ staffName, slot, kind }) {
   const whenText = fmtWhenLocal(slot.class_date, slot.time);
   const isNotes = kind === "notes";
@@ -299,6 +329,7 @@ module.exports = {
   buildClassStart10mEmail,
   buildClassStart60mEmail,
   buildMeetLinkUpdatedEmail,
+  buildClassCancelledEmail,
   buildResourceUploadedEmail,
   fmtWhenLocal,
   resolveInstructorRecipientsByName,

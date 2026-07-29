@@ -5,7 +5,11 @@ const {
   buildClassStart60mEmail: buildInstructorClassStart60mEmail,
 } = require("./instructor-notifications.service");
 const { emitEventNotification } = require("./staffPanelNotification.service");
-const { parseSlotStart, buildClassStartReminderCopy } = require("../utils/timetable-slot-start");
+const {
+  parseSlotStart,
+  buildClassStartReminderCopy,
+  formatDateYmdInClassTimeZone,
+} = require("../utils/timetable-slot-start");
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 
@@ -15,16 +19,15 @@ async function runReminderTick() {
   const sixtyMin = new Date(now.getTime() + 60 * 60 * 1000);
   const livePast = new Date(now.getTime() - 5 * 60 * 1000); // class_live fires up to 5 min after start
 
-  // Pull just enough candidates: today and tomorrow (handles near-midnight).
-  const today = new Date(now);
-  const tomorrow = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(0, 0, 0, 0);
-
-  const fmtYMD = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const dates = [fmtYMD(today), fmtYMD(tomorrow)];
+  // Pull just enough candidates: yesterday/today/tomorrow IN THE CLASS TIMEZONE (not server-local —
+  // Vercel runs in UTC, and CLASS_TIMEZONE may differ, so the "current day" there can be a
+  // different calendar date than the server's). Includes yesterday too so a class-timezone
+  // "today" that is the server's "yesterday" (timezone behind UTC) is never missed.
+  const dates = [
+    formatDateYmdInClassTimeZone(new Date(now.getTime() - 24 * 60 * 60 * 1000)),
+    formatDateYmdInClassTimeZone(now),
+    formatDateYmdInClassTimeZone(new Date(now.getTime() + 24 * 60 * 60 * 1000)),
+  ].filter(Boolean);
 
   const candidates = await TimetableSlot.find({
     class_date: { $in: dates },
