@@ -3,9 +3,11 @@ const app = require("./app");
 const { connectDb } = require("./config/db");
 const { startMentorReminderScheduler } = require("./services/mentor-reminder.scheduler");
 const { startTimetableClassReminderScheduler } = require("./services/timetable-class-reminder.scheduler");
+const { startEventReminderScheduler } = require("./services/timetable-event-reminder.scheduler");
 const { startAssignmentReleaseNotificationScheduler } = require("./services/assignment-release-notification.scheduler");
 const { startNotificationCleanupScheduler } = require("./services/notification-cleanup.scheduler");
 const { startMonthlyInvoiceScheduler } = require("./services/monthly-invoice.scheduler");
+const { runMentorPublishSweepTick } = require("./services/mentor-notification.service");
 
 const PORT = process.env.PORT || 5001;
 
@@ -14,6 +16,14 @@ async function bootstrap() {
     await connectDb();
     startMentorReminderScheduler();
     startTimetableClassReminderScheduler();
+    startEventReminderScheduler();
+    // Mentor publish-sweep: future publish_date slots that were never fanout'd.
+    setInterval(() => {
+      runMentorPublishSweepTick().catch((e) => {
+        console.error("[MENTOR_PUBLISH_SWEEP_TICK_FAILED]", e?.message || e);
+      });
+    }, 60 * 1000);
+    runMentorPublishSweepTick().catch(() => {});
     startAssignmentReleaseNotificationScheduler();
     startNotificationCleanupScheduler();
     startMonthlyInvoiceScheduler();

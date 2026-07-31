@@ -211,19 +211,24 @@ async function events(req, res) {
     to: z.string().min(10),
   });
   const query = schema.parse(req.query);
-  const student = await Student.findById(req.user.sub).select("batch_id enrollment_number").lean();
+  const student = await Student.findById(req.user.sub).select("batch_id section_id enrollment_number").lean();
   await scopeStudentToBatch(req, student);
   const batchKeys = catalogBatchIdsFromStudentLean(student);
+  const sectionId = String(student?.section_id || "").trim().toLowerCase();
 
   const fromDate = new Date(`${query.from}T00:00:00.000Z`);
   const toDate = new Date(`${query.to}T23:59:59.999Z`);
 
-  const filter = {
-    date: { $gte: fromDate, $lte: toDate },
-  };
+  const clauses = [{ date: { $gte: fromDate, $lte: toDate } }];
   if (batchKeys.length) {
-    filter.$or = [{ batch_id: "" }, { batch_id: { $in: batchKeys } }];
+    clauses.push({ $or: [{ batch_id: "" }, { batch_id: { $in: batchKeys } }] });
   }
+  if (sectionId) {
+    clauses.push({
+      $or: [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: sectionId }],
+    });
+  }
+  const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
 
   const rows = await TimetableEvent.find(filter).sort({ date: 1 }).lean();
 
@@ -234,6 +239,10 @@ async function events(req, res) {
     description: event.description,
     date: event.date,
     batch_id: event.batch_id || null,
+    all_day: event.all_day !== false,
+    time: event.time || "",
+    duration_minutes: Number(event.duration_minutes || 60),
+    meet_link: event.meet_link || "",
   }));
 
   return sendSuccess(res, data);

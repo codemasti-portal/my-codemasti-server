@@ -5,6 +5,10 @@ const { sendSuccess, sendError } = require("../utils/response");
 const Contest = require("../models/Contest");
 const ScorecardTest = require("../models/ScorecardTest");
 const { toAdminContestRow, loadTestsMap, normalizeBatchId } = require("../services/contest.service");
+const {
+  fanoutContestPublished,
+  fanoutContestCancelled,
+} = require("../services/contest-notification.service");
 
 const urlSchema = z.string().trim().url().max(2000).refine((u) => /^https:\/\//i.test(u), {
   message: "URL must use https://",
@@ -75,6 +79,9 @@ async function listContests(req, res) {
     batch_id: z.string().optional(),
     test_id: z.string().optional(),
     published_only: z.enum(["0", "1", "true", "false"]).optional(),
+    // Date-only range filter on start_at, e.g. for "this batch's contests this month" (monthly PDF).
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   });
   const parsed = schema.safeParse(req.query);
   const q = parsed.success ? parsed.data : {};
@@ -85,6 +92,12 @@ async function listContests(req, res) {
   }
   if (/^(1|true)$/i.test(String(q.published_only || ""))) {
     filter.is_published = true;
+  }
+  if (q.from && q.to) {
+    filter.start_at = {
+      $gte: new Date(`${q.from}T00:00:00.000Z`),
+      $lte: new Date(`${q.to}T23:59:59.999Z`),
+    };
   }
 
   const rows = await Contest.find(filter).sort({ start_at: -1, createdAt: -1 }).lean();
@@ -136,6 +149,14 @@ async function createContest(req, res) {
     updated_by_staff_id: req.staff?.sub ? new mongoose.Types.ObjectId(req.staff.sub) : null,
   });
 
+  if (isPublished) {
+    try {
+      await fanoutContestPublished(doc.toObject());
+    } catch (e) {
+      console.error("[CONTEST_NOTIFY_CREATE_FAILED]", e?.message || e);
+    }
+  }
+
   return sendSuccess(res, toAdminContestRow(doc.toObject(), test, new Date()), "Contest created");
 }
 
@@ -178,6 +199,13 @@ async function bulkCreateContests(req, res) {
       created_by_staff_id: staffId,
       updated_by_staff_id: staffId,
     });
+    if (isPublished) {
+      try {
+        await fanoutContestPublished(doc.toObject());
+      } catch (e) {
+        console.error("[CONTEST_NOTIFY_BULK_FAILED]", e?.message || e);
+      }
+    }
     created.push(toAdminContestRow(doc.toObject(), test, now));
   }
 
@@ -196,6 +224,8 @@ async function patchContest(req, res) {
   const body = parsed.data;
   const doc = await Contest.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Contest not found");
+
+  const wasPublished = Boolean(doc.is_published);
 
   const show_from = body.show_from !== undefined ? body.show_from : doc.show_from;
   const start_at = body.start_at !== undefined ? body.start_at : doc.start_at;
@@ -222,7 +252,6 @@ async function patchContest(req, res) {
   if (body.platform_url !== undefined) doc.platform_url = body.platform_url.trim();
   if (body.event_group_id !== undefined) doc.event_group_id = body.event_group_id;
   if (body.is_published !== undefined) {
-    const wasPublished = doc.is_published;
     doc.is_published = body.is_published;
     if (body.is_published && !wasPublished) doc.published_at = new Date();
     if (!body.is_published) doc.published_at = null;
@@ -230,6 +259,14 @@ async function patchContest(req, res) {
 
   if (req.staff?.sub) doc.updated_by_staff_id = new mongoose.Types.ObjectId(req.staff.sub);
   await doc.save();
+
+  if (!wasPublished && doc.is_published) {
+    try {
+      await fanoutContestPublished(doc.toObject());
+    } catch (e) {
+      console.error("[CONTEST_NOTIFY_PUBLISH_FAILED]", e?.message || e);
+    }
+  }
 
   const test = await ScorecardTest.findById(doc.test_id).lean();
   return sendSuccess(res, toAdminContestRow(doc.toObject(), test, new Date()), "Contest updated");
@@ -239,8 +276,15 @@ async function deleteContest(req, res) {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return sendError(res, 400, "INVALID_ID", "Invalid contest id");
   }
+  const doc = await Contest.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Contest not found");
   const r = await Contest.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Contest not found");
+  try {
+    await fanoutContestCancelled(doc);
+  } catch (e) {
+    console.error("[CONTEST_NOTIFY_DELETE_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: req.params.id }, "Contest deleted");
 }
 

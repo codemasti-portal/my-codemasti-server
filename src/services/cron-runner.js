@@ -1,5 +1,7 @@
 const { runReminderTick } = require("./timetable-class-reminder.scheduler");
 const { runReminderTick: runMentorReminderTick } = require("./mentor-reminder.scheduler");
+const { runMentorPublishSweepTick } = require("./mentor-notification.service");
+const { runEventReminderTick } = require("./timetable-event-reminder.scheduler");
 const {
   runTick: runAssignmentReleaseTick,
   backfillReleaseNotificationFlag,
@@ -34,6 +36,18 @@ async function runScheduledTicks() {
     results.mentorReminders = "ok";
   } catch (e) {
     results.mentorReminders = `error: ${e?.message || e}`;
+  }
+  try {
+    await runMentorPublishSweepTick();
+    results.mentorPublishSweep = "ok";
+  } catch (e) {
+    results.mentorPublishSweep = `error: ${e?.message || e}`;
+  }
+  try {
+    await runEventReminderTick();
+    results.eventReminders = "ok";
+  } catch (e) {
+    results.eventReminders = `error: ${e?.message || e}`;
   }
   try {
     await backfillReleaseNotificationFlag();
