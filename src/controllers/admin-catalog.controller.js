@@ -12,7 +12,6 @@ const TimetableEvent = require("../models/TimetableEvent");
 const MentorSlot = require("../models/MentorSlot");
 const Student = require("../models/Student");
 const Staff = require("../models/Staff");
-const Notification = require("../models/Notification");
 const { sendSimpleEmail } = require("../services/brevo");
 const {
   notifyStudentsForSlot,
@@ -28,6 +27,10 @@ const {
   buildClassCancelledEmail,
 } = require("../services/instructor-notifications.service");
 const { emitEventNotification } = require("../services/staffPanelNotification.service");
+const {
+  fanoutMentorSlotNotification,
+  notifyMentorSlotCancelled,
+} = require("../services/mentor-notification.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
@@ -41,6 +44,16 @@ const {
   arenaDocTouchesAllowedBatches,
 } = require("../utils/instructorBatchScope");
 const { validateBatchSubject, invalidSubjectMessage } = require("../utils/catalog-subjects");
+const {
+  parseSlotStart,
+  formatDateYmdInClassTimeZone,
+  minutesUntilClassStart,
+  IMMINENT_CLASS_MINUTES,
+  normalizeTimeString,
+} = require("../utils/timetable-slot-start");
+
+/** Suppress "New class/event scheduled" spam when the item starts more than this many hours away. */
+const SCHEDULE_NOTICE_MAX_HOURS_AHEAD = 6;
 
 /**
  * Single-source-of-truth subject guard: a provided subject must match the targeted batch(es) catalog
@@ -92,14 +105,6 @@ async function resolveStaffDisplayName(req) {
   return "";
 }
 
-const {
-  normalizeTimeString,
-  minutesUntilClassStart,
-  IMMINENT_CLASS_MINUTES,
-  parseSlotStart,
-  formatDateYmdInClassTimeZone,
-} = require("../utils/timetable-slot-start");
-
 function weekdayFromDateString(dateStr) {
   const raw = String(dateStr || "").trim();
   if (!raw) return "";
@@ -112,7 +117,8 @@ function weekdayFromDateString(dateStr) {
 
 /**
  * Student timetable notifications: schedule fan-out or imminent class reminder (never both).
- * - created/updated >15 min away → "New class scheduled" / "Class schedule updated"
+ * - created/updated within SCHEDULE_NOTICE_MAX_HOURS_AHEAD and >15 min away → "New class scheduled" / "Class schedule updated"
+ * - created/updated > SCHEDULE_NOTICE_MAX_HOURS_AHEAD away → no schedule notice (avoids bulk-planning spam)
  * - created/updated ≤15 min away → single "Class starts soon" reminder
  *   (marks 10m sent only when Meet link is present; otherwise cron can still send join-ready reminder later)
  * - deleted → "Class cancelled" (always)
@@ -139,143 +145,12 @@ async function handleStudentTimetableNotifications(slot, action) {
     return;
   }
 
+  // Bulk month-planning creates dozens of far-future slots; skip "scheduled" notices for those.
+  if (mins !== null && mins > SCHEDULE_NOTICE_MAX_HOURS_AHEAD * 60) {
+    return;
+  }
+
   await notifyStudentsTimetableSchedule({ slot, action });
-}
-
-async function fanoutMentorSlotNotification(slot) {
-  const targetStudentIds = Array.isArray(slot?.target_student_ids)
-    ? slot.target_student_ids.map((id) => String(id)).filter(Boolean)
-    : [];
-  const targetBatchIds = Array.isArray(slot?.target_batch_ids)
-    ? slot.target_batch_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
-    : [];
-  const targetSectionIds = Array.isArray(slot?.target_section_ids)
-    ? slot.target_section_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
-    : [];
-
-  let students = [];
-  if (targetStudentIds.length > 0) {
-    students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
-  } else if (targetBatchIds.length > 0) {
-    const filter = await studentsInBatchesFilterResolved(targetBatchIds, {
-      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
-    });
-    students = await Student.find(filter).select("_id").lean();
-  }
-
-  if (!students.length) return;
-  const title = "New mentor session published";
-  const body = `${slot.mentor_name} mentor session on ${new Date(slot.date).toLocaleDateString()} at ${slot.time}.`;
-  const slotId = String(slot._id);
-  const refId = `mentor-slot:${slotId}`;
-  const docs = students.map((s) => ({
-    student_id: s._id,
-    type: "system",
-    title,
-    body,
-    read_at: null,
-    ref_id: refId,
-    dedupe_key: `mentorSlotPublished:${slotId}:${String(s._id)}`,
-  }));
-  await insertNotificationsIgnoringDuplicates(docs);
-}
-
-/**
- * Bulk-insert Notification docs, tolerating duplicate dedupe_key errors (e.g. if a fan-out
- * runs twice for the same slot/student). Only rethrows genuinely unexpected errors.
- */
-async function insertNotificationsIgnoringDuplicates(docs) {
-  if (!docs.length) return;
-  try {
-    await Notification.insertMany(docs, { ordered: false });
-  } catch (e) {
-    const writeErrors = e?.writeErrors || e?.result?.result?.writeErrors;
-    const isDupOnly = Array.isArray(writeErrors)
-      ? writeErrors.every((we) => (we?.code ?? we?.err?.code) === 11000)
-      : e?.code === 11000;
-    if (!isDupOnly) throw e;
-  }
-}
-
-/** Mentor session cancellation: tell the targeted students (in-app) and the mentor (panel + email). */
-async function notifyMentorSlotCancelled(slot) {
-  const slotId = String(slot._id);
-  const whenText = `${new Date(slot.date).toLocaleDateString()} at ${slot.time}`;
-
-  const targetStudentIds = Array.isArray(slot?.target_student_ids)
-    ? slot.target_student_ids.map((id) => String(id)).filter(Boolean)
-    : [];
-  const targetBatchIds = Array.isArray(slot?.target_batch_ids)
-    ? slot.target_batch_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
-    : [];
-  const targetSectionIds = Array.isArray(slot?.target_section_ids)
-    ? slot.target_section_ids.map((id) => String(id).trim().toLowerCase()).filter(Boolean)
-    : [];
-
-  let students = [];
-  if (targetStudentIds.length > 0) {
-    students = await Student.find({ _id: { $in: targetStudentIds }, role: "student" }).select("_id").lean();
-  } else if (targetBatchIds.length > 0) {
-    const filter = await studentsInBatchesFilterResolved(targetBatchIds, {
-      sectionIds: targetSectionIds.length > 0 ? targetSectionIds : undefined,
-    });
-    students = await Student.find(filter).select("_id").lean();
-  }
-  if (students.length) {
-    const title = "Mentor session cancelled";
-    const body = `${slot.mentor_name} mentor session on ${whenText} was cancelled.`;
-    const refId = `mentor-slot:${slotId}`;
-    const docs = students.map((s) => ({
-      student_id: s._id,
-      type: "system",
-      title,
-      body,
-      read_at: null,
-      ref_id: refId,
-      dedupe_key: `mentorSlotCancelled:${slotId}:${String(s._id)}`,
-    }));
-    await insertNotificationsIgnoringDuplicates(docs);
-  }
-
-  const mentorName = String(slot?.mentor_name || "").trim();
-  if (!mentorName) return;
-  const recipients = await Staff.find({
-    role: { $in: ["mentor", "instructor"] },
-    is_active: true,
-    name: mentorName,
-  })
-    .select("_id name email")
-    .lean();
-  for (const r of recipients) {
-    await emitEventNotification({
-      audience: "individual",
-      recipient_id: String(r._id),
-      title: "Mentor session cancelled",
-      message: `Your mentor session on ${whenText} was cancelled.`,
-      category: "alerts",
-      event_type: "mentor_session_cancelled",
-      dedupe_key: `mentor_session_cancelled:${slotId}:${String(r._id)}`,
-    });
-    if (r.email) {
-      try {
-        const subject = `Mentor session cancelled (${whenText})`;
-        const htmlContent = `
-          <div style="font-family:Arial,sans-serif;color:#111">
-            <h2 style="margin:0 0 12px">Mentor session cancelled</h2>
-            <p>Hello ${r.name || mentorName},</p>
-            <p>Your mentor session scheduled for <strong>${whenText}</strong> has been cancelled.</p>
-          </div>
-        `.trim();
-        const textContent = [
-          `Hello ${r.name || mentorName},`,
-          `Your mentor session scheduled for ${whenText} has been cancelled.`,
-        ].join("\n");
-        await sendSimpleEmail({ toEmail: r.email, subject, htmlContent, textContent });
-      } catch (e) {
-        console.error("[MENTOR_SESSION_CANCELLED_EMAIL_FAILED]", e?.message || e);
-      }
-    }
-  }
 }
 
 async function notifyMentorPublishEmail(slot) {
@@ -1671,8 +1546,19 @@ async function deleteTimetableSlot(req, res) {
 async function listTimetableEvents(req, res) {
   const fromStr = String(req.query.from || "").trim();
   const toStr = String(req.query.to || "").trim();
-  const rangeMode =
+  const explicitRangeMode =
     /^\d{4}-\d{2}-\d{2}$/.test(fromStr) && /^\d{4}-\d{2}-\d{2}$/.test(toStr);
+
+  const batchId = String(req.query.batch_id || "").trim().toLowerCase();
+  const sectionId = String(req.query.section_id || "").trim().toLowerCase();
+  const month = Number(req.query.month || 0);
+  let year = Number(req.query.year || 0);
+  if (month >= 1 && month <= 12 && !(year >= 1900 && year <= 9999)) {
+    year = new Date().getFullYear();
+  }
+  // Event `date` is stored as UTC midnight of the picked calendar day (see createTimetableEvent),
+  // so month bucketing can use plain UTC month boundaries — no class-timezone conversion needed.
+  const monthRangeMode = !explicitRangeMode && year >= 1900;
 
   const instructorBatches = await getInstructorAssignedBatchIds(req);
   const batchScopeFilter =
@@ -1688,18 +1574,39 @@ async function listTimetableEvents(req, res) {
           }
       : {};
 
-  if (rangeMode) {
-    const fromDate = new Date(`${fromStr}T00:00:00.000Z`);
-    const toDate = new Date(`${toStr}T23:59:59.999Z`);
-    const evFilter = { ...batchScopeFilter, date: { $gte: fromDate, $lte: toDate } };
+  const clauses = [];
+  if (Object.keys(batchScopeFilter).length) clauses.push(batchScopeFilter);
+  // batch_id "" on an event means "all batches", so a batch-scoped query still matches it.
+  if (batchId) {
+    clauses.push({ $or: [{ batch_id: batchId }, { batch_id: "" }, { batch_id: { $exists: false } }] });
+  }
+  if (sectionId) {
+    clauses.push({ $or: [{ section_id: "" }, { section_id: { $exists: false } }, { section_id: sectionId }] });
+  }
+
+  if (explicitRangeMode || monthRangeMode) {
+    let fromDate;
+    let toDate;
+    if (explicitRangeMode) {
+      fromDate = new Date(`${fromStr}T00:00:00.000Z`);
+      toDate = new Date(`${toStr}T23:59:59.999Z`);
+    } else {
+      const mm = month >= 1 && month <= 12 ? month : 1;
+      const lastMonth = month >= 1 && month <= 12 ? month : 12;
+      fromDate = new Date(Date.UTC(year, mm - 1, 1, 0, 0, 0, 0));
+      toDate = new Date(Date.UTC(year, lastMonth, 0, 23, 59, 59, 999));
+    }
+    clauses.push({ date: { $gte: fromDate, $lte: toDate } });
+    const evFilter = clauses.length === 1 ? clauses[0] : { $and: clauses };
     const items = await TimetableEvent.find(evFilter).sort({ date: 1 }).limit(500).lean();
     return sendSuccess(res, items.map((e) => ({ id: String(e._id), ...e })));
   }
 
   const { page, limit, skip } = paginate(req);
+  const pageFilter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
   const [items, total] = await Promise.all([
-    TimetableEvent.find(batchScopeFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
-    TimetableEvent.countDocuments(batchScopeFilter),
+    TimetableEvent.find(pageFilter).sort({ date: -1 }).skip(skip).limit(limit).lean(),
+    TimetableEvent.countDocuments(pageFilter),
   ]);
   return sendSuccess(
     res,
@@ -1724,42 +1631,199 @@ async function getTimetableEvent(req, res) {
   return sendSuccess(res, { id: String(doc._id), ...doc });
 }
 
-async function createTimetableEvent(req, res) {
-  const schema = z.object({
-    title: z.string().min(1).trim(),
-    type: z.enum(["holiday", "workshop", "mentor", "event"]),
-    description: z.string().optional().default(""),
-    date: z.coerce.date(),
-    batch_id: z.string().optional().default(""),
+const TIME_HHMM_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+
+const timetableEventFieldsSchema = {
+  title: z.string().min(1).trim(),
+  type: z.enum(TimetableEvent.EVENT_TYPES),
+  description: z.string().optional().default(""),
+  date: z.coerce.date(),
+  batch_id: z.string().optional().default(""),
+  section_id: z.string().optional().default(""),
+  all_day: z.boolean().optional().default(true),
+  time: z.string().regex(TIME_HHMM_RE, "time must be HH:mm").optional().or(z.literal("")).default(""),
+  duration_minutes: z.coerce.number().int().min(1).max(1440).optional().default(60),
+  meet_link: z.string().optional().default(""),
+};
+
+/** Holidays are never scheduled items: force all-day, strip time/duration/meet link regardless of input. */
+function normalizeEventScheduling(body) {
+  if (body.type === "holiday") {
+    return { ...body, all_day: true, time: "", meet_link: "" };
+  }
+  if (body.all_day) {
+    return { ...body, time: "", meet_link: body.meet_link || "" };
+  }
+  if (!body.time) {
+    throw Object.assign(new Error("time is required for a specific-time event"), { status: 400, code: "TIME_REQUIRED" });
+  }
+  return body;
+}
+
+/** Minutes until a TimetableEvent starts (timed events only). All-day → null. */
+function minutesUntilEventStart(event, at = new Date()) {
+  if (!event || event.all_day !== false) return null;
+  const dateYmd = formatDateYmdInClassTimeZone(event.date);
+  if (!dateYmd) return null;
+  const startsAt = parseSlotStart(dateYmd, event.time);
+  if (!startsAt) return null;
+  return Math.round((startsAt.getTime() - at.getTime()) / 60_000);
+}
+
+/**
+ * Notify students about TimetableEvent create/update/delete.
+ * Holidays are informational-only (no notifications). Far-future create/update suppressed
+ * by SCHEDULE_NOTICE_MAX_HOURS_AHEAD (same as classes).
+ */
+async function handleStudentEventNotifications(event, action) {
+  if (!event) return;
+  const type = String(event.type || "").toLowerCase();
+  if (type === "holiday") return;
+
+  const batchId = String(event.batch_id || "").trim().toLowerCase();
+  // Empty batch_id = all batches — skip fan-out to avoid notifying the entire school.
+  if (!batchId) return;
+
+  if (action !== "deleted") {
+    const mins = minutesUntilEventStart(event);
+    // All-day non-holiday events: only notify if within the notice window based on calendar day start.
+    if (event.all_day !== false) {
+      const dateYmd = formatDateYmdInClassTimeZone(event.date);
+      if (!dateYmd) return;
+      const dayStart = parseSlotStart(dateYmd, "00:00");
+      if (!dayStart) return;
+      const minsToDay = Math.round((dayStart.getTime() - Date.now()) / 60_000);
+      if (minsToDay > SCHEDULE_NOTICE_MAX_HOURS_AHEAD * 60) return;
+    } else if (mins !== null && mins > SCHEDULE_NOTICE_MAX_HOURS_AHEAD * 60) {
+      return;
+    } else if (mins !== null && mins <= 0) {
+      return;
+    }
+  }
+
+  const sectionId = String(event.section_id || "").trim().toLowerCase();
+  const filter = await studentsInBatchesFilterResolved([batchId], {
+    sectionId: sectionId || undefined,
   });
-  const body = schema.parse(req.body);
+  const students = await Student.find(filter).select("_id").lean();
+  if (!students.length) return;
+
+  const eventId = String(event._id || event.id || "");
+  const when =
+    event.all_day !== false
+      ? new Date(event.date).toLocaleDateString()
+      : `${new Date(event.date).toLocaleDateString()} at ${event.time || ""}`.trim();
+  const title =
+    action === "deleted"
+      ? "Event cancelled"
+      : action === "updated"
+        ? "Event updated"
+        : "New event scheduled";
+  const body =
+    action === "deleted"
+      ? `${event.title} (${when}) was cancelled.`
+      : action === "updated"
+        ? `${event.title} was updated (${when}).`
+        : `${event.title} is scheduled for ${when}.`;
+  const dedupeAction = action === "deleted" ? "cancelled" : action;
+  const docs = students.map((s) => ({
+    student_id: s._id,
+    type: "system",
+    title,
+    body,
+    read_at: null,
+    ref_id: `timetable-event:${eventId}`,
+    deep_link: "/timetable",
+    meet_url: String(event.meet_link || "").trim(),
+    dedupe_key:
+      action === "updated"
+        ? `timetableEvent:updated:${eventId}:${String(s._id)}:${formatDateYmdInClassTimeZone(event.date)}:${event.time || ""}`
+        : `timetableEvent:${dedupeAction}:${eventId}:${String(s._id)}`,
+  }));
+  const { insertNotificationsIgnoringDuplicates } = require("../services/mentor-notification.service");
+  await insertNotificationsIgnoringDuplicates(docs);
+}
+
+async function createTimetableEvent(req, res) {
+  const schema = z.object(timetableEventFieldsSchema);
+  let body;
+  try {
+    body = normalizeEventScheduling(schema.parse(req.body));
+  } catch (e) {
+    if (e?.status === 400) return sendError(res, 400, e.code || "INVALID_EVENT", e.message);
+    throw e;
+  }
   const created = await TimetableEvent.create({
     ...body,
     batch_id: (body.batch_id || "").toLowerCase().trim(),
+    section_id: (body.section_id || "").toLowerCase().trim(),
   });
+  try {
+    await handleStudentEventNotifications(created.toObject(), "created");
+  } catch (e) {
+    console.error("[EVENT_NOTIFY_CREATE_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
 }
 
 async function updateTimetableEvent(req, res) {
   const schema = z.object({
-    title: z.string().optional(),
-    type: z.enum(["holiday", "workshop", "mentor", "event"]).optional(),
+    title: z.string().min(1).trim().optional(),
+    type: z.enum(TimetableEvent.EVENT_TYPES).optional(),
     description: z.string().optional(),
     date: z.coerce.date().optional(),
     batch_id: z.string().optional(),
+    section_id: z.string().optional(),
+    all_day: z.boolean().optional(),
+    time: z.string().regex(TIME_HHMM_RE, "time must be HH:mm").optional().or(z.literal("")),
+    duration_minutes: z.coerce.number().int().min(1).max(1440).optional(),
+    meet_link: z.string().optional(),
   });
   const body = schema.parse(req.body);
   const doc = await TimetableEvent.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Event not found");
-  Object.assign(doc, body);
+
+  // Re-validate scheduling against the merged (existing + incoming) state so a partial PATCH can't
+  // leave a non-holiday event with all_day=false and no time, or leave a holiday with a stale time.
+  let merged;
+  try {
+    merged = normalizeEventScheduling({
+      type: body.type ?? doc.type,
+      all_day: body.all_day ?? doc.all_day,
+      time: body.time ?? doc.time,
+      meet_link: body.meet_link ?? doc.meet_link,
+    });
+  } catch (e) {
+    if (e?.status === 400) return sendError(res, 400, e.code || "INVALID_EVENT", e.message);
+    throw e;
+  }
+
+  Object.assign(doc, body, { all_day: merged.all_day, time: merged.time, meet_link: merged.meet_link });
   if (body.batch_id !== undefined) doc.batch_id = (body.batch_id || "").toLowerCase().trim();
+  if (body.section_id !== undefined) doc.section_id = (body.section_id || "").toLowerCase().trim();
+  // Date/time change → allow a fresh 15m reminder.
+  if (body.date !== undefined || body.time !== undefined || body.all_day !== undefined) {
+    doc.reminder_15m_sent_at = null;
+  }
   await doc.save();
+  try {
+    await handleStudentEventNotifications(doc.toObject(), "updated");
+  } catch (e) {
+    console.error("[EVENT_NOTIFY_UPDATE_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
 }
 
 async function deleteTimetableEvent(req, res) {
+  const doc = await TimetableEvent.findById(req.params.id).lean();
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Event not found");
   const r = await TimetableEvent.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Event not found");
+  try {
+    await handleStudentEventNotifications(doc, "deleted");
+  } catch (e) {
+    console.error("[EVENT_NOTIFY_DELETE_FAILED]", e?.message || e);
+  }
   return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 
@@ -1767,6 +1831,7 @@ async function deleteTimetableEvent(req, res) {
 async function listMentorSlotsAdmin(req, res) {
   const { page, limit, skip } = paginate(req);
   const batch_id = String(req.query.batch_id || "").trim().toLowerCase();
+  const section_id = String(req.query.section_id || "").trim().toLowerCase();
   const month = Number(req.query.month || 0);
   let year = Number(req.query.year || 0);
   if (month >= 1 && month <= 12 && !(year >= 1900 && year <= 9999)) {
@@ -1774,6 +1839,14 @@ async function listMentorSlotsAdmin(req, res) {
   }
   const filter = {};
   if (batch_id) filter.target_batch_ids = batch_id;
+  // Empty target_section_ids on a mentor slot means "whole batch", so a section-scoped query still matches it.
+  if (section_id) {
+    filter.$or = [
+      { target_section_ids: { $size: 0 } },
+      { target_section_ids: { $exists: false } },
+      { target_section_ids: section_id },
+    ];
+  }
 
   // `date` is a real timestamp (unlike TimetableSlot.class_date, a plain YYYY-MM-DD string), so a
   // month filter has to be evaluated in the class's timezone rather than as a naive UTC regex/range

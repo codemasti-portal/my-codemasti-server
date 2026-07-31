@@ -12,6 +12,8 @@ const mentorSlotSchema = new mongoose.Schema(
     meet_link: { type: String, default: "" },
     reminder_15m_sent_at: { type: Date, default: null, index: true },
     meet_link_missing_alert_15m_sent_at: { type: Date, default: null, index: true },
+    /** Set when students were notified that this slot is published (create/update fan-out or publish sweep). */
+    publish_notified_at: { type: Date, default: null, index: true },
     target_batch_ids: [{ type: String, trim: true, lowercase: true }],
     target_section_ids: [{ type: String, trim: true, lowercase: true }],
     target_student_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: "Student" }],
