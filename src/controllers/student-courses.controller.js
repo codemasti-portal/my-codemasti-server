@@ -37,6 +37,7 @@ function invoiceRow(invoice) {
     period_end: invoice.period_end,
     subtotal_paise: invoice.subtotal_paise,
     scholarship_discount_paise: invoice.scholarship_discount_paise,
+    student_of_month_discount_paise: invoice.student_of_month_discount_paise || 0,
     referral_discount_paise: invoice.referral_discount_paise,
     registration_discount_paise: invoice.registration_discount_paise,
     manual_adjustment_paise: invoice.manual_adjustment_paise,

@@ -33,9 +33,8 @@ const starterCodeSchema = new mongoose.Schema(
 const quizOptionSchema = new mongoose.Schema(
   {
     text: { type: String, default: "", trim: true },
-    /** Optional multi-line code snippet for this option. Stored plain; the ``` fences are
-     * added at render time (client), like the question-level `code` field. No language stored —
-     * the renderer auto-detects. */
+    /** Optional multi-line code snippet for this option. Stored plain and rendered as a
+     * verbatim <pre> on the client (no markdown fences, no language tag). */
     code: { type: String, default: "" },
     image_url: { type: String, default: "", trim: true },
     is_correct: { type: Boolean, default: false },
@@ -70,8 +69,9 @@ const assignmentQuestionSchema = new mongoose.Schema(
     question_image_url: { type: String, default: "", trim: true },
     /** Optional video (e.g. a short clip of the expected result) shown to students. */
     question_video_url: { type: String, default: "", trim: true },
-    /** Optional code snippet rendered as a highlighted block. We add the ``` fences at render time —
-     * LLMs are unreliable at producing backticks inside JSON, so authors/LLMs supply plain code + language. */
+    /** Optional code snippet. Authors/LLMs supply plain code (use \\n for line breaks).
+     * Quiz renders it as a verbatim <pre>. Other types may still use code_language for
+     * markdown-fence highlighting at render time. */
     code: { type: String, default: "" },
     code_language: { type: String, default: "", trim: true },
     quiz_options: { type: [quizOptionSchema], default: [] },

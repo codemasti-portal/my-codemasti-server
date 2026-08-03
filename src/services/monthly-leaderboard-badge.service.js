@@ -174,6 +174,7 @@ module.exports = {
   scopeKeyForStudentLean,
   ensureRecentMonthsForScope,
   ensureRecentMonthsFinalized,
+  finalizePeriodForScopeIfMissing,
   listWinnersForScope,
   listBadgesForStudent,
   parsePeriod,

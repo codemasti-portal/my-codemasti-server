@@ -40,6 +40,7 @@ router.delete("/invoices/:id", ...adminOnly, invoices.deleteInvoice);
 
 // Payments
 router.get("/payments", ...adminOnly, payments.listPayments);
+router.get("/payments/config", ...adminOnly, payments.getPaymentConfig);
 router.get("/payments/reconciliation", ...adminOnly, payments.reconciliation);
 router.post("/payments/:id/refund", ...adminOnly, payments.refundPayment);
 router.get("/refunds", ...adminOnly, payments.listRefunds);
