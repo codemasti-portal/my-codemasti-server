@@ -2,7 +2,8 @@
 // - Resolves subtotal from enrollment.fee_override_paise or course.base_fee_paise
 // - Applies discounts via invoice-discount.service
 // - On consumption of a referral credit, decrements `months` (or removes the queue item when 0)
-// - Looks up most recent scholarship from ScorecardEntry in the linked batch for the period
+// - Looks up most recent scholarship from ScorecardEntry in the linked batch for the previous month
+// - Adds Student of the Month +5% when MonthlyLeaderboardBadge exists for that batch + previous month
 //
 // Wrapped in a Mongo session/transaction so credit consumption + invoice creation are atomic.
 
@@ -12,10 +13,12 @@ const StudentEnrollment = require("../models/StudentEnrollment");
 const Course = require("../models/Course");
 const Student = require("../models/Student");
 const ScorecardEntry = require("../models/ScorecardEntry");
+const MonthlyLeaderboardBadge = require("../models/MonthlyLeaderboardBadge");
 const {
   computeDiscounts,
   nextConsumableReferralCredit,
 } = require("./invoice-discount.service");
+const monthlyBadgeSvc = require("./monthly-leaderboard-badge.service");
 const { rupeesToPaise } = require("../utils/money");
 
 function generateInvoiceNumber(date = new Date()) {
@@ -28,6 +31,14 @@ function generateInvoiceNumber(date = new Date()) {
 
 function periodLabelFor(date = new Date()) {
   return date.toLocaleString("en-US", { month: "long", year: "numeric" });
+}
+
+/** Previous calendar month as "YYYY-MM" (matches MonthlyLeaderboardBadge.period / scorecard window). */
+function previousPeriodLabel(periodStart) {
+  const d = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() - 1, 1));
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}`;
 }
 
 async function findLatestScholarship({ studentId, linkedBatchId, periodStart }) {
@@ -54,6 +65,29 @@ async function findLatestScholarship({ studentId, linkedBatchId, periodStart }) 
     scholarship_amount_paise: Number.isFinite(amtRupees) && amtRupees > 0 ? rupeesToPaise(amtRupees) : 0,
     scholarship_percent: Number(entry.scholarship_percent || 0),
   };
+}
+
+/**
+ * True when this student won Student of the Month for the previous month in the course's linked batch.
+ * Finalizes the badge first (idempotent) so day-1 invoice cron still works if nobody opened achievements.
+ */
+async function isStudentOfMonthWinner({ studentId, linkedBatchId, periodStart }) {
+  const scopeKey = String(linkedBatchId || "").trim().toLowerCase();
+  if (!scopeKey || scopeKey.startsWith("solo:")) return false;
+  const prevPeriod = previousPeriodLabel(periodStart);
+  try {
+    await monthlyBadgeSvc.finalizePeriodForScopeIfMissing(scopeKey, prevPeriod);
+  } catch {
+    /* ignore finalize errors — lookup may still find an existing badge */
+  }
+  const badge = await MonthlyLeaderboardBadge.findOne({
+    period: prevPeriod,
+    scope_key: scopeKey,
+    student_id: studentId,
+  })
+    .select("_id")
+    .lean();
+  return Boolean(badge);
 }
 
 /**
@@ -122,12 +156,19 @@ async function buildInvoiceForPeriod({
     periodStart: ps,
   });
 
+  const isStudentOfMonth = await isStudentOfMonthWinner({
+    studentId: student._id,
+    linkedBatchId: course.linked_batch_id,
+    periodStart: ps,
+  });
+
   const breakdown = computeDiscounts({
     student,
     subtotalPaise,
     isFirstInvoiceForCourse: isFirstInvoiceForCourse && isPrimaryBatchInvoice,
     activeReferralCredit: referralCredit,
     scholarshipEntry,
+    isStudentOfMonth,
   });
 
   const session = await mongoose.startSession();
@@ -167,6 +208,7 @@ async function buildInvoiceForPeriod({
             period_end: pe,
             subtotal_paise: subtotalPaise,
             scholarship_discount_paise: breakdown.scholarship_paise,
+            student_of_month_discount_paise: breakdown.student_of_month_paise,
             referral_discount_paise: breakdown.referral_paise,
             registration_discount_paise: breakdown.registration_paise,
             total_due_paise: breakdown.total_due_paise,
@@ -190,4 +232,6 @@ module.exports = {
   buildInvoiceForPeriod,
   generateInvoiceNumber,
   periodLabelFor,
+  previousPeriodLabel,
+  isStudentOfMonthWinner,
 };

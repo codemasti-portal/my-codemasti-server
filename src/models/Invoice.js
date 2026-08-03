@@ -15,6 +15,8 @@ const invoiceSchema = new mongoose.Schema(
 
     subtotal_paise: { type: Number, required: true, min: 0 },
     scholarship_discount_paise: { type: Number, default: 0, min: 0 },
+    /** +5% fee bonus when student won Student of the Month in the previous IST month. */
+    student_of_month_discount_paise: { type: Number, default: 0, min: 0 },
     referral_discount_paise: { type: Number, default: 0, min: 0 },
     registration_discount_paise: { type: Number, default: 0, min: 0 },
     manual_adjustment_paise: { type: Number, default: 0 },

@@ -22,6 +22,7 @@ function rowOut(i, populated = {}) {
     period_end: i.period_end,
     subtotal_paise: i.subtotal_paise,
     scholarship_discount_paise: i.scholarship_discount_paise,
+    student_of_month_discount_paise: i.student_of_month_discount_paise || 0,
     referral_discount_paise: i.referral_discount_paise,
     registration_discount_paise: i.registration_discount_paise,
     manual_adjustment_paise: i.manual_adjustment_paise,
@@ -268,6 +269,7 @@ async function patchInvoice(req, res) {
       0,
       invoice.subtotal_paise -
         invoice.scholarship_discount_paise -
+        (invoice.student_of_month_discount_paise || 0) -
         invoice.referral_discount_paise -
         invoice.registration_discount_paise +
         body.manual_adjustment_paise

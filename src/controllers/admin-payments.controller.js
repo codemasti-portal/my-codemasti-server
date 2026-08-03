@@ -5,6 +5,7 @@ const Payment = require("../models/Payment");
 const Invoice = require("../models/Invoice");
 const Refund = require("../models/Refund");
 const phonepe = require("../services/phonepe-gateway.service");
+const { getPaymentsMode, getUpiConfig } = require("../utils/paymentsConfig");
 
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 
@@ -234,9 +235,18 @@ async function listRefunds(req, res) {
   return sendSuccess(res, rows.map(refundOut));
 }
 
+/** GET /admin/payments/config — mode + UPI payee for invoice PDF / staff tools. */
+async function getPaymentConfig(_req, res) {
+  return sendSuccess(res, {
+    mode: getPaymentsMode(),
+    upi: getUpiConfig(),
+  });
+}
+
 module.exports = {
   listPayments,
   reconciliation,
   refundPayment,
   listRefunds,
+  getPaymentConfig,
 };
