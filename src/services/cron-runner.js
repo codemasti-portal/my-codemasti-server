@@ -7,6 +7,7 @@ const {
   backfillReleaseNotificationFlag,
 } = require("./assignment-release-notification.scheduler");
 const { runMonthlyInvoiceTick } = require("./monthly-invoice.scheduler");
+const { runPostSessionTasksTick } = require("./post-session-tasks.scheduler");
 
 /**
  * Runs the time-sensitive scheduler ticks once. Called by the external cron pinger
@@ -61,6 +62,12 @@ async function runScheduledTicks() {
     results.monthlyInvoices = "ok";
   } catch (e) {
     results.monthlyInvoices = `error: ${e?.message || e}`;
+  }
+  try {
+    const postSession = await runPostSessionTasksTick();
+    results.postSessionTasks = postSession.enabled ? "ok" : `disabled:${postSession.reason || "unknown"}`;
+  } catch (e) {
+    results.postSessionTasks = `error: ${e?.message || e}`;
   }
   return results;
 }

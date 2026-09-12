@@ -168,7 +168,7 @@ function buildClassStart60mEmail({ staffName, slot }) {
     greeting: `Hi ${staffName || "Instructor"},`,
     intro: meet
       ? "Your class starts in about an hour. Use the button below to open the Meet link when it's time."
-      : "Your class starts in about an hour. The Meet link isn't set yet — please add it in the timetable.",
+      : "Your class starts in about an hour. The Meet link is not available yet. The scheduling team has been notified.",
     details: [
       { label: "Subject", value: slot.subject || "N/A" },
       { label: "Topic", value: slot.topic || "N/A" },
@@ -185,7 +185,113 @@ function buildClassStart60mEmail({ staffName, slot }) {
     `Subject: ${slot.subject || "N/A"}`,
     `Topic: ${slot.topic || "N/A"}`,
     `When: ${whenText}`,
-    `Meet link: ${meet || "Not set yet — please add it in the timetable"}`,
+    `Meet link: ${meet || "Not available yet — the scheduling team has been notified"}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
+function buildClassAssignedEmail({ staffName, slot }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Class assigned: ${slot.subject || "Class"} (${whenText})`;
+  const meet = String(slot.meet_link || "").trim();
+  const timetableUrl = portalLink("/timetable");
+  const htmlContent = renderEmailTemplate({
+    title: "Class assigned to you",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: "You have been assigned to teach the following class.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+    ],
+    primaryAction: meet ? { label: "Open Meet link", href: meet } : null,
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "You have been assigned to teach the following class.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `Topic: ${slot.topic || "N/A"}`,
+    `When: ${whenText}`,
+    `Meet link: ${meet || "Not set"}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
+function buildClassRescheduledEmail({ staffName, slot, previousSchedule }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const oldWhen =
+    previousSchedule?.class_date && previousSchedule?.time
+      ? fmtWhenLocal(previousSchedule.class_date, previousSchedule.time)
+      : "";
+  const subject = `Class rescheduled: ${slot.subject || "Class"} (${whenText})`;
+  const meet = String(slot.meet_link || "").trim();
+  const timetableUrl = portalLink("/timetable");
+  const details = [
+    { label: "Subject", value: slot.subject || "N/A" },
+    { label: "Topic", value: slot.topic || "N/A" },
+    { label: "New time", value: whenText },
+    { label: "Batch", value: slot.batch_id || "N/A" },
+    { label: "Section", value: slot.section_id || "All" },
+  ];
+  if (oldWhen) details.splice(2, 0, { label: "Previous time", value: oldWhen });
+  const htmlContent = renderEmailTemplate({
+    title: "Class rescheduled",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: oldWhen
+      ? "The schedule for your assigned class has changed."
+      : "Your assigned class has a new schedule.",
+    details,
+    primaryAction: meet ? { label: "Open Meet link", href: meet } : null,
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "The schedule for your assigned class has changed.",
+    oldWhen ? `Previous time: ${oldWhen}` : null,
+    `New time: ${whenText}`,
+    `Subject: ${slot.subject || "N/A"}`,
+    `Meet link: ${meet || "Not set"}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    timetableUrl ? `Portal: ${timetableUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ].filter(Boolean).join("\n");
+  return { subject, htmlContent, textContent };
+}
+
+function buildClassUnassignedEmail({ staffName, slot }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Class unassigned: ${slot.subject || "Class"} (${whenText})`;
+  const timetableUrl = portalLink("/timetable");
+  const htmlContent = renderEmailTemplate({
+    title: "Class unassigned",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro: "You are no longer assigned to teach the following class.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+    ],
+    secondaryAction: timetableUrl ? { label: "Open timetable", href: timetableUrl, variant: "secondary" } : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "You are no longer assigned to teach the following class.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `When: ${whenText}`,
     `Batch: ${slot.batch_id || "N/A"}`,
     `Section: ${slot.section_id || "All"}`,
     timetableUrl ? `Portal: ${timetableUrl}` : null,
@@ -255,6 +361,49 @@ function buildClassCancelledEmail({ staffName, slot }) {
   return { subject, htmlContent, textContent };
 }
 
+const INSTRUCTOR_ASSIGNMENTS_ACTION = "/dashboard/instructor/assignments";
+
+function buildPostClassTasksEmail({ staffName, slot, driveFolderUrl }) {
+  const whenText = fmtWhenLocal(slot.class_date, slot.time);
+  const subject = `Post-class tasks: ${slot.subject || "Class"} (${whenText})`;
+  const assignmentsUrl = portalLink(INSTRUCTOR_ASSIGNMENTS_ACTION);
+  const htmlContent = renderEmailTemplate({
+    title: "Class ended — next steps",
+    greeting: `Hi ${staffName || "Instructor"},`,
+    intro:
+      "Your class has ended. Please complete the following: (1) upload the class recording to the Google Drive folder below, and (2) create/add the assignment for this class in CodeMasti.",
+    details: [
+      { label: "Subject", value: slot.subject || "N/A" },
+      { label: "Topic", value: slot.topic || "N/A" },
+      { label: "When", value: whenText },
+      { label: "Batch", value: slot.batch_id || "N/A" },
+      { label: "Section", value: slot.section_id || "All" },
+      { label: "Recording folder", value: driveFolderUrl },
+    ],
+    primaryAction: driveFolderUrl ? { label: "Open Drive upload folder", href: driveFolderUrl } : null,
+    secondaryAction: assignmentsUrl
+      ? { label: "Create assignment", href: assignmentsUrl, variant: "secondary" }
+      : null,
+  });
+  const textContent = [
+    `Hello ${staffName || "Instructor"},`,
+    "Your class has ended. Please:",
+    "1) Upload the class recording to the Google Drive folder:",
+    driveFolderUrl,
+    "2) Create/add the assignment for this class in CodeMasti.",
+    `Subject: ${slot.subject || "N/A"}`,
+    `Topic: ${slot.topic || "N/A"}`,
+    `When: ${whenText}`,
+    `Batch: ${slot.batch_id || "N/A"}`,
+    `Section: ${slot.section_id || "All"}`,
+    assignmentsUrl ? `Assignments: ${assignmentsUrl}` : null,
+    `Support: ${getSupportEmail()}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return { subject, htmlContent, textContent };
+}
+
 function buildResourceUploadedEmail({ staffName, slot, kind }) {
   const whenText = fmtWhenLocal(slot.class_date, slot.time);
   const isNotes = kind === "notes";
@@ -287,16 +436,24 @@ function buildResourceUploadedEmail({ staffName, slot, kind }) {
   return { subject, htmlContent, textContent };
 }
 
-async function notifyInstructorsForSlot({ slot, event_type, title, message, action_url, emailBuilder }) {
+async function notifyInstructorsForSlot({
+  slot,
+  event_type,
+  title,
+  message,
+  action_url,
+  emailBuilder,
+  dedupe_key,
+}) {
   const recipients = await resolveInstructorRecipientsForSlot(slot);
   if (!recipients.length) return { notified: 0, emailed: 0 };
 
   let notified = 0;
   let emailed = 0;
   for (const r of recipients) {
-    const dedupeKey = `${String(event_type || "event").trim()}:${String(slot?._id || "").trim()}:${String(
-      r._id
-    )}`;
+    const dedupeKey = dedupe_key
+      ? `${String(dedupe_key).trim()}:${String(r._id)}`
+      : `${String(event_type || "event").trim()}:${String(slot?._id || "").trim()}:${String(r._id)}`;
     await emitEventNotification({
       audience: "individual",
       recipient_id: String(r._id),
@@ -328,9 +485,14 @@ module.exports = {
   notifyInstructorsForSlot,
   buildClassStart10mEmail,
   buildClassStart60mEmail,
+  buildClassAssignedEmail,
+  buildClassRescheduledEmail,
+  buildClassUnassignedEmail,
   buildMeetLinkUpdatedEmail,
   buildClassCancelledEmail,
   buildResourceUploadedEmail,
+  buildPostClassTasksEmail,
+  INSTRUCTOR_ASSIGNMENTS_ACTION,
   fmtWhenLocal,
   resolveInstructorRecipientsByName,
   resolveInstructorRecipientsForSlot,

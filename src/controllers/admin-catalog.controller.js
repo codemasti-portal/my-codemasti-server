@@ -23,7 +23,6 @@ const {
 const {
   notifyInstructorsForSlot,
   buildResourceUploadedEmail: buildInstructorResourceEmail,
-  buildMeetLinkUpdatedEmail,
   buildClassCancelledEmail,
 } = require("../services/instructor-notifications.service");
 const { emitEventNotification } = require("../services/staffPanelNotification.service");
@@ -31,10 +30,31 @@ const {
   fanoutMentorSlotNotification,
   notifyMentorSlotCancelled,
 } = require("../services/mentor-notification.service");
+const {
+  initLifecycleFieldsOnCreate: initMentorLifecycleFieldsOnCreate,
+  handleMentorLifecycleOnPublish,
+  handleMentorLifecycleAfterUpdate,
+  mentorIdentityChanged,
+  meetLinkChanged: mentorMeetLinkChanged,
+  mentorScheduleChanged,
+  resetMentorScheduleReminderMarkers,
+  resetMentorOnlyReminderMarkers,
+  apply60mSuppressionForCurrentSchedule: applyMentor60mSuppression,
+} = require("../services/mentor-slot-lifecycle.service");
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
 const googleMeetCal = require("../services/google-calendar-meet.service");
+const {
+  initLifecycleFieldsOnCreate,
+  handleInstructorLifecycleAfterCreate,
+  handleInstructorLifecycleAfterUpdate,
+  instructorIdentityChanged,
+  meetLinkChanged,
+  resetAllScheduleReminderMarkers,
+  resetInstructorReminderMarkers,
+  apply60mSuppressionForCurrentSchedule,
+} = require("../services/timetable-instructor-lifecycle.service");
 const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
 const { evaluateWebSubmission } = require("../services/web-evaluator");
 const { ROLES } = require("../utils/rbac");
@@ -51,6 +71,11 @@ const {
   IMMINENT_CLASS_MINUTES,
   normalizeTimeString,
 } = require("../utils/timetable-slot-start");
+const {
+  parseGoogleMeetUrl,
+  zGoogleMeetUrlRequired,
+  zGoogleMeetUrlPatch,
+} = require("../utils/google-meet-url");
 
 /** Suppress "New class/event scheduled" spam when the item starts more than this many hours away. */
 const SCHEDULE_NOTICE_MAX_HOURS_AHEAD = 6;
@@ -151,71 +176,6 @@ async function handleStudentTimetableNotifications(slot, action) {
   }
 
   await notifyStudentsTimetableSchedule({ slot, action });
-}
-
-async function notifyMentorPublishEmail(slot) {
-  const mentorName = String(slot?.mentor_name || "").trim();
-  if (!mentorName) return;
-
-  const recipients = await Staff.find({
-    role: { $in: ["mentor", "instructor"] },
-    is_active: true,
-    name: mentorName,
-  })
-    .select("email name role")
-    .lean();
-  if (!recipients.length) return;
-
-  const batchLine =
-    Array.isArray(slot.target_batch_ids) && slot.target_batch_ids.length
-      ? slot.target_batch_ids.join(", ")
-      : "N/A";
-  const sectionLine =
-    Array.isArray(slot.target_section_ids) && slot.target_section_ids.length
-      ? slot.target_section_ids.join(", ")
-      : "All sections";
-  const audienceLine =
-    Array.isArray(slot.target_student_ids) && slot.target_student_ids.length
-      ? `${slot.target_student_ids.length} selected student(s)`
-      : "All students in selected batch/sections";
-  const sessionDate = slot.date ? new Date(slot.date) : null;
-  const publishDate = slot.publish_date ? new Date(slot.publish_date) : null;
-
-  for (const recipient of recipients) {
-    if (!recipient.email) continue;
-    const subject = `Mentor session published - ${mentorName}`;
-    const htmlContent = `
-      <div style="font-family:Arial,sans-serif;color:#111">
-        <h2 style="margin:0 0 12px">New mentor session published</h2>
-        <p>Hello ${recipient.name || mentorName},</p>
-        <p>A mentor session has been published with the following details:</p>
-        <ul>
-          <li><strong>Mentor:</strong> ${mentorName}</li>
-          <li><strong>Session date:</strong> ${sessionDate ? sessionDate.toLocaleDateString() : "N/A"}</li>
-          <li><strong>Session time:</strong> ${slot.time || "N/A"}</li>
-          <li><strong>Publish date:</strong> ${publishDate ? publishDate.toLocaleString() : "Immediate"}</li>
-          <li><strong>Batch:</strong> ${batchLine}</li>
-          <li><strong>Sections:</strong> ${sectionLine}</li>
-          <li><strong>Audience:</strong> ${audienceLine}</li>
-          <li><strong>Meet link:</strong> ${slot.meet_link || "Not set"}</li>
-        </ul>
-        <p>Regards,<br/>CodeMasti Admin</p>
-      </div>
-    `.trim();
-    const textContent = [
-      `Hello ${recipient.name || mentorName},`,
-      "A mentor session has been published.",
-      `Mentor: ${mentorName}`,
-      `Session date: ${sessionDate ? sessionDate.toLocaleDateString() : "N/A"}`,
-      `Session time: ${slot.time || "N/A"}`,
-      `Publish date: ${publishDate ? publishDate.toLocaleString() : "Immediate"}`,
-      `Batch: ${batchLine}`,
-      `Sections: ${sectionLine}`,
-      `Audience: ${audienceLine}`,
-      `Meet link: ${slot.meet_link || "Not set"}`,
-    ].join("\n");
-    await sendSimpleEmail({ toEmail: recipient.email, subject, htmlContent, textContent });
-  }
 }
 
 /** —— Assignments —— */
@@ -1159,6 +1119,7 @@ async function listTimetableSchedule(req, res) {
     subject: slot.subject,
     topic: slot.topic || "",
     teacher: slot.teacher,
+    staff_id: slot.staff_id ? String(slot.staff_id) : null,
     class_date: slot.class_date || "",
     meet_link: slot.meet_link || "",
     recording_link: slot.recording_link || "",
@@ -1191,7 +1152,7 @@ async function createTimetableSlot(req, res) {
     topic: z.string().optional().default(""),
     teacher: z.string().min(1).trim(),
     staff_id: z.string().optional(),
-    meet_link: z.string().url().min(1).trim(),
+    meet_link: zGoogleMeetUrlRequired(),
     recording_link: z.string().optional().default(""),
     notes_link: z.string().optional().default(""),
     is_taken: z.boolean().optional().default(false),
@@ -1202,19 +1163,6 @@ async function createTimetableSlot(req, res) {
   // Normalize time string to ensure consistent format stored in DB (e.g. "11:35-12:5" → "11:35-12:05").
   body.time = normalizeTimeString(body.time);
   const notifyResourceByEmail = body.notify_resource_by_email === true;
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const bid = String(body.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length || !instructorBatches.includes(bid)) {
-      return sendError(res, 403, "FORBIDDEN", "Timetable slot must be in one of your assigned batches");
-    }
-    body.teacher = ownName;
-    // Always bind the creating instructor's ID for reliable notification routing.
-    // The staff JWT payload carries the id as `sub` (there is no `_id` on req.staff).
-    body.staff_id = String(req.staff.sub || "");
-  }
   const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id], body.subject);
   if (!subjCheck.ok) return;
   body.subject = subjCheck.value;
@@ -1233,18 +1181,28 @@ async function createTimetableSlot(req, res) {
     topic: String(body.topic || "").trim(),
     teacher: body.teacher.trim(),
     staff_id: body.staff_id && mongoose.isValidObjectId(body.staff_id) ? body.staff_id : null,
-    meet_link: body.meet_link.trim(),
+    meet_link: parseGoogleMeetUrl(body.meet_link) || body.meet_link.trim(),
     recording_link: String(body.recording_link || "").trim(),
     notes_link: String(body.notes_link || "").trim(),
     is_taken: Boolean(body.is_taken),
     },
   ];
 
+  for (const row of docs) {
+    initLifecycleFieldsOnCreate(row);
+  }
+
   const created = await TimetableSlot.insertMany(docs, { ordered: false });
   for (const row of created) {
     const slot = row.toObject();
     const hasRecording = Boolean(String(slot.recording_link || "").trim());
     const hasNotes = Boolean(String(slot.notes_link || "").trim());
+
+    try {
+      await handleInstructorLifecycleAfterCreate(slot);
+    } catch (e) {
+      console.error("[TIMETABLE_CLASS_ASSIGNED_ON_CREATE_FAILED]", e?.message || e);
+    }
 
     // Only send generic timetable-created notification when no resources are attached.
     // If resources are already present, the specific resource notifications below are sent instead.
@@ -1315,7 +1273,7 @@ async function updateTimetableSlot(req, res) {
     topic: z.string().optional(),
     teacher: z.string().optional(),
     staff_id: z.string().optional(),
-    meet_link: z.string().url().optional(),
+    meet_link: zGoogleMeetUrlPatch(),
     recording_link: z.string().optional(),
     notes_link: z.string().optional(),
     is_taken: z.boolean().optional(),
@@ -1331,25 +1289,7 @@ async function updateTimetableSlot(req, res) {
   const prevNotes = String(doc.notes_link || "").trim();
   const prevMeetLink = String(doc.meet_link || "").trim();
   const prevStaffId = String(doc.staff_id || "").trim();
-  const prevTeacher = String(doc.teacher || "").trim().toLowerCase();
-  const had60mReminderSent = Boolean(doc.instructor_reminder_60m_sent_at);
-  const emailed60mMeetLink = String(doc.instructor_reminder_60m_meet_link || "").trim();
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const curBid = String(doc.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length || !curBid || !instructorBatches.includes(curBid)) {
-      return sendError(res, 403, "FORBIDDEN", "You can only update slots in your assigned batches");
-    }
-    if (body.batch_id !== undefined && body.batch_id) {
-      const nb = String(body.batch_id).trim().toLowerCase();
-      if (!instructorBatches.includes(nb)) {
-        return sendError(res, 403, "FORBIDDEN", "You can only move slots within your assigned batches");
-      }
-    }
-    body.teacher = ownName;
-  }
+  const prevTeacher = String(doc.teacher || "").trim();
   if (body.batch_id !== undefined) doc.batch_id = body.batch_id.toLowerCase().trim();
   if (body.section_id !== undefined) doc.section_id = (body.section_id || "").toLowerCase().trim();
   if (body.time !== undefined) body.time = normalizeTimeString(body.time);
@@ -1374,68 +1314,62 @@ async function updateTimetableSlot(req, res) {
     const mongoose = require("mongoose");
     doc.staff_id = body.staff_id && mongoose.isValidObjectId(body.staff_id) ? body.staff_id : null;
   }
-  if (body.meet_link !== undefined) doc.meet_link = body.meet_link.trim();
+  if (body.meet_link !== undefined) {
+    doc.meet_link = parseGoogleMeetUrl(body.meet_link) || body.meet_link.trim();
+  }
   if (body.recording_link !== undefined) doc.recording_link = String(body.recording_link || "").trim();
   if (body.notes_link !== undefined) doc.notes_link = String(body.notes_link || "").trim();
   if (body.is_taken !== undefined) doc.is_taken = Boolean(body.is_taken);
 
   const nextClassDate = String(doc.class_date || "").trim();
   const nextTime = String(doc.time || "").trim();
+  const nextMeetLink = String(doc.meet_link || "").trim();
   const nextStaffId = String(doc.staff_id || "").trim();
-  const nextTeacher = String(doc.teacher || "").trim().toLowerCase();
+  const nextTeacher = String(doc.teacher || "").trim();
   const scheduleChanged = prevClassDate !== nextClassDate || prevTime !== nextTime;
-  // The class was reassigned to a different instructor.
-  const instructorChanged = prevStaffId !== nextStaffId || prevTeacher !== nextTeacher;
+  const instructorChanged = instructorIdentityChanged(
+    prevStaffId,
+    prevTeacher,
+    nextStaffId,
+    nextTeacher
+  );
+  const meetChanged = meetLinkChanged(prevMeetLink, nextMeetLink);
+  const previousSchedule = { class_date: prevClassDate, time: prevTime };
+  const previousInstructor = { staff_id: prevStaffId || null, teacher: prevTeacher };
 
   if (scheduleChanged) {
-    // New start time → let every reminder (students + instructor) fire again.
-    doc.student_reminder_10m_sent_at = null;
-    doc.instructor_reminder_10m_sent_at = null;
-    doc.instructor_reminder_60m_sent_at = null;
-    doc.instructor_reminder_60m_meet_link = "";
-    doc.meet_link_missing_10m_alert_sent_at = null;
-    doc.class_live_sent_at = null;
-  } else if (instructorChanged) {
-    // Same time, different instructor → re-send the 1-hour email to the NEW instructor.
-    doc.instructor_reminder_60m_sent_at = null;
-    doc.instructor_reminder_60m_meet_link = "";
+    doc.schedule_revision = (Number(doc.schedule_revision) || 1) + 1;
+    resetAllScheduleReminderMarkers(doc);
+  }
+
+  if (instructorChanged) {
+    doc.instructor_assignment_revision = (Number(doc.instructor_assignment_revision) || 1) + 1;
+    if (!scheduleChanged) {
+      resetInstructorReminderMarkers(doc);
+    }
+  }
+
+  if (meetChanged && !scheduleChanged && !instructorChanged) {
+    doc.meet_link_revision = (Number(doc.meet_link_revision) || 1) + 1;
+  }
+
+  if (scheduleChanged || instructorChanged) {
+    apply60mSuppressionForCurrentSchedule(doc);
   }
 
   await doc.save();
 
-  // Instructor already got the 1-hour reminder and ONLY the Meet link changed → send them
-  // the corrected link immediately. (Skipped on a schedule or instructor change — those reset
-  // the marker above, so the full 1-hour email re-fires with the new link instead.)
-  const nextMeetLink = String(doc.meet_link || "").trim();
-  if (
-    !scheduleChanged &&
-    !instructorChanged &&
-    had60mReminderSent &&
-    nextMeetLink &&
-    nextMeetLink !== prevMeetLink &&
-    nextMeetLink !== emailed60mMeetLink
-  ) {
-    const startsAt = parseSlotStart(doc.class_date, doc.time);
-    if (startsAt && startsAt.getTime() > Date.now()) {
-      const updatedSlot = doc.toObject();
-      const whenText = fmtWhenLocal(updatedSlot.class_date, updatedSlot.time);
-      try {
-        await notifyInstructorsForSlot({
-          slot: updatedSlot,
-          event_type: "timetable_meet_link_updated",
-          title: "Meet link updated",
-          message: `The Meet link for ${updatedSlot.subject} (${whenText}) was updated. New link: ${nextMeetLink}`,
-          action_url: "/dashboard/instructor/timetable?focus=today",
-          emailBuilder: ({ staff }) => buildMeetLinkUpdatedEmail({ staffName: staff?.name, slot: updatedSlot }),
-        });
-        await TimetableSlot.updateOne(
-          { _id: doc._id },
-          { $set: { instructor_reminder_60m_meet_link: nextMeetLink } }
-        );
-      } catch (e) {
-        console.error("[INSTRUCTOR_MEET_LINK_UPDATED_FAILED]", e?.message || e);
-      }
-    }
+  try {
+    await handleInstructorLifecycleAfterUpdate({
+      slot: doc,
+      scheduleChanged,
+      instructorChanged,
+      meetLinkChanged: meetChanged,
+      previousSchedule: scheduleChanged ? previousSchedule : undefined,
+      previousInstructor: instructorChanged ? previousInstructor : undefined,
+    });
+  } catch (e) {
+    console.error("[TIMETABLE_INSTRUCTOR_LIFECYCLE_UPDATE_FAILED]", e?.message || e);
   }
 
   // Determine what actually changed.
@@ -1516,13 +1450,6 @@ async function updateTimetableSlot(req, res) {
 async function deleteTimetableSlot(req, res) {
   const doc = await TimetableSlot.findById(req.params.id).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Slot not found");
-  if (req.staff?.role === "instructor") {
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const bid = String(doc.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length || !bid || !instructorBatches.includes(bid)) {
-      return sendError(res, 403, "FORBIDDEN", "You can only delete slots in your assigned batches");
-    }
-  }
   const r = await TimetableSlot.deleteOne({ _id: req.params.id });
   if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Slot not found");
   await handleStudentTimetableNotifications(doc, "deleted");
@@ -1871,6 +1798,7 @@ async function listMentorSlotsAdmin(req, res) {
       id: String(m._id),
       subject: m.subject,
       mentor_name: m.mentor_name,
+      staff_id: m.staff_id ? String(m.staff_id) : null,
       mentor_info: m.mentor_info || "",
       date: m.date,
       publish_date: m.publish_date || null,
@@ -1942,6 +1870,7 @@ async function getMentorSlot(req, res) {
     id: String(doc._id),
     ...doc,
     mentor_info: doc.mentor_info || "",
+    staff_id: doc.staff_id ? String(doc.staff_id) : null,
     publish_date: doc.publish_date || null,
     duration_minutes: Number(doc.duration_minutes || 60),
     target_batch_ids: Array.isArray(doc.target_batch_ids) ? doc.target_batch_ids : [],
@@ -1951,15 +1880,89 @@ async function getMentorSlot(req, res) {
   });
 }
 
+/** Eligibility check used only when *accepting a newly supplied* staff_id (create, or a PATCH that changes it). */
+async function findEligibleMentorStaff(staffId) {
+  if (!staffId || !mongoose.isValidObjectId(String(staffId))) return null;
+  return Staff.findOne({
+    _id: staffId,
+    role: { $in: ["mentor", "instructor"] },
+    is_active: true,
+  })
+    .select("_id name")
+    .lean();
+}
+
+/**
+ * Unrestricted-by-role/active lookup, used only to keep `mentor_name` in sync with a staff_id that
+ * is *already committed* on a slot. Deliberately does not require is_active/role — a mentor who
+ * later goes inactive (or changes role) shouldn't cause the slot's display name to silently revert
+ * to client-supplied free text; the identity stays anchored to the real Staff record either way.
+ */
+async function findStaffNameById(staffId) {
+  if (!staffId || !mongoose.isValidObjectId(String(staffId))) return null;
+  return Staff.findOne({ _id: staffId }).select("_id name").lean();
+}
+
+/**
+ * Keeps `doc.mentor_name` in sync with an already-linked `staff_id` without re-validating that
+ * Staff's current active/role eligibility — eligibility is a notification-delivery-time concern
+ * (see mentor-notification.service.js:resolveMentorRecipients), not an edit-time gate, so a mentor
+ * going inactive must not block unrelated edits to their existing slots. Also ignores (and logs,
+ * for follow-up) any client-supplied `mentor_name` that disagrees with the authoritative Staff
+ * record, rather than letting it silently win and re-create the exact stale-id/wrong-name bug
+ * this resolver exists to prevent.
+ */
+async function resyncMentorNameFromLinkedStaff(doc, body) {
+  const linked = await findStaffNameById(doc.staff_id);
+  if (linked) {
+    if (body.mentor_name !== undefined && String(body.mentor_name).trim() !== linked.name) {
+      console.warn("[MENTOR_SLOT_UPDATE] ignoring client-supplied mentor_name while staff_id is set", {
+        slot_id: String(doc._id),
+        staff_id: String(doc.staff_id),
+        attempted_mentor_name: body.mentor_name,
+        authoritative_name: linked.name,
+      });
+    }
+    doc.mentor_name = linked.name;
+  } else if (body.mentor_name !== undefined) {
+    // Linked Staff doc no longer exists at all (hard-deleted, not just deactivated) — fall back
+    // to treating mentor_name as free text rather than blocking an otherwise-unrelated update.
+    doc.mentor_name = body.mentor_name;
+  }
+}
+
+/**
+ * Validates an optional mentor-slot `staff_id`: when provided, it must reference an active Staff
+ * record eligible to receive mentor-slot notifications (role mentor or instructor). The client-
+ * supplied `mentor_name` is never trusted as proof of identity — only this id is.
+ * Returns { ok: true, value: "" | validatedStaffIdString, name?: string }, or sends a 400 and
+ * returns { ok: false }.
+ */
+async function resolveMentorStaffIdOrError(res, rawStaffId) {
+  const staffId = String(rawStaffId || "").trim();
+  if (!staffId) return { ok: true, value: "" };
+  if (!mongoose.isValidObjectId(staffId)) {
+    sendError(res, 400, "VALIDATION_ERROR", "staff_id must be a valid staff id");
+    return { ok: false };
+  }
+  const staff = await findEligibleMentorStaff(staffId);
+  if (!staff) {
+    sendError(res, 400, "VALIDATION_ERROR", "staff_id must reference an active mentor or instructor");
+    return { ok: false };
+  }
+  return { ok: true, value: staffId, name: staff.name };
+}
+
 async function createMentorSlot(req, res) {
   const schema = z.object({
     mentor_name: z.string().min(1).trim(),
+    staff_id: z.string().trim().optional().default(""),
     mentor_info: z.string().trim().optional().default(""),
     date: z.coerce.date(),
     publish_date: z.coerce.date().optional(),
     time: z.string().min(1).trim(),
     duration_minutes: z.coerce.number().int().min(1).max(600).optional().default(60),
-    meet_link: z.string().optional().default(""),
+    meet_link: zGoogleMeetUrlRequired(),
     target_batch_ids: z.array(z.string().trim().toLowerCase()).optional().default([]),
     target_section_ids: z.array(z.string().trim().toLowerCase()).optional().default([]),
     target_student_ids: z.array(z.string().trim()).optional().default([]),
@@ -1969,45 +1972,54 @@ async function createMentorSlot(req, res) {
   if (new Date(body.date).getTime() <= Date.now()) {
     return sendError(res, 400, "VALIDATION_ERROR", "Session date must be in the future");
   }
+  const staffIdCheck = await resolveMentorStaffIdOrError(res, body.staff_id);
+  if (!staffIdCheck.ok) return;
   const targetStudentIds = body.target_student_ids.filter((id) => mongoose.isValidObjectId(id));
   const targetBatchIds = [...new Set(body.target_batch_ids.filter(Boolean))];
   const targetSectionIds = [...new Set(body.target_section_ids.filter(Boolean))];
-  const created = await MentorSlot.create({
+  const slotPayload = {
     subject: "Mentor Session",
-    mentor_name: body.mentor_name,
+    // Identity invariant: once staff_id resolves, mentor_name is derived from that Staff record —
+    // never trusted independently from the client, so the two fields can never disagree.
+    mentor_name: staffIdCheck.value ? staffIdCheck.name : body.mentor_name,
+    staff_id: staffIdCheck.value || null,
     mentor_info: body.mentor_info || "",
     date: body.date,
     publish_date: body.publish_date || new Date(),
     time: body.time,
     duration_minutes: body.duration_minutes || 60,
-    meet_link: body.meet_link || "",
+    meet_link: parseGoogleMeetUrl(body.meet_link) || body.meet_link.trim(),
     target_batch_ids: targetBatchIds,
     target_section_ids: targetSectionIds,
     target_student_ids: targetStudentIds,
     booking_state: body.booking_state || "open",
     booked_by: null,
     booked_at: null,
-  });
+  };
+  initMentorLifecycleFieldsOnCreate(slotPayload);
+  const created = await MentorSlot.create(slotPayload);
+  const slotObj = created.toObject();
   if (!body.publish_date || new Date(body.publish_date).getTime() <= Date.now()) {
-    await fanoutMentorSlotNotification(created.toObject());
+    await fanoutMentorSlotNotification(slotObj);
     try {
-      await notifyMentorPublishEmail(created.toObject());
+      await handleMentorLifecycleOnPublish(slotObj);
     } catch (err) {
-      console.error("[MENTOR_EMAIL_SEND_FAILED]", err?.message || err);
+      console.error("[MENTOR_LIFECYCLE_ON_CREATE_PUBLISH_FAILED]", err?.message || err);
     }
   }
-  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+  return sendSuccess(res, { id: String(created._id), ...slotObj }, "Created");
 }
 
 async function updateMentorSlot(req, res) {
   const schema = z.object({
     mentor_name: z.string().optional(),
+    staff_id: z.string().trim().optional(),
     mentor_info: z.string().optional(),
     date: z.coerce.date().optional(),
     publish_date: z.coerce.date().optional(),
     time: z.string().optional(),
     duration_minutes: z.coerce.number().int().min(1).max(600).optional(),
-    meet_link: z.string().optional(),
+    meet_link: zGoogleMeetUrlPatch(),
     target_batch_ids: z.array(z.string().trim().toLowerCase()).optional(),
     target_section_ids: z.array(z.string().trim().toLowerCase()).optional(),
     target_student_ids: z.array(z.string().trim()).optional(),
@@ -2018,14 +2030,66 @@ async function updateMentorSlot(req, res) {
   const body = schema.parse(req.body);
   const doc = await MentorSlot.findById(req.params.id);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Mentor slot not found");
+  const prevDate = doc.date;
+  const prevTime = String(doc.time || "").trim();
+  const prevStaffId = doc.staff_id ? String(doc.staff_id) : "";
+  const prevMentorName = String(doc.mentor_name || "").trim();
+  const prevMeetLink = String(doc.meet_link || "").trim();
+  const prevBookingState = doc.booking_state;
   const wasPublished = doc.publish_date ? new Date(doc.publish_date).getTime() <= Date.now() : true;
-  if (body.mentor_name !== undefined) doc.mentor_name = body.mentor_name;
+  // Identity invariant (monotonic): legacy (staff_id == null) -> linked is allowed; linked ->
+  // a *different* linked staff member is allowed; linked -> legacy/null is NOT allowed through
+  // this API (no existing UI/product flow unlinks a mentor slot — see resolveMentorStaffIdOrError
+  // caller below). Whenever staff_id is (or remains) set, mentor_name is derived from that Staff
+  // record — a client-supplied mentor_name can never combine with a stale/unrelated staff_id to
+  // persist contradictory identity (e.g. staff_id=Alice, mentor_name=Bob). mentor_name is only
+  // independently editable while staff_id has never been set (the legacy free-text case).
+  if (body.staff_id !== undefined) {
+    const requestedStaffId = String(body.staff_id || "").trim();
+    const currentStaffId = doc.staff_id ? String(doc.staff_id) : "";
+
+    if (!requestedStaffId) {
+      if (currentStaffId) {
+        return sendError(
+          res,
+          400,
+          "VALIDATION_ERROR",
+          "staff_id cannot be cleared once a mentor slot is linked to a staff record"
+        );
+      }
+      // Already unlinked and staying that way — mentor_name remains plain free text.
+      if (body.mentor_name !== undefined) doc.mentor_name = body.mentor_name;
+    } else if (requestedStaffId === currentStaffId) {
+      // Re-affirming the *same* already-linked mentor — this is what a full-form save (e.g. the
+      // admin UI) does on every edit, including ones that touch unrelated fields only. This must
+      // NOT re-run the strict active/role eligibility check, or an unrelated edit (e.g. changing
+      // duration_minutes) would start failing the moment that mentor goes inactive. Eligibility
+      // for notification delivery is a separate, later concern — see resolveMentorRecipients.
+      await resyncMentorNameFromLinkedStaff(doc, body);
+    } else {
+      // Genuinely assigning a *different* mentor — a real identity change, so validate strictly
+      // (must be an active, eligible Staff record). Resolves to exactly one id, no fan-out risk.
+      const staffIdCheck = await resolveMentorStaffIdOrError(res, requestedStaffId);
+      if (!staffIdCheck.ok) return;
+      doc.staff_id = staffIdCheck.value;
+      doc.mentor_name = staffIdCheck.name;
+    }
+  } else if (doc.staff_id) {
+    // staff_id wasn't part of this patch at all (e.g. a raw partial-PATCH caller) but the slot is
+    // already linked — same "keep in sync, don't re-validate eligibility" treatment as above.
+    await resyncMentorNameFromLinkedStaff(doc, body);
+  } else if (body.mentor_name !== undefined) {
+    // No staff_id involved at all (legacy slot, never linked) — mentor_name is plain free text.
+    doc.mentor_name = body.mentor_name;
+  }
   if (body.mentor_info !== undefined) doc.mentor_info = body.mentor_info;
   if (body.date !== undefined) doc.date = body.date;
   if (body.publish_date !== undefined) doc.publish_date = body.publish_date;
   if (body.time !== undefined) doc.time = body.time;
   if (body.duration_minutes !== undefined) doc.duration_minutes = body.duration_minutes;
-  if (body.meet_link !== undefined) doc.meet_link = body.meet_link;
+  if (body.meet_link !== undefined) {
+    doc.meet_link = parseGoogleMeetUrl(body.meet_link) || body.meet_link.trim();
+  }
   if (body.target_batch_ids !== undefined) doc.target_batch_ids = [...new Set(body.target_batch_ids.filter(Boolean))];
   if (body.target_section_ids !== undefined) {
     doc.target_section_ids = [...new Set(body.target_section_ids.filter(Boolean))];
@@ -2041,24 +2105,146 @@ async function updateMentorSlot(req, res) {
   if (new Date(doc.date).getTime() <= Date.now()) {
     return sendError(res, 400, "VALIDATION_ERROR", "Session date must be in the future");
   }
-  await doc.save();
+
+  const nextStaffId = doc.staff_id ? String(doc.staff_id) : "";
+  const nextMentorName = String(doc.mentor_name || "").trim();
+  const nextMeetLink = String(doc.meet_link || "").trim();
+  const scheduleChanged = mentorScheduleChanged(prevDate, prevTime, doc.date, doc.time);
+  const mentorChanged = mentorIdentityChanged(prevStaffId, prevMentorName, nextStaffId, nextMentorName);
+  const meetChanged = mentorMeetLinkChanged(prevMeetLink, nextMeetLink);
   const isPublishedNow = doc.publish_date ? new Date(doc.publish_date).getTime() <= Date.now() : true;
-  if (!wasPublished && isPublishedNow) {
-    const snapshot = doc.toObject();
-    await fanoutMentorSlotNotification(snapshot);
+  const becamePublished = !wasPublished && isPublishedNow;
+  const becameCancelled = prevBookingState !== "cancelled" && doc.booking_state === "cancelled";
+
+  if (scheduleChanged) {
+    doc.schedule_revision = (Number(doc.schedule_revision) || 1) + 1;
+    resetMentorScheduleReminderMarkers(doc);
+  }
+  if (mentorChanged) {
+    doc.mentor_assignment_revision = (Number(doc.mentor_assignment_revision) || 1) + 1;
+    if (!scheduleChanged) resetMentorOnlyReminderMarkers(doc);
+  }
+  if (meetChanged && !scheduleChanged && !mentorChanged) {
+    doc.meet_link_revision = (Number(doc.meet_link_revision) || 1) + 1;
+  }
+  if (scheduleChanged || mentorChanged || becamePublished) {
+    applyMentor60mSuppression(doc);
+  }
+
+  await doc.save();
+  const snapshot = doc.toObject();
+
+  if (becameCancelled) {
     try {
-      await notifyMentorPublishEmail(snapshot);
+      await notifyMentorSlotCancelled(snapshot);
     } catch (err) {
-      console.error("[MENTOR_EMAIL_SEND_FAILED]", err?.message || err);
+      console.error("[MENTOR_SLOT_CANCELLED_NOTIFY_FAILED]", err?.message || err);
+    }
+  } else {
+    if (becamePublished) {
+      await fanoutMentorSlotNotification(snapshot);
+    }
+    try {
+      await handleMentorLifecycleAfterUpdate({
+        slot: snapshot,
+        becamePublished,
+        becameCancelled: false,
+        scheduleChanged,
+        mentorChanged,
+        meetLinkChanged: meetChanged,
+        previousSchedule: scheduleChanged ? { date: prevDate, time: prevTime } : undefined,
+        previousMentor: mentorChanged
+          ? { staff_id: prevStaffId || null, mentor_name: prevMentorName }
+          : undefined,
+      });
+    } catch (err) {
+      console.error("[MENTOR_LIFECYCLE_UPDATE_FAILED]", err?.message || err);
     }
   }
-  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+
+  return sendSuccess(res, { id: String(doc._id), ...snapshot }, "Updated");
 }
 
 async function googleMeetCalendarStatus(req, res) {
   return sendSuccess(res, {
     configured: googleMeetCal.isGoogleMeetCalendarConfigured(),
   });
+}
+
+/** Active instructor eligible for Meet calendar invites (id-based resolution). */
+async function findEligibleInstructorStaff(staffId) {
+  if (!staffId || !mongoose.isValidObjectId(String(staffId))) return null;
+  return Staff.findOne({
+    _id: staffId,
+    role: ROLES.INSTRUCTOR,
+    is_active: true,
+  })
+    .select("_id name email")
+    .lean();
+}
+
+/**
+ * Resolves the instructor for Meet provisioning. When `staff_id` is supplied it is authoritative —
+ * invalid/inactive/wrong-role ids error out and never fall back to `teacher` name. Without `staff_id`,
+ * legacy name matching is ambiguity-safe (0 → omit, 1 → use, 2+ → omit + ambiguous).
+ * @returns {Promise<
+ *   | { ok: true, displayName: string, email: string, resolution: "staff_id" | "name" | "none" | "ambiguous", resolutionMessage?: string }
+ *   | { ok: false, status: number, code: string, message: string }
+ * >}
+ */
+async function resolveMeetProvisionInstructor({ staffId, teacherName }) {
+  const sid = String(staffId || "").trim();
+  if (sid) {
+    if (!mongoose.isValidObjectId(sid)) {
+      return { ok: false, status: 400, code: "VALIDATION_ERROR", message: "staff_id must be a valid staff id" };
+    }
+    const staff = await findEligibleInstructorStaff(sid);
+    if (!staff) {
+      return {
+        ok: false,
+        status: 400,
+        code: "VALIDATION_ERROR",
+        message: "staff_id must reference an active instructor",
+      };
+    }
+    const displayName = String(staff.name || "").trim();
+    const email = String(staff.email || "").includes("@")
+      ? String(staff.email).trim().toLowerCase()
+      : "";
+    return { ok: true, displayName, email, resolution: "staff_id" };
+  }
+
+  const nameTrim = String(teacherName || "").trim();
+  if (!nameTrim) {
+    return { ok: true, displayName: "", email: "", resolution: "none" };
+  }
+
+  const instructors = await Staff.find({ role: ROLES.INSTRUCTOR, is_active: true }).select("name email").lean();
+  const matches = instructors.filter(
+    (row) => String(row.name || "").trim().toLowerCase() === nameTrim.toLowerCase()
+  );
+  if (matches.length === 0) {
+    return { ok: true, displayName: nameTrim, email: "", resolution: "none" };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: true,
+      displayName: nameTrim,
+      email: "",
+      resolution: "ambiguous",
+      resolutionMessage:
+        "Multiple active instructors share this name; select the instructor from the team list.",
+    };
+  }
+
+  const only = matches[0];
+  const email = String(only.email || "").includes("@") ? String(only.email).trim().toLowerCase() : "";
+  return {
+    ok: true,
+    displayName: String(only.name || "").trim() || nameTrim,
+    email,
+    resolution: "name",
+  };
 }
 
 async function provisionTimetableGoogleMeet(req, res) {
@@ -2070,6 +2256,7 @@ async function provisionTimetableGoogleMeet(req, res) {
     subject: z.string().min(1).trim(),
     topic: z.string().optional().default(""),
     teacher: z.string().min(1).trim(),
+    staff_id: z.string().trim().optional().default(""),
   });
   const body = provisionSchema.parse(req.body);
 
@@ -2082,21 +2269,22 @@ async function provisionTimetableGoogleMeet(req, res) {
     );
   }
 
+  const instructorResolved = await resolveMeetProvisionInstructor({
+    staffId: body.staff_id,
+    teacherName: body.teacher,
+  });
+  if (!instructorResolved.ok) {
+    return sendError(res, instructorResolved.status, instructorResolved.code, instructorResolved.message);
+  }
+
   const filter = await catalogBatchStudentFilterResolved(body.batch_id.toLowerCase(), body.section_id);
   const students = await Student.find(filter).select("email").lean().limit(5000);
   const studentEmails = [
     ...new Set(students.map((s) => String(s.email || "").trim().toLowerCase()).filter(Boolean)),
   ];
 
-  const teacherNameTrim = body.teacher.trim();
-  let teacherEmail = "";
-  const instructors = await Staff.find({ role: ROLES.INSTRUCTOR, is_active: true }).select("name email").lean();
-  const instructorMatch = instructors.find(
-    (row) => String(row.name || "").trim().toLowerCase() === teacherNameTrim.toLowerCase()
-  );
-  if (instructorMatch && String(instructorMatch.email || "").includes("@")) {
-    teacherEmail = String(instructorMatch.email).trim().toLowerCase();
-  }
+  const teacherNameTrim = instructorResolved.displayName || body.teacher.trim();
+  const teacherEmail = instructorResolved.email;
 
   const attendeeSet = new Set(studentEmails);
   if (teacherEmail) attendeeSet.add(teacherEmail);
@@ -2130,6 +2318,10 @@ async function provisionTimetableGoogleMeet(req, res) {
         attendee_count: result.attendeeEmails.length,
         student_count: studentEmails.length,
         instructor_email_included: Boolean(teacherEmail),
+        instructor_resolution: instructorResolved.resolution,
+        ...(instructorResolved.resolutionMessage
+          ? { instructor_resolution_message: instructorResolved.resolutionMessage }
+          : {}),
       },
       "Meet link created and calendar invites sent."
     );

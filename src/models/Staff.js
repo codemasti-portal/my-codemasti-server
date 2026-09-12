@@ -37,6 +37,11 @@ const staffSchema = new mongoose.Schema(
     admin_notes: { type: String, default: "", trim: true },
     last_updated_by_admin: { type: mongoose.Schema.Types.ObjectId, ref: "Staff", default: null },
     is_active: { type: Boolean, default: true },
+    /**
+     * When true, this admin/super_admin receives operational scheduling alerts (e.g. missing Meet link).
+     * Only meaningful for admin/super_admin roles; defaults false for all staff.
+     */
+    receives_scheduling_alerts: { type: Boolean, default: false },
     /** Bumped on logout, password change, or being disabled — invalidates every token issued
      * before the bump (embedded as the `tv` claim), so those actions take effect immediately
      * instead of waiting out the token's natural expiry. */

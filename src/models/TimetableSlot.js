@@ -32,12 +32,30 @@ const timetableSlotSchema = new mongoose.Schema(
     instructor_reminder_60m_sent_at: { type: Date, default: null },
     /** Meet link value at the moment the 1-hour instructor email was sent (to detect later changes). */
     instructor_reminder_60m_meet_link: { type: String, default: "", trim: true },
+    /**
+     * When equal to schedule_revision, the 60m cron reminder is skipped for the current schedule
+     * incarnation (late create / late reschedule / late reassignment). Cleared when the new start
+     * is more than 60 minutes away.
+     */
+    instructor_reminder_60m_suppressed_schedule_revision: { type: Number, default: null },
+    /** Increments when class_date or time changes — powers reschedule dedupe and reminder reset. */
+    schedule_revision: { type: Number, default: 1 },
+    /** Increments when instructor identity changes — powers assign/unassign dedupe. */
+    instructor_assignment_revision: { type: Number, default: 1 },
+    /** Increments when the canonical Meet URL changes — powers meet-update dedupe. */
+    meet_link_revision: { type: Number, default: 1 },
 
     /** One-time "class is now live" notification sent at the scheduled start time. */
     class_live_sent_at: { type: Date, default: null },
 
     /** One-time alert when meet_link is missing near start time. */
     meet_link_missing_10m_alert_sent_at: { type: Date, default: null },
+
+    /** schedule_revision value for which post-class instructor tasks were delivered. */
+    post_class_tasks_sent_schedule_revision: { type: Number, default: null },
+    post_class_tasks_sent_at: { type: Date, default: null },
+    /** schedule_revision for which a destination-configuration admin alert was sent. */
+    post_class_destination_alerted_schedule_revision: { type: Number, default: null },
   },
   { timestamps: true, versionKey: false }
 );
