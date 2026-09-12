@@ -4,7 +4,8 @@ const {
   notifyInstructorsForSlot,
   buildClassStart60mEmail: buildInstructorClassStart60mEmail,
 } = require("./instructor-notifications.service");
-const { emitEventNotification } = require("./staffPanelNotification.service");
+const { is60mReminderSuppressedForCurrentSchedule } = require("./timetable-instructor-lifecycle.service");
+const { notifySchedulingAlertRecipients } = require("./scheduling-alert-recipients.service");
 const {
   parseSlotStart,
   buildClassStartReminderCopy,
@@ -39,7 +40,7 @@ async function runReminderTick() {
     ],
   })
     .select(
-      "_id batch_id section_id class_date time subject topic teacher staff_id meet_link instructor_reminder_60m_sent_at student_reminder_10m_sent_at meet_link_missing_10m_alert_sent_at class_live_sent_at"
+      "_id batch_id section_id class_date time subject topic teacher staff_id meet_link instructor_reminder_60m_sent_at instructor_reminder_60m_suppressed_schedule_revision schedule_revision student_reminder_10m_sent_at meet_link_missing_10m_alert_sent_at class_live_sent_at"
     )
     .lean();
 
@@ -54,9 +55,14 @@ async function runReminderTick() {
     const meet = String(slot.meet_link || "").trim();
     const meetAvailable = Boolean(meet);
 
-    // ── Instructor: "class starts in ~1 hour" email (fires as soon as the class is
-    //    within 60 min; if scheduled with less lead time, it sends right away). ──
-    if (startsAt > now && startsAt <= sixtyMin && !slot.instructor_reminder_60m_sent_at) {
+    // ── Instructor: "class starts in ~1 hour" email (~T-60m). Skipped when the slot was
+    //    created/rescheduled/reassigned too late for a meaningful 1-hour heads-up. ──
+    if (
+      startsAt > now &&
+      startsAt <= sixtyMin &&
+      !slot.instructor_reminder_60m_sent_at &&
+      !is60mReminderSuppressedForCurrentSchedule(slot)
+    ) {
       const claimed = await TimetableSlot.updateOne(
         { _id: slot._id, instructor_reminder_60m_sent_at: null },
         { $set: { instructor_reminder_60m_sent_at: new Date(), instructor_reminder_60m_meet_link: meet } }
@@ -91,7 +97,7 @@ async function runReminderTick() {
       }
     }
 
-    // If meet link is missing close to start time (~10 min), alert instructor + admins (once).
+    // If meet link is missing close to start time (~10 min), alert scheduling staff only (once).
     if (!meetAvailable && startsAt > now && startsAt <= tenMin && !slot.meet_link_missing_10m_alert_sent_at) {
       const claimed = await TimetableSlot.updateOne(
         { _id: slot._id, meet_link_missing_10m_alert_sent_at: null },
@@ -99,50 +105,54 @@ async function runReminderTick() {
       );
       if (claimed.modifiedCount === 1) {
         try {
-          // Instructor alert (panel + email if present in staff record).
-          await notifyInstructorsForSlot({
-            slot,
+          const slotId = String(slot._id);
+          const batchLine = slot.batch_id || "N/A";
+          const sectionLine = slot.section_id || "All";
+          const teacherLine = slot.teacher || "N/A";
+          const panelMessage = `Meet link is missing for ${slot.subject} (${whenText}). Batch: ${batchLine}${
+            slot.section_id ? `, Section: ${sectionLine}` : ""
+          }. Instructor: ${teacherLine}. Please add the Meet link in the timetable.`;
+
+          const result = await notifySchedulingAlertRecipients({
             event_type: "timetable_meet_link_missing_10m",
+            dedupeKeyPrefix: `timetable_meet_link_missing_10m:${slotId}`,
             title: "Meet link missing (class starts soon)",
-            message: `Meet link is missing for ${slot.subject} (${whenText}). Please add it in timetable ASAP.`,
-            emailBuilder: ({ staff }) => ({
+            panelMessage,
+            action_url: "/timetable",
+            email: (recipient) => ({
               subject: `Action required: Meet link missing (${slot.subject || "Class"})`,
               htmlContent: `<div style="font-family:Arial,sans-serif;color:#111">
                 <h2 style="margin:0 0 12px">Meet link missing</h2>
-                <p>Hello ${staff?.name || slot.teacher || "Instructor"},</p>
-                <p>Your class starts in about <strong>10 minutes</strong>, but the Meet link is missing.</p>
+                <p>Hello ${recipient.name || "Scheduling team"},</p>
+                <p>A class starts in about <strong>10 minutes</strong>, but the Google Meet link is still missing.</p>
                 <ul>
                   <li><strong>Subject:</strong> ${slot.subject || "N/A"}</li>
                   <li><strong>When:</strong> ${whenText}</li>
-                  <li><strong>Batch:</strong> ${slot.batch_id || "N/A"}</li>
-                  <li><strong>Section:</strong> ${slot.section_id || "All"}</li>
+                  <li><strong>Batch:</strong> ${batchLine}</li>
+                  <li><strong>Section:</strong> ${sectionLine}</li>
+                  <li><strong>Instructor:</strong> ${teacherLine}</li>
                 </ul>
-                <p>Please add the Meet link in the timetable immediately.</p>
+                <p>Please add the Meet link in the timetable.</p>
               </div>`,
               textContent: [
                 "Meet link missing (class starts soon).",
                 `Subject: ${slot.subject || "N/A"}`,
                 `When: ${whenText}`,
-                `Batch: ${slot.batch_id || "N/A"}`,
-                `Section: ${slot.section_id || "All"}`,
-                "Please add the Meet link in the timetable immediately.",
+                `Batch: ${batchLine}`,
+                `Section: ${sectionLine}`,
+                `Instructor: ${teacherLine}`,
+                "Please add the Meet link in the timetable.",
               ].join("\n"),
             }),
           });
 
-          // Admin alert (staff panel, deduped).
-          const slotId = String(slot._id);
-          await emitEventNotification({
-            audience: "role",
-            target_roles: ["super_admin", "admin"],
-            title: "Meet link missing (class starts soon)",
-            message: `Meet link is missing for ${slot.subject} (${whenText}). Batch: ${slot.batch_id}${slot.section_id ? `, Section: ${slot.section_id}` : ""}.`,
-            category: "alerts",
-            event_type: "timetable_meet_link_missing_10m",
-            dedupe_key: `timetable_meet_link_missing_10m:${slotId}:role:admin`,
-          });
+          if (!result.ok) {
+            await TimetableSlot.updateOne(
+              { _id: slot._id },
+              { $set: { meet_link_missing_10m_alert_sent_at: null } }
+            ).catch(() => {});
+          }
         } catch (e) {
-          // Roll back so it can retry if something failed unexpectedly.
           await TimetableSlot.updateOne({ _id: slot._id }, { $set: { meet_link_missing_10m_alert_sent_at: null } }).catch(
             () => {}
           );

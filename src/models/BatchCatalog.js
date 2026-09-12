@@ -27,6 +27,8 @@ const batchCatalogSchema = new mongoose.Schema(
     is_active: { type: Boolean, default: true, index: true },
     /** Included in "all default batches" views (e.g. staff doubts community). */
     include_in_default_views: { type: Boolean, default: true },
+    /** Google Drive folder where staff upload class/session recordings for this batch. */
+    recording_drive_folder_url: { type: String, default: "", trim: true },
   },
   { timestamps: true, versionKey: false }
 );

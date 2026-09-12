@@ -5,6 +5,10 @@ const path = require("path");
 const { sendSuccess, sendError } = require("../utils/response");
 const Staff = require("../models/Staff");
 const { ROLES, canCreateRole, canDeleteStaff, canResetPassword, permissionsForRole } = require("../utils/rbac");
+const {
+  isSchedulingAlertEligibleRole,
+  normalizeSchedulingAlertsFlag,
+} = require("../utils/scheduling-alerts");
 const { emitEventNotification } = require("../services/staffPanelNotification.service");
 const { isCloudinaryConfigured, uploadBufferToFolder, buildStaffProfileFolder } = require("../utils/cloudinary");
 const { getUploadsRoot } = require("../utils/upload-paths");
@@ -34,6 +38,40 @@ function sendInstructorBatchesRequired(res) {
     "BATCHES_REQUIRED",
     "Instructors must have at least one program batch assigned."
   );
+}
+
+function sendSchedulingAlertsRoleError(res) {
+  return sendError(
+    res,
+    400,
+    "VALIDATION_ERROR",
+    "Only admin or super_admin staff can receive scheduling alerts"
+  );
+}
+
+function sendSchedulingAlertsForbidden(res) {
+  return sendError(
+    res,
+    403,
+    "FORBIDDEN",
+    "Only super admin can manage scheduling alert recipients"
+  );
+}
+
+/** Designation of scheduling-alert recipients is super_admin-only (like role changes). */
+function assertCanManageSchedulingAlerts(actorRole, res) {
+  if (actorRole !== ROLES.SUPER_ADMIN) {
+    sendSchedulingAlertsForbidden(res);
+    return false;
+  }
+  return true;
+}
+
+/** Clear scheduling-alert flag when role is no longer eligible (auto-clear on role change). */
+function applyRoleSchedulingAlertsInvariant(doc) {
+  if (!isSchedulingAlertEligibleRole(doc.role)) {
+    doc.receives_scheduling_alerts = false;
+  }
 }
 
 function calcProfileCompletion(doc) {
@@ -132,6 +170,7 @@ function staffPublic(doc) {
     admin_notes: doc.admin_notes || "",
     last_updated_by_admin: doc.last_updated_by_admin || null,
     is_active: doc.is_active,
+    receives_scheduling_alerts: Boolean(doc.receives_scheduling_alerts),
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -190,11 +229,19 @@ async function createStaff(req, res) {
     role: z.enum(["admin", "instructor", "mentor"]),
     password: z.string().min(8).optional(),
     batches_assigned: z.union([z.array(z.string()), z.string()]).optional(),
+    receives_scheduling_alerts: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
 
   if (!canCreateRole(actorRole, body.role)) {
     return sendError(res, 403, "FORBIDDEN", "You cannot create this role");
+  }
+
+  if (body.receives_scheduling_alerts !== undefined) {
+    if (!assertCanManageSchedulingAlerts(actorRole, res)) return;
+    if (body.receives_scheduling_alerts && !isSchedulingAlertEligibleRole(body.role)) {
+      return sendSchedulingAlertsRoleError(res);
+    }
   }
 
   const batchesForCreate = body.role === ROLES.INSTRUCTOR ? parseCsvArray(body.batches_assigned) : [];
@@ -220,6 +267,10 @@ async function createStaff(req, res) {
     account_status: "active",
     is_active: true,
     batches_assigned: body.role === ROLES.INSTRUCTOR ? batchesForCreate : [],
+    receives_scheduling_alerts: normalizeSchedulingAlertsFlag(
+      body.role,
+      body.receives_scheduling_alerts === true
+    ),
   });
   await syncCompletion(created);
 
@@ -250,6 +301,7 @@ async function updateStaff(req, res) {
     name: z.string().min(2).trim().optional(),
     email: z.string().email().optional(),
     role: z.enum(["admin", "instructor", "mentor"]).optional(),
+    receives_scheduling_alerts: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
 
@@ -286,6 +338,18 @@ async function updateStaff(req, res) {
       );
     }
     target.role = nextRole;
+    applyRoleSchedulingAlertsInvariant(target);
+  }
+
+  if (body.receives_scheduling_alerts !== undefined) {
+    if (!assertCanManageSchedulingAlerts(actorRole, res)) return;
+    if (body.receives_scheduling_alerts && !isSchedulingAlertEligibleRole(target.role)) {
+      return sendSchedulingAlertsRoleError(res);
+    }
+    target.receives_scheduling_alerts = normalizeSchedulingAlertsFlag(
+      target.role,
+      body.receives_scheduling_alerts
+    );
   }
 
   if (body.email !== undefined) {
@@ -450,6 +514,7 @@ async function adminOverrideProfile(req, res) {
     expertise_area: z.string().max(180).optional(),
     availability: z.string().max(300).optional(),
     admin_notes: z.string().max(1200).optional(),
+    receives_scheduling_alerts: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
   const doc = await Staff.findById(req.params.id);
@@ -499,6 +564,17 @@ async function adminOverrideProfile(req, res) {
     if (body[key] !== undefined) doc[key] = typeof body[key] === "string" ? body[key].trim() : body[key];
   }
   if (body.role !== undefined) doc.role = body.role;
+  applyRoleSchedulingAlertsInvariant(doc);
+  if (body.receives_scheduling_alerts !== undefined) {
+    if (!assertCanManageSchedulingAlerts(actorRole, res)) return;
+    if (body.receives_scheduling_alerts && !isSchedulingAlertEligibleRole(doc.role)) {
+      return sendSchedulingAlertsRoleError(res);
+    }
+    doc.receives_scheduling_alerts = normalizeSchedulingAlertsFlag(
+      doc.role,
+      body.receives_scheduling_alerts
+    );
+  }
   if (body.subjects_teaching !== undefined) doc.subjects_teaching = parseCsvArray(body.subjects_teaching);
   if (body.batches_assigned !== undefined) doc.batches_assigned = parseCsvArray(body.batches_assigned);
   if (body.assigned_students !== undefined) doc.assigned_students = parseCsvArray(body.assigned_students);

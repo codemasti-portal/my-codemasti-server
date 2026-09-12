@@ -44,6 +44,10 @@ async function createNotification(payload) {
 
 /**
  * Event-triggered notifications (non-blocking for callers — log errors only).
+ * @returns {Promise<{ created: boolean, duplicate: boolean }>}
+ *   - created: a new panel row was inserted
+ *   - duplicate: dedupe_key conflict (event already recorded)
+ *   - neither true: unexpected persistence error (logged; not a duplicate)
  */
 async function emitEventNotification(payload) {
   try {
@@ -60,9 +64,13 @@ async function emitEventNotification(payload) {
       dedupe_key: payload.dedupe_key || "",
       created_by: payload.created_by || null,
     });
+    return { created: true, duplicate: false };
   } catch (e) {
-    if (e && (e.code === 11000 || String(e.message || "").includes("E11000"))) return;
+    if (e && (e.code === 11000 || String(e.message || "").includes("E11000"))) {
+      return { created: false, duplicate: true };
+    }
     console.warn("[StaffPanelNotification]", e.message || e);
+    return { created: false, duplicate: false };
   }
 }
 

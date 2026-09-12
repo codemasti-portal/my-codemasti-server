@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const MentorSlot = require("../models/MentorSlot");
 const Student = require("../models/Student");
 const Staff = require("../models/Staff");
@@ -21,6 +22,89 @@ async function insertNotificationsIgnoringDuplicates(docs) {
       : e?.code === 11000;
     if (!isDupOnly) throw e;
   }
+}
+
+/** Staff roles eligible to receive mentor-slot notifications (a mentor's Staff record may carry either role). */
+const MENTOR_RECIPIENT_ROLES = ["mentor", "instructor"];
+
+/**
+ * Canonical recipient resolver for all mentor-slot notification flows (publish, cancel, 15-min
+ * reminder, missing-meet-link alert). Every caller must use this instead of querying Staff by
+ * `mentor_name` directly, so recipient identity logic lives in exactly one place.
+ *
+ * Resolution order:
+ *   1. `slot.staff_id` present → resolve that exact active, eligible Staff doc. No name fan-out —
+ *      if the id no longer resolves (deactivated, role changed, deleted), that is treated as a
+ *      real "no recipient" outcome, not a reason to fall back to the (possibly stale) name.
+ *   2. `slot.staff_id` absent → legacy fallback: exact-match `mentor_name` against active,
+ *      eligible Staff.
+ *        - exactly one match → return it (today's normal case for well-formed legacy slots)
+ *        - zero matches      → return [] (caller decides what "no recipient" means for it)
+ *        - multiple matches  → ambiguous identity; return [] rather than notifying everyone who
+ *          happens to share that name. Logged for follow-up, per investigation finding.
+ *
+ * Returns a lean Staff array of length 0 or 1 (never more — that is the whole point of this
+ * resolver). Never throws for a resolution failure; only DB errors propagate.
+ */
+async function resolveMentorRecipients(slot) {
+  const staffId = slot?.staff_id ? String(slot.staff_id) : "";
+  if (staffId) {
+    if (!mongoose.isValidObjectId(staffId)) {
+      console.warn("[MENTOR_RECIPIENT_RESOLVE] slot.staff_id is not a valid ObjectId", {
+        slot_id: String(slot?._id || ""),
+        staff_id: staffId,
+      });
+      return [];
+    }
+    const staff = await Staff.findOne({
+      _id: staffId,
+      role: { $in: MENTOR_RECIPIENT_ROLES },
+      is_active: true,
+    })
+      .select("_id name email role")
+      .lean();
+    if (!staff) {
+      // staff_id is set but no longer resolves to an active, eligible Staff doc (deactivated,
+      // role changed away from mentor/instructor, or the record was deleted). Do NOT fall back
+      // to name matching here — staff_id is meant to be authoritative once present.
+      console.warn("[MENTOR_RECIPIENT_RESOLVE] staff_id set but no active eligible staff found", {
+        slot_id: String(slot?._id || ""),
+        staff_id: staffId,
+      });
+      return [];
+    }
+    return [staff];
+  }
+
+  const mentorName = String(slot?.mentor_name || "").trim();
+  if (!mentorName) return [];
+
+  const matches = await Staff.find({
+    role: { $in: MENTOR_RECIPIENT_ROLES },
+    is_active: true,
+    name: mentorName,
+  })
+    .select("_id name email role")
+    .lean();
+
+  if (matches.length === 1) return matches;
+
+  if (matches.length === 0) {
+    console.warn("[MENTOR_RECIPIENT_RESOLVE] no active staff matched mentor_name (legacy fallback)", {
+      slot_id: String(slot?._id || ""),
+      mentor_name: mentorName,
+    });
+    return [];
+  }
+
+  // matches.length > 1 — identity is ambiguous (Staff.name has no uniqueness constraint). Do not
+  // fan out to every name-collision; surface it for follow-up instead.
+  console.warn("[MENTOR_RECIPIENT_RESOLVE] ambiguous mentor_name — multiple active staff share this name, skipping notification", {
+    slot_id: String(slot?._id || ""),
+    mentor_name: mentorName,
+    matched_staff_ids: matches.map((m) => String(m._id)),
+  });
+  return [];
 }
 
 async function resolveMentorSlotStudents(slot) {
@@ -98,25 +182,20 @@ async function notifyMentorSlotCancelled(slot) {
     await insertNotificationsIgnoringDuplicates(docs);
   }
 
-  const mentorName = String(slot?.mentor_name || "").trim();
-  if (!mentorName) return;
-  const recipients = await Staff.find({
-    role: { $in: ["mentor", "instructor"] },
-    is_active: true,
-    name: mentorName,
-  })
-    .select("_id name email")
-    .lean();
+  const recipients = await resolveMentorRecipients(slot);
   for (const r of recipients) {
-    await emitEventNotification({
+    const dedupeKey = `mentor_session_cancelled:${slotId}:${String(r._id)}`;
+    const panelResult = await emitEventNotification({
       audience: "individual",
       recipient_id: String(r._id),
       title: "Mentor session cancelled",
       message: `Your mentor session on ${whenText} was cancelled.`,
       category: "alerts",
       event_type: "mentor_session_cancelled",
-      dedupe_key: `mentor_session_cancelled:${slotId}:${String(r._id)}`,
+      dedupe_key: dedupeKey,
     });
+    if (!panelResult.created) continue;
+
     if (r.email) {
       try {
         await sendSimpleEmail({
@@ -148,7 +227,7 @@ async function runMentorPublishSweepTick() {
     booking_state: { $ne: "cancelled" },
   })
     .select(
-      "_id mentor_name date time meet_link publish_date publish_notified_at target_batch_ids target_section_ids target_student_ids"
+      "_id mentor_name staff_id date time meet_link publish_date publish_notified_at mentor_assignment_revision schedule_revision target_batch_ids target_section_ids target_student_ids"
     )
     .limit(100)
     .lean();
@@ -172,7 +251,14 @@ async function runMentorPublishSweepTick() {
     );
     if (claimed.modifiedCount !== 1) continue;
     try {
-      await fanoutMentorSlotNotification({ ...slot, publish_notified_at: new Date() });
+      const publishedSlot = { ...slot, publish_notified_at: new Date() };
+      await fanoutMentorSlotNotification(publishedSlot);
+      try {
+        const { handleMentorLifecycleOnPublish } = require("./mentor-slot-lifecycle.service");
+        await handleMentorLifecycleOnPublish(publishedSlot);
+      } catch (lifecycleErr) {
+        console.error("[MENTOR_LIFECYCLE_ON_SWEEP_PUBLISH_FAILED]", lifecycleErr?.message || lifecycleErr);
+      }
     } catch (e) {
       await MentorSlot.updateOne({ _id: slot._id }, { $set: { publish_notified_at: null } }).catch(() => {});
       console.error("[MENTOR_PUBLISH_SWEEP_FAILED]", e?.message || e);
@@ -183,6 +269,7 @@ async function runMentorPublishSweepTick() {
 module.exports = {
   insertNotificationsIgnoringDuplicates,
   resolveMentorSlotStudents,
+  resolveMentorRecipients,
   fanoutMentorSlotNotification,
   notifyMentorSlotCancelled,
   runMentorPublishSweepTick,

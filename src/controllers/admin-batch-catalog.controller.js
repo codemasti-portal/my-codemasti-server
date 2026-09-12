@@ -10,6 +10,12 @@ const { catalogBatchMongoMatch, augmentStudentCatalogFieldsFromEnrollment, catal
 const { catalogBatchMongoMatchResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { getInstructorAssignedBatchIds } = require("../utils/instructorBatchScope");
 const registry = require("../utils/batch-catalog-registry");
+const {
+  GOOGLE_DRIVE_FOLDER_URL_MESSAGE,
+  normalizeGoogleDriveFolderUrlInput,
+  zGoogleDriveFolderUrlCreate,
+  zGoogleDriveFolderUrlPatch,
+} = require("../utils/google-drive-folder-url");
 
 function normCatalogSectionId(s) {
   return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "-");
@@ -73,6 +79,7 @@ const createBody = z.object({
   enrollment_prefix: z.string().trim().max(6).optional(),
   tier_label: z.string().trim().max(80).optional(),
   include_in_default_views: z.boolean().optional(),
+  recording_drive_folder_url: zGoogleDriveFolderUrlCreate(),
 });
 
 const updateBody = z.object({
@@ -82,7 +89,13 @@ const updateBody = z.object({
   enrollment_prefix: z.string().trim().max(6).optional(),
   tier_label: z.string().trim().max(80).optional(),
   include_in_default_views: z.boolean().optional(),
+  recording_drive_folder_url: zGoogleDriveFolderUrlPatch(),
 });
+
+function staffCanViewRecordingDestination(req) {
+  const role = String(req.staff?.role || "").trim();
+  return role === "super_admin" || role === "admin";
+}
 
 /** Validate + normalize an enrollment prefix; ensure no other batch already uses it. */
 async function validateUniquePrefix(rawPrefix, exceptBatchId = "") {
@@ -122,9 +135,9 @@ function normalizeSections(sections) {
   return out;
 }
 
-function serialize(doc) {
+function serialize(doc, { includeRecordingDestination = false } = {}) {
   const o = doc.toObject ? doc.toObject() : doc;
-  return {
+  const base = {
     id: String(o._id),
     batch_id: o.batch_id,
     name: o.name,
@@ -143,10 +156,30 @@ function serialize(doc) {
     updatedAt: o.updatedAt,
     createdAt: o.createdAt,
   };
+  if (includeRecordingDestination) {
+    const recordingUrl = String(o.recording_drive_folder_url || "").trim();
+    base.recording_drive_folder_url = recordingUrl;
+    base.recording_folder_configured = Boolean(recordingUrl);
+  }
+  return base;
+}
+
+function normalizeRecordingDestinationField(raw) {
+  try {
+    return normalizeGoogleDriveFolderUrlInput(raw);
+  } catch (e) {
+    const message = e?.message === GOOGLE_DRIVE_FOLDER_URL_MESSAGE
+      ? GOOGLE_DRIVE_FOLDER_URL_MESSAGE
+      : GOOGLE_DRIVE_FOLDER_URL_MESSAGE;
+    const err = new Error(message);
+    err.code = "VALIDATION_ERROR";
+    throw err;
+  }
 }
 
 async function list(req, res) {
   await ensureDefaultBatches();
+  const includeRecordingDestination = staffCanViewRecordingDestination(req);
   const instructorBatches = await getInstructorAssignedBatchIds(req);
   const batchQuery =
     instructorBatches !== null
@@ -160,7 +193,7 @@ async function list(req, res) {
   const rows = await BatchCatalog.find(batchQuery).sort({ order: 1, name: 1 }).lean();
   const out = await Promise.all(
     rows.map(async (r) => {
-      const base = serialize(r);
+      const base = serialize(r, { includeRecordingDestination });
       const filter = { role: "student", ...(await catalogBatchMongoMatchResolved(r.batch_id)) };
       const assignFilter = assignmentVisibleToCatalogBatchCountFilter(r.batch_id);
       const [student_count, assignment_count] = await Promise.all([
@@ -213,7 +246,10 @@ async function getOne(req, res) {
   const batch_id = String(req.params.batch_id || "").trim().toLowerCase();
   const doc = await BatchCatalog.findOne({ batch_id }).lean();
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Batch not found");
-  return sendSuccess(res, serialize(doc));
+  return sendSuccess(
+    res,
+    serialize(doc, { includeRecordingDestination: staffCanViewRecordingDestination(req) })
+  );
 }
 
 async function create(req, res) {
@@ -229,6 +265,14 @@ async function create(req, res) {
   }
   const { prefix, error: prefixErr } = await validateUniquePrefix(body.enrollment_prefix);
   if (prefixErr) return sendError(res, 400, "VALIDATION_ERROR", prefixErr);
+  let recording_drive_folder_url = "";
+  if (body.recording_drive_folder_url !== undefined) {
+    try {
+      recording_drive_folder_url = normalizeRecordingDestinationField(body.recording_drive_folder_url);
+    } catch (e) {
+      return sendError(res, 400, "VALIDATION_ERROR", e.message || GOOGLE_DRIVE_FOLDER_URL_MESSAGE);
+    }
+  }
   const doc = await BatchCatalog.create({
     batch_id,
     name: body.name,
@@ -238,6 +282,7 @@ async function create(req, res) {
     tier_label: body.tier_label || "",
     is_active: true,
     include_in_default_views: body.include_in_default_views !== false,
+    recording_drive_folder_url,
   });
   await registry.refresh(true);
 
@@ -268,7 +313,12 @@ async function create(req, res) {
     console.warn("[BATCH_COURSE_AUTOCREATE_FAILED]", batch_id, err?.message || err);
   }
 
-  return sendSuccess(res, serialize(doc), "Batch created", { course_autocreated: courseAutocreated });
+  return sendSuccess(
+    res,
+    serialize(doc, { includeRecordingDestination: true }),
+    "Batch created",
+    { course_autocreated: courseAutocreated }
+  );
 }
 
 async function update(req, res) {
@@ -292,9 +342,16 @@ async function update(req, res) {
   }
   if (body.tier_label !== undefined) doc.tier_label = body.tier_label;
   if (body.include_in_default_views !== undefined) doc.include_in_default_views = !!body.include_in_default_views;
+  if (body.recording_drive_folder_url !== undefined) {
+    try {
+      doc.recording_drive_folder_url = normalizeRecordingDestinationField(body.recording_drive_folder_url);
+    } catch (e) {
+      return sendError(res, 400, "VALIDATION_ERROR", e.message || GOOGLE_DRIVE_FOLDER_URL_MESSAGE);
+    }
+  }
   await doc.save();
   await registry.refresh(true);
-  return sendSuccess(res, serialize(doc), "Batch updated");
+  return sendSuccess(res, serialize(doc, { includeRecordingDestination: true }), "Batch updated");
 }
 
 async function remove(req, res) {

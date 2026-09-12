@@ -96,6 +96,57 @@ function parseSlotStart(classDateStr, timeLabel) {
   return null;
 }
 
+/**
+ * Parse the scheduled END of a class from class_date + time range label, or null if unparseable.
+ * Supports 24h "11:35-12:05" and 12h "09:00 AM - 10:30 AM" (end segment after the hyphen).
+ */
+function parseSlotEnd(classDateStr, timeLabel) {
+  const rawDate = String(classDateStr || "").trim();
+  if (!rawDate) return null;
+  const [y, m, d] = rawDate.slice(0, 10).split("-").map((v) => Number(v));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+
+  const tz = getClassTimeZone();
+  const raw = normalizeTimeString(timeLabel);
+
+  const parse12hEnd = raw.match(/-\s*(\d{1,2}):([0-5]\d)\s*(AM|PM)\b/i);
+  if (parse12hEnd) {
+    let hh = Number(parse12hEnd[1]);
+    const mm = Number(parse12hEnd[2]);
+    const period = String(parse12hEnd[3]).toUpperCase();
+    if (hh < 1 || hh > 12) return null;
+    if (period === "AM") {
+      if (hh === 12) hh = 0;
+    } else if (hh !== 12) {
+      hh += 12;
+    }
+    return wallTimeInZoneToDate(y, m, d, hh, mm, tz);
+  }
+
+  // 24:00 as end time = midnight at the start of the following calendar day (not 00:00 same day).
+  const parse24hHour24End = raw.match(/-\s*24:([0-5]\d)\s*$/);
+  if (parse24hHour24End) {
+    if (parse24hHour24End[1] !== "00") return null;
+    const nextCal = new Date(Date.UTC(y, m - 1, d));
+    nextCal.setUTCDate(nextCal.getUTCDate() + 1);
+    return wallTimeInZoneToDate(
+      nextCal.getUTCFullYear(),
+      nextCal.getUTCMonth() + 1,
+      nextCal.getUTCDate(),
+      0,
+      0,
+      tz
+    );
+  }
+
+  const parse24hEnd = raw.match(/-\s*([01]?\d|2[0-3]):([0-5]\d)\s*$/);
+  if (parse24hEnd) {
+    return wallTimeInZoneToDate(y, m, d, Number(parse24hEnd[1]), Number(parse24hEnd[2]), tz);
+  }
+
+  return null;
+}
+
 function formatDateYmdInClassTimeZone(dateValue) {
   const d = new Date(dateValue);
   if (Number.isNaN(d.getTime())) return "";
@@ -186,6 +237,7 @@ module.exports = {
   getClassTimeZone,
   normalizeTimeString,
   parseSlotStart,
+  parseSlotEnd,
   formatDateYmdInClassTimeZone,
   minutesUntilClassStart,
   isClassImminent,
