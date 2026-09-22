@@ -5,7 +5,9 @@ const AssignmentQuestion = require("../models/AssignmentQuestion");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { assignmentPublishedVisibleToCatalogBatch } = require("../utils/assignmentBatchFilter");
+const { filterAssignmentsOpenToStudents } = require("../utils/projectPublication");
 const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
+const { isAssignmentVisibleToStudent } = require("../utils/assignmentEligibility");
 const { pickDashboardContestCard, loadStudent } = require("../controllers/contest.controller");
 
 function visibleAssignmentsQueryForStudent(student, now = new Date()) {
@@ -39,7 +41,9 @@ async function summary(req, res) {
   await scopeStudentToBatch(req, student);
   const now = new Date();
   const assignmentQuery = visibleAssignmentsQueryForStudent(student, now);
-  const assignments = await Assignment.find(assignmentQuery).lean();
+  const rawAssignments = await Assignment.find(assignmentQuery).lean();
+  const studentVisible = rawAssignments.filter((a) => isAssignmentVisibleToStudent(a, student, now));
+  const assignments = await filterAssignmentsOpenToStudents(studentVisible);
 
   const assignmentIds = assignments.map((a) => a._id);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);

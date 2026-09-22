@@ -27,6 +27,8 @@ const {
   studentsInBatchesFilterResolved,
 } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
+const { isAssignmentVisibleToStudent } = require("../utils/assignmentEligibility");
+const { filterAssignmentsOpenToStudents, mongoExcludeExplicitProjectDrafts } = require("../utils/projectPublication");
 const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
@@ -158,49 +160,72 @@ async function assignmentProgressMapsForStudentRows(studentRows, now = new Date(
     // shared enrollment map when provided (listStudents fetches it once) — otherwise fetch it here.
     const rowIds = studentRows.map((s) => s._id);
     let batchesByStudent = opts.batchesByStudent;
+    const sectionByStudent = new Map();
+    for (const s of studentRows) sectionByStudent.set(String(s._id), {});
+    const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
+      .select("student_id batch_id section_id")
+      .lean();
     if (!batchesByStudent) {
       batchesByStudent = new Map();
       for (const s of studentRows) batchesByStudent.set(String(s._id), new Set());
-      const enr = await StudentEnrollment.find({ student_id: { $in: rowIds }, status: "active" })
-        .select("student_id batch_id")
-        .lean();
       for (const e of enr) {
         const b = String(e.batch_id || "").toLowerCase().trim();
         const sid = String(e.student_id);
         if (b && batchesByStudent.has(sid)) batchesByStudent.get(sid).add(b);
       }
     }
+    for (const e of enr) {
+      const b = String(e.batch_id || "").toLowerCase().trim();
+      const sid = String(e.student_id);
+      if (b && sectionByStudent.has(sid)) {
+        sectionByStudent.get(sid)[b] = String(e.section_id || "").toLowerCase().trim();
+      }
+    }
 
     const allBatchKeys = [...new Set([...batchesByStudent.values()].flatMap((set) => [...set]))].filter(Boolean);
-    // ONE query for every published assignment scoped to any of these batches (was a per-batch
-    // Assignment.find loop), then bucket per batch in memory using the SAME scope as the query
-    // (assignmentCatalogBatchScopeOr) so the result is identical.
     const publishedDocs = allBatchKeys.length
-      ? await Assignment.find({
-          $and: [
-            { release_date: { $lte: now } },
-            { $or: allBatchKeys.flatMap((bk) => assignmentCatalogBatchScopeOr(bk)) },
-          ],
-        })
-          .select("_id release_date batch_id batch_ids")
-          .lean()
+      ? await filterAssignmentsOpenToStudents(
+          await Assignment.find({
+            $and: [
+              { release_date: { $lte: now } },
+              mongoExcludeExplicitProjectDrafts(),
+              { $or: allBatchKeys.flatMap((bk) => assignmentCatalogBatchScopeOr(bk)) },
+            ],
+          })
+            .select(
+              "_id release_date batch_id batch_ids assignment_type project_published project_max_marks section_id section_ids"
+            )
+            .lean()
+        )
       : [];
     const docMatchesBatch = (a, bk) => {
       const primary = String(a.batch_id ?? "").toLowerCase().trim();
-      if (!primary) return true; // batch_id absent/"" → visible to all batches (mirrors the $or scope)
+      if (!primary) return true;
       if (primary === bk) return true;
       const arr = Array.isArray(a.batch_ids) ? a.batch_ids.map((x) => String(x ?? "").toLowerCase().trim()) : [];
       return arr.includes(bk);
     };
-    const aidsByBatch = new Map(
-      allBatchKeys.map((bk) => [bk, publishedDocs.filter((a) => docMatchesBatch(a, bk)).map((a) => String(a._id))])
+    const docsByBatch = new Map(
+      allBatchKeys.map((bk) => [bk, publishedDocs.filter((a) => docMatchesBatch(a, bk))])
     );
     const allAids = new Set();
     const aidSetByStudent = new Map();
     for (const s of studentRows) {
       const sid = String(s._id);
+      const studentForElig = {
+        ...s,
+        __membershipBatchIds: [...(batchesByStudent.get(sid) || [])],
+        __membershipSectionByBatch: sectionByStudent.get(sid) || {},
+      };
       const set = new Set();
-      for (const bk of batchesByStudent.get(sid) || []) for (const aid of aidsByBatch.get(bk) || []) { set.add(aid); allAids.add(aid); }
+      for (const bk of batchesByStudent.get(sid) || []) {
+        for (const a of docsByBatch.get(bk) || []) {
+          if (isAssignmentVisibleToStudent(a, studentForElig, now)) {
+            set.add(String(a._id));
+            allAids.add(String(a._id));
+          }
+        }
+      }
       aidSetByStudent.set(sid, set);
     }
     const allAidList = [...allAids];

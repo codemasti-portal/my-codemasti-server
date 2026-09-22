@@ -79,10 +79,11 @@ function assignmentCatalogBatchScopeOr(normalizedBatchId) {
 /** Published assignments visible to a catalog program (or all programs if batch key is empty). */
 function assignmentPublishedVisibleToCatalogBatch(batchKey, now = new Date()) {
   const published = { release_date: { $lte: now } };
+  const notDraftProject = { $nor: [{ assignment_type: "project", project_published: false }] };
   const b = String(batchKey || "").trim().toLowerCase();
-  if (!b) return published;
+  if (!b) return { $and: [published, notDraftProject] };
   return {
-    $and: [published, { $or: assignmentCatalogBatchScopeOr(b) }],
+    $and: [published, notDraftProject, { $or: assignmentCatalogBatchScopeOr(b) }],
   };
 }
 
@@ -122,7 +123,11 @@ function assignmentDocMatchesCatalogBatch(assignment, batchKey) {
 function assignmentDocIsPublished(assignment, now = new Date()) {
   const t = new Date(assignment?.release_date).getTime();
   if (Number.isNaN(t)) return false;
-  return t <= now.getTime();
+  if (t > now.getTime()) return false;
+  if (String(assignment?.assignment_type || "").toLowerCase() === "project" && assignment?.project_published === false) {
+    return false;
+  }
+  return true;
 }
 
 module.exports = {

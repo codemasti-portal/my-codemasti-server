@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const { sendSuccess, sendError } = require("../utils/response");
 const Assignment = require("../models/Assignment");
 const AssignmentQuestion = require("../models/AssignmentQuestion");
+const BatchCatalog = require("../models/BatchCatalog");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
@@ -44,6 +45,22 @@ const {
 const { studentsInCatalogBatchesFilter, catalogBatchStudentFilter } = require("../utils/enrollment");
 const { studentsInBatchesFilterResolved, catalogBatchStudentFilterResolved } = require("../utils/student-batch-context");
 const { assignmentMatchesCatalogBatchId } = require("../utils/assignmentBatchFilter");
+const {
+  resolveAssignmentCreateTargets,
+  validateSectionsForCatalog,
+  sectionFieldsToStore,
+  uniqueSectionIds,
+} = require("../utils/assignmentSectionTargeting");
+const { normalizeProjectDocument, hasProjectDocumentContent, emptyProjectDocument } = require("../utils/projectDocument");
+const {
+  mayCreateProjectQuestionPlaceholders,
+  mayCreateProjectQuestion,
+  isProjectAssignmentType,
+  CANONICAL_PROJECT_SLOT,
+  projectCreationSharedMetadataMatches,
+  projectCreationPayloadMatches,
+} = require("../utils/projectQuestionPolicy");
+const { normalizeProjectMaxMarks, isDuplicateKeyError } = require("../services/project-submission.service");
 const googleMeetCal = require("../services/google-calendar-meet.service");
 const {
   initLifecycleFieldsOnCreate,
@@ -56,6 +73,11 @@ const {
   apply60mSuppressionForCurrentSchedule,
 } = require("../services/timetable-instructor-lifecycle.service");
 const { notifyAssignmentReleasedIfEligible } = require("../services/assignment-notifications.service");
+const {
+  assessProjectReadiness,
+  projectPublicationStatus,
+  publishedProjectDocumentUpdateError,
+} = require("../utils/projectPublication");
 const { evaluateWebSubmission } = require("../services/web-evaluator");
 const { ROLES } = require("../utils/rbac");
 const {
@@ -109,6 +131,48 @@ function slugifyQuestionName(input) {
     .replace(/^-+|-+$/g, "");
   return base || `q-${Date.now()}`;
 }
+
+async function validateTargetsAgainstCatalog(res, targets) {
+  const batchIds = [...new Set(targets.map((t) => t.batch_id))];
+  const catalogs = await BatchCatalog.find({ batch_id: { $in: batchIds } }).select("batch_id sections").lean();
+  const byId = new Map(catalogs.map((c) => [String(c.batch_id || "").toLowerCase(), c]));
+  for (const t of targets) {
+    const check = validateSectionsForCatalog(t.batch_id, t.section_ids, byId.get(t.batch_id) || null);
+    if (!check.ok) {
+      sendError(res, 400, check.code, check.message);
+      return null;
+    }
+  }
+  return targets;
+}
+
+const projectMediaItemSchema = z.object({
+  url: z.string().trim().optional().default(""),
+  label: z.string().trim().optional().default(""),
+  caption: z.string().trim().optional(),
+  title: z.string().trim().optional(),
+  href: z.string().trim().optional(),
+});
+
+const projectDocumentSchema = z.object({
+  overview: z.string().optional().default(""),
+  prerequisites: z.string().optional().default(""),
+  deliverables: z.string().optional().default(""),
+  steps: z
+    .array(
+      z.object({
+        step_id: z.string().trim().optional(),
+        id: z.string().trim().optional(),
+        title: z.string().optional().default(""),
+        content: z.string().optional().default(""),
+        images: z.array(projectMediaItemSchema).optional().default([]),
+        videos: z.array(projectMediaItemSchema).optional().default([]),
+        resources: z.array(projectMediaItemSchema).optional().default([]),
+      })
+    )
+    .optional()
+    .default([]),
+});
 
 function paginate(req) {
   const page = Math.max(1, Number(req.query.page || 1));
@@ -179,6 +243,39 @@ async function handleStudentTimetableNotifications(slot, action) {
 }
 
 /** —— Assignments —— */
+async function projectStaffFlags(assignment) {
+  if (!isProjectAssignmentType(assignment?.assignment_type)) {
+    return {
+      project_publication_status: "n/a",
+      project_ready: true,
+      project_ready_errors: [],
+      xp_locked: false,
+      max_marks_locked: false,
+    };
+  }
+  const assignmentId = assignment._id || assignment.id;
+  const [ready, acceptedCount, evaluatedCount] = await Promise.all([
+    assessProjectReadiness(assignment),
+    AssignmentSubmission.countDocuments({
+      assignment_id: assignmentId,
+      kind: "project",
+      status: "Accepted",
+    }),
+    AssignmentSubmission.countDocuments({
+      assignment_id: assignmentId,
+      kind: "project",
+      "project.review_status": "evaluated",
+    }),
+  ]);
+  return {
+    project_publication_status: projectPublicationStatus(assignment),
+    project_ready: Boolean(ready.ok),
+    project_ready_errors: ready.ok ? [] : ready.details || [ready.message],
+    xp_locked: acceptedCount > 0,
+    max_marks_locked: evaluatedCount > 0,
+  };
+}
+
 async function listAssignments(req, res) {
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(500, Math.max(1, Number(req.query.limit || 20)));
@@ -189,9 +286,13 @@ async function listAssignments(req, res) {
     batchRaw !== undefined && String(batchRaw).trim() !== ""
       ? String(batchRaw).trim().toLowerCase()
       : null;
+  const creationGroupId = String(req.query.creation_group_id || "").trim();
 
   const clauses = [];
   if (subject) clauses.push({ subject });
+  if (creationGroupId) {
+    clauses.push({ creation_group_id: creationGroupId, assignment_type: "project" });
+  }
   const batchClause = batchNorm ? assignmentMatchesCatalogBatchId(batchNorm) : null;
   if (batchClause) clauses.push(batchClause);
 
@@ -228,16 +329,26 @@ async function getAssignment(req, res) {
   if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(doc, instructorBatches)) {
     return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
   }
-  return sendSuccess(res, { id: String(doc._id), ...doc });
+  const extra = await projectStaffFlags(doc);
+  return sendSuccess(res, { id: String(doc._id), ...doc, ...extra });
 }
 
 async function createAssignment(req, res) {
   const schema = z
     .object({
+      batch_targets: z
+        .array(
+          z.object({
+            batch_id: z.string().min(1).trim(),
+            section_ids: z.array(z.string().trim()).optional().default([]),
+          })
+        )
+        .optional(),
       batch_ids: z.array(z.string().min(1).trim()).optional().default([]),
-      batch_id: z.string().min(1).trim().optional(), // legacy support for single batch_id
+      batch_id: z.string().min(1).trim().optional(),
       title: z.string().min(1).trim().optional().default(""),
       section_id: z.string().trim().optional().default(""),
+      section_ids: z.array(z.string().trim()).optional(),
       subject: z.string().min(1).trim(),
       module: z.string().min(1).trim(),
       assignment_type: z.enum(["quiz", "coding", "written", "web", "project", "other"]).optional().default("written"),
@@ -247,13 +358,15 @@ async function createAssignment(req, res) {
       question_count: z.number().int().min(0).max(200).optional().default(0),
       resource_url: z.string().trim().optional().default(""),
       resource_size: z.string().trim().optional().default(""),
+      project_max_marks: z.number().min(0).max(1000).optional(),
+      creation_group_id: z.string().trim().max(80).optional().default(""),
     })
     .refine((d) => d.deadline_date >= d.release_date, {
       message: "Deadline must be on or after the publish (go live) time.",
       path: ["deadline_date"],
     });
   const body = schema.parse(req.body);
-  
+
   const instructorBatches = await getInstructorAssignedBatchIds(req);
   if (instructorBatches !== null) {
     if (!instructorBatches.length) {
@@ -261,57 +374,158 @@ async function createAssignment(req, res) {
     }
   }
 
-  // Support both batch_ids (array) and batch_id (legacy single)
-  let batchIds = body.batch_ids && body.batch_ids.length > 0 ? body.batch_ids : [];
-  if (!batchIds.length && body.batch_id) {
-    batchIds = [body.batch_id];
+  const resolved = resolveAssignmentCreateTargets(body);
+  if (!resolved.ok) {
+    return sendError(res, 400, resolved.code, resolved.message);
   }
-  if (!batchIds.length) {
-    return sendError(res, 400, "BATCH_REQUIRED", "At least one batch must be selected.");
-  }
+  const targets = await validateTargetsAgainstCatalog(res, resolved.targets);
+  if (!targets) return;
 
   if (instructorBatches !== null) {
     const allow = new Set(instructorBatches);
-    for (const batchId of batchIds) {
-      const norm = String(batchId || "").trim().toLowerCase();
-      if (!allow.has(norm)) {
+    for (const t of targets) {
+      if (!allow.has(t.batch_id)) {
         return sendError(res, 403, "FORBIDDEN", "You can only create assignments for your assigned batches");
       }
     }
   }
 
+  const batchIds = targets.map((t) => t.batch_id);
   const subjCheck = await resolveCatalogSubjectOrError(res, batchIds, body.subject);
   if (!subjCheck.ok) return;
   body.subject = subjCheck.value;
 
-  // Create one assignment record per batch
-  const createdAssignments = [];
-  for (const batchId of batchIds) {
-    const normBatch = batchId.toLowerCase().trim();
-    const created = await Assignment.create({
-      batch_id: normBatch,
-      batch_ids: [normBatch],
-      section_id: body.section_id || "",
-      title: body.title || "",
-      subject: body.subject,
-      module: body.module,
-      assignment_type: body.assignment_type,
-      programming_language: body.programming_language,
-      release_date: body.release_date,
-      deadline_date: body.deadline_date,
-      resource_url: body.resource_url || "",
-      resource_size: body.resource_size || "",
-    });
+  const isProject = isProjectAssignmentType(body.assignment_type);
+  const placeholderGate = mayCreateProjectQuestionPlaceholders(body.assignment_type, body.question_count);
+  if (!placeholderGate.ok) {
+    return sendError(res, 400, placeholderGate.code, placeholderGate.message);
+  }
 
+  const groupId = isProject ? String(body.creation_group_id || "").trim() : "";
+  const createMaxMarks = normalizeProjectMaxMarks(body.project_max_marks, 100);
+  const createIdentity = {
+    title: body.title || "",
+    subject: body.subject,
+    module: body.module,
+    release_date: body.release_date,
+    deadline_date: body.deadline_date,
+    project_max_marks: createMaxMarks,
+  };
+
+  if (isProject && groupId) {
+    const existingForGroup = await Assignment.find({
+      creation_group_id: groupId,
+      assignment_type: "project",
+    }).lean();
+    const targetByBatch = new Map(targets.map((t) => [t.batch_id, t]));
+    for (const row of existingForGroup) {
+      if (!projectCreationSharedMetadataMatches(row, createIdentity)) {
+        return sendError(
+          res,
+          409,
+          "CREATION_GROUP_CONFLICT",
+          "This creation group already created a different Project. Retry with the original title, subject, module, dates, and marks, or use a new creation_group_id.",
+          { existing_id: String(row._id), batch_id: row.batch_id }
+        );
+      }
+      const target = targetByBatch.get(String(row.batch_id || "").toLowerCase().trim());
+      if (target && !projectCreationPayloadMatches(row, { ...createIdentity, section_ids: target.section_ids })) {
+        return sendError(
+          res,
+          409,
+          "CREATION_GROUP_CONFLICT",
+          "This creation group already created a Project for this batch with different section targeting. Retry with the original sections, or use a new creation_group_id.",
+          { existing_id: String(row._id), batch_id: row.batch_id }
+        );
+      }
+    }
+  }
+
+  async function recoveredProjectHeader(existing) {
+    const questionCount = await AssignmentQuestion.countDocuments({ assignment_id: existing._id });
+    const obj = typeof existing.toObject === "function" ? existing.toObject() : existing;
+    return {
+      id: String(existing._id),
+      ...obj,
+      question_count: questionCount,
+      recovered: true,
+    };
+  }
+
+  const createdAssignments = [];
+  for (const t of targets) {
+    const sectionStore = sectionFieldsToStore(t.section_ids);
+    if (isProject && groupId) {
+      const existing = await Assignment.findOne({
+        creation_group_id: groupId,
+        batch_id: t.batch_id,
+        assignment_type: "project",
+      });
+      if (existing) {
+        if (!projectCreationPayloadMatches(existing, { ...createIdentity, section_ids: t.section_ids })) {
+          return sendError(
+            res,
+            409,
+            "CREATION_GROUP_CONFLICT",
+            "This creation group already created a different Project for this batch. Retry with the original payload, or use a new creation_group_id.",
+            { existing_id: String(existing._id), batch_id: t.batch_id }
+          );
+        }
+        createdAssignments.push(await recoveredProjectHeader(existing));
+        continue;
+      }
+    }
+
+    let created;
+    try {
+      created = await Assignment.create({
+        batch_id: t.batch_id,
+        batch_ids: [t.batch_id],
+        section_id: sectionStore.section_id,
+        section_ids: sectionStore.section_ids,
+        title: body.title || "",
+        subject: body.subject,
+        module: body.module,
+        assignment_type: body.assignment_type,
+        programming_language: body.programming_language,
+        release_date: body.release_date,
+        deadline_date: body.deadline_date,
+        resource_url: body.resource_url || "",
+        resource_size: body.resource_size || "",
+        project_max_marks: createMaxMarks,
+        ...(isProject ? { project_published: false, creation_group_id: groupId } : {}),
+      });
+    } catch (err) {
+      if (!(isProject && groupId && isDuplicateKeyError(err))) throw err;
+      const raced = await Assignment.findOne({
+        creation_group_id: groupId,
+        batch_id: t.batch_id,
+        assignment_type: "project",
+      });
+      if (!raced) throw err;
+      if (!projectCreationPayloadMatches(raced, { ...createIdentity, section_ids: t.section_ids })) {
+        return sendError(
+          res,
+          409,
+          "CREATION_GROUP_CONFLICT",
+          "This creation group already created a different Project for this batch. Retry with the original payload, or use a new creation_group_id.",
+          { existing_id: String(raced._id), batch_id: t.batch_id }
+        );
+      }
+      createdAssignments.push(await recoveredProjectHeader(raced));
+      continue;
+    }
+
+    let questionCount = 0;
     if (body.question_count > 0) {
       const placeholders = Array.from({ length: body.question_count }, (_, idx) => {
         const n = idx + 1;
-        const title = `Question ${n}`;
+        const title = isProject ? body.title || "Project" : `Question ${n}`;
         return {
           assignment_id: created._id,
-          name: slugifyQuestionName(`question-${n}`),
+          name: slugifyQuestionName(isProject ? "project-document" : `question-${n}`),
           title,
-          description: "Add question description.",
+          description: isProject ? "Project assignment" : "Add question description.",
           difficulty: "easy",
           xp: 10,
           topics: [],
@@ -327,25 +541,34 @@ async function createAssignment(req, res) {
           hidden_tests: [],
           question_image_url: "",
           quiz_options: [],
+          project_document: isProject ? emptyProjectDocument() : undefined,
+          ...(isProject ? { project_slot: CANONICAL_PROJECT_SLOT } : {}),
         };
       });
-      await AssignmentQuestion.insertMany(placeholders);
+      try {
+        await AssignmentQuestion.insertMany(placeholders);
+        questionCount = placeholders.length;
+      } catch (err) {
+        if (!(isProject && isDuplicateKeyError(err))) throw err;
+        questionCount = await AssignmentQuestion.countDocuments({ assignment_id: created._id });
+      }
     }
 
-    try {
-      await notifyAssignmentReleasedIfEligible(created.toObject());
-    } catch (e) {
-      console.warn("[ASSIGNMENT_NOTIFY_FANOUT]", e?.message || e);
+    if (!isProject) {
+      try {
+        await notifyAssignmentReleasedIfEligible(created.toObject());
+      } catch (e) {
+        console.warn("[ASSIGNMENT_NOTIFY_FANOUT]", e?.message || e);
+      }
     }
 
     createdAssignments.push({
       id: String(created._id),
       ...created.toObject(),
-      question_count: body.question_count,
+      question_count: questionCount,
     });
   }
 
-  // Return first assignment or success message with count
   return sendSuccess(
     res,
     {
@@ -363,6 +586,7 @@ async function updateAssignment(req, res) {
     batch_id: z.string().trim().optional(),
     title: z.string().trim().optional(),
     section_id: z.string().trim().optional(),
+    section_ids: z.array(z.string().trim()).optional(),
     subject: z.string().min(1).trim().optional(),
     module: z.string().min(1).trim().optional(),
     assignment_type: z.enum(["quiz", "coding", "written", "web", "project", "other"]).optional(),
@@ -371,6 +595,8 @@ async function updateAssignment(req, res) {
     deadline_date: z.coerce.date().optional(),
     resource_url: z.string().trim().optional(),
     resource_size: z.string().trim().optional(),
+    project_max_marks: z.number().min(0).max(1000).optional(),
+    project_published: z.boolean().optional(),
   });
   const body = schema.parse(req.body);
   const doc = await Assignment.findById(req.params.id);
@@ -399,8 +625,7 @@ async function updateAssignment(req, res) {
       }
     }
   }
-  
-  // Handle batch_ids array (for future multi-batch support) — keep batch_id + batch_ids in sync
+
   if (body.batch_ids !== undefined && body.batch_ids.length > 0) {
     const normalized = body.batch_ids.map((x) => String(x || "").toLowerCase().trim()).filter(Boolean);
     doc.batch_ids = normalized;
@@ -410,14 +635,58 @@ async function updateAssignment(req, res) {
     doc.batch_id = one;
     doc.batch_ids = one ? [one] : [];
   }
-  
+
+  if (body.section_ids !== undefined || body.section_id !== undefined) {
+    const nextIds =
+      body.section_ids !== undefined
+        ? uniqueSectionIds(body.section_ids)
+        : uniqueSectionIds([body.section_id]);
+    const catalogBid = String(doc.batch_id || "").toLowerCase().trim();
+    if (nextIds.length && catalogBid) {
+      const cat = await BatchCatalog.findOne({ batch_id: catalogBid }).select("batch_id sections").lean();
+      const check = validateSectionsForCatalog(catalogBid, nextIds, cat);
+      if (!check.ok) return sendError(res, 400, check.code, check.message);
+    } else if (nextIds.length && !catalogBid) {
+      return sendError(res, 400, "BATCH_REQUIRED", "Cannot set section targeting on an unscoped assignment.");
+    }
+    const stored = sectionFieldsToStore(nextIds);
+    doc.section_ids = stored.section_ids;
+    doc.section_id = stored.section_id;
+  }
+
   if (body.subject !== undefined) {
     const subjCheck = await resolveCatalogSubjectOrError(res, doc.batch_ids, body.subject);
     if (!subjCheck.ok) return;
     body.subject = subjCheck.value;
   }
 
-  const { batch_id: _b, batch_ids: _bs, ...rest } = body;
+  const { batch_id: _b, batch_ids: _bs, section_id: _s, section_ids: _ss, project_published: publishedFlag, ...rest } = body;
+  if (publishedFlag !== undefined) {
+    return sendError(
+      res,
+      400,
+      "USE_PROJECT_PUBLISH",
+      "Use POST /admin/assignments/:id/project-publish or project-unpublish to change Project publication."
+    );
+  }
+  if (rest.project_max_marks !== undefined) {
+    rest.project_max_marks = normalizeProjectMaxMarks(rest.project_max_marks, 100);
+    if (isProjectAssignmentType(doc.assignment_type)) {
+      const evaluatedCount = await AssignmentSubmission.countDocuments({
+        assignment_id: doc._id,
+        kind: "project",
+        "project.review_status": "evaluated",
+      });
+      if (evaluatedCount > 0 && Number(rest.project_max_marks) !== Number(doc.project_max_marks)) {
+        return sendError(
+          res,
+          409,
+          "PROJECT_MAX_MARKS_LOCKED",
+          "Maximum marks cannot change after at least one student has been evaluated."
+        );
+      }
+    }
+  }
   Object.assign(doc, rest);
 
   const rel = doc.release_date;
@@ -431,12 +700,62 @@ async function updateAssignment(req, res) {
     );
   }
   await doc.save();
+  if (!isProjectAssignmentType(doc.assignment_type) || doc.project_published === true) {
+    try {
+      await notifyAssignmentReleasedIfEligible(doc.toObject());
+    } catch (e) {
+      console.warn("[ASSIGNMENT_NOTIFY_FANOUT_UPDATE]", e?.message || e);
+    }
+  }
+  const extra = await projectStaffFlags(doc.toObject());
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject(), ...extra }, "Updated");
+}
+
+async function publishProjectAssignment(req, res) {
+  const doc = await Assignment.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
+  if (!isProjectAssignmentType(doc.assignment_type)) {
+    return sendError(res, 400, "NOT_A_PROJECT", "Only Project assignments can be published with this endpoint.");
+  }
+  const ready = await assessProjectReadiness(doc.toObject());
+  if (!ready.ok) {
+    return sendError(res, 400, ready.code || "PROJECT_NOT_READY", ready.message, {
+      details: ready.details || [],
+    });
+  }
+  doc.project_published = true;
+  await doc.save();
   try {
     await notifyAssignmentReleasedIfEligible(doc.toObject());
   } catch (e) {
-    console.warn("[ASSIGNMENT_NOTIFY_FANOUT_UPDATE]", e?.message || e);
+    console.warn("[ASSIGNMENT_NOTIFY_FANOUT_PUBLISH]", e?.message || e);
   }
-  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
+  const extra = await projectStaffFlags(doc.toObject());
+  return sendSuccess(res, { id: String(doc._id), ...doc.toObject(), ...extra }, "Published");
+}
+
+async function unpublishProjectAssignment(req, res) {
+  const doc = await Assignment.findById(req.params.id);
+  if (!doc) return sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  const instructorBatches = await getInstructorAssignedBatchIds(req);
+  if (instructorBatches !== null && !assignmentDocTouchesAllowedBatches(doc, instructorBatches)) {
+    return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
+  }
+  if (!isProjectAssignmentType(doc.assignment_type)) {
+    return sendError(res, 400, "NOT_A_PROJECT", "Only Project assignments can be unpublished with this endpoint.");
+  }
+  doc.project_published = false;
+  await doc.save();
+  const extra = await projectStaffFlags(doc.toObject());
+  return sendSuccess(
+    res,
+    { id: String(doc._id), ...doc.toObject(), ...extra },
+    "Unpublished. Existing submissions and XP were not changed."
+  );
 }
 
 async function deleteAssignment(req, res) {
@@ -475,6 +794,7 @@ async function listAssignmentQuestions(req, res) {
       difficulty: q.difficulty,
       xp: q.xp,
       topics: q.topics,
+      has_project_document: hasProjectDocumentContent(q.project_document),
     }))
   );
 }
@@ -545,6 +865,7 @@ const questionBodySchema = z.object({
     )
     .max(30, "Maximum 30 DOM checks allowed.")
     .optional(),
+  project_document: projectDocumentSchema.optional(),
 });
 
 async function createAssignmentQuestion(req, res) {
@@ -556,18 +877,51 @@ async function createAssignmentQuestion(req, res) {
     return sendError(res, 403, "FORBIDDEN", "Assignment is not for your assigned batches");
   }
   const body = questionBodySchema.parse(req.body);
-  const computedName = slugifyQuestionName(body.name || body.title);
-  const created = await AssignmentQuestion.create({
-    assignment_id: assignmentId,
-    ...body,
-    name: computedName,
-    starter_code: body.starter_code || {},
-    hidden_tests: body.hidden_tests || [],
-    dom_tests: body.dom_tests || [],
-    html_starter: body.html_starter || "",
-    css_starter: body.css_starter || "",
-  });
-  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+  const isProject = isProjectAssignmentType(a.assignment_type);
+  if (!isProject && body.project_document !== undefined) {
+    return sendError(res, 400, "INVALID_FIELD", "project_document is only allowed on project assignments.");
+  }
+  if (isProject) {
+    const existing = await AssignmentQuestion.countDocuments({ assignment_id: assignmentId });
+    const gate = mayCreateProjectQuestion(a.assignment_type, existing);
+    if (!gate.ok) {
+      return sendError(res, 409, gate.code, gate.message);
+    }
+  }
+  if (body.project_document !== undefined) {
+    const n = normalizeProjectDocument(body.project_document);
+    if (!n.ok) return sendError(res, 400, "INVALID_PROJECT_DOCUMENT", n.message);
+    body.project_document = n.value;
+  } else if (isProject) {
+    body.project_document = emptyProjectDocument();
+  }
+  const publishedDocErr = publishedProjectDocumentUpdateError(a, isProject ? body.project_document : undefined);
+  if (publishedDocErr) {
+    return sendError(res, 400, publishedDocErr.code, publishedDocErr.message);
+  }
+  const computedName = slugifyQuestionName(body.name || (isProject ? "project-document" : body.title));
+  try {
+    const created = await AssignmentQuestion.create({
+      assignment_id: assignmentId,
+      ...body,
+      name: computedName,
+      starter_code: body.starter_code || {},
+      hidden_tests: body.hidden_tests || [],
+      dom_tests: body.dom_tests || [],
+      html_starter: body.html_starter || "",
+      css_starter: body.css_starter || "",
+      ...(isProject ? { project_slot: CANONICAL_PROJECT_SLOT } : {}),
+    });
+    return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
+  } catch (err) {
+    if (!(isProject && isDuplicateKeyError(err))) throw err;
+    const raced = await AssignmentQuestion.findOne({
+      assignment_id: assignmentId,
+      project_slot: CANONICAL_PROJECT_SLOT,
+    });
+    if (!raced) throw err;
+    return sendSuccess(res, { id: String(raced._id), ...raced.toObject(), recovered: true }, "Created");
+  }
 }
 
 async function getAssignmentQuestion(req, res) {
@@ -594,6 +948,34 @@ async function updateAssignmentQuestion(req, res) {
   }
   const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
+  const isProject = isProjectAssignmentType(a.assignment_type);
+  if (!isProject && body.project_document !== undefined) {
+    return sendError(res, 400, "INVALID_FIELD", "project_document is only allowed on project assignments.");
+  }
+  if (isProject && body.xp !== undefined && Number(body.xp) !== Number(q.xp)) {
+    const acceptedCount = await AssignmentSubmission.countDocuments({
+      assignment_id: assignmentId,
+      kind: "project",
+      status: "Accepted",
+    });
+    if (acceptedCount > 0) {
+      return sendError(
+        res,
+        409,
+        "PROJECT_XP_LOCKED",
+        "XP cannot change after a student has successfully submitted this project."
+      );
+    }
+  }
+  if (body.project_document !== undefined) {
+    const n = normalizeProjectDocument(body.project_document);
+    if (!n.ok) return sendError(res, 400, "INVALID_PROJECT_DOCUMENT", n.message);
+    body.project_document = n.value;
+  }
+  const publishedDocErr = publishedProjectDocumentUpdateError(a, body.project_document);
+  if (publishedDocErr) {
+    return sendError(res, 400, publishedDocErr.code, publishedDocErr.message);
+  }
   const { starter_code: starterPatch, ...rest } = body;
   Object.assign(q, rest);
   if (starterPatch !== undefined) {
@@ -613,6 +995,14 @@ async function deleteAssignmentQuestion(req, res) {
   }
   const q = await AssignmentQuestion.findOne({ _id: questionId, assignment_id: assignmentId });
   if (!q) return sendError(res, 404, "NOT_FOUND", "Question not found");
+  if (isProjectAssignmentType(a.assignment_type) && a.project_published === true) {
+    return sendError(
+      res,
+      409,
+      "PROJECT_PUBLISHED_QUESTION_LOCKED",
+      "Cannot delete the project document while the assignment is published. Unpublish first."
+    );
+  }
   await AssignmentSubmission.deleteMany({ question_id: questionId });
   await AssignmentQuestion.deleteOne({ _id: questionId });
   return sendSuccess(res, { id: questionId }, "Deleted");
@@ -2352,6 +2742,8 @@ module.exports = {
   createAssignment,
   updateAssignment,
   deleteAssignment,
+  publishProjectAssignment,
+  unpublishProjectAssignment,
   listAssignmentQuestions,
   createAssignmentQuestion,
   getAssignmentQuestion,

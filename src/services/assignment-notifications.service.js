@@ -2,6 +2,16 @@ const Assignment = require("../models/Assignment");
 const Notification = require("../models/Notification");
 const Student = require("../models/Student");
 const { studentsInBatchesFilterResolved } = require("../utils/student-batch-context");
+const { effectiveAssignmentSectionIds } = require("../utils/assignmentSectionTargeting");
+const { isProjectAssignmentType } = require("../utils/projectQuestionPolicy");
+
+function notificationSectionIds(assignment) {
+  if (isProjectAssignmentType(assignment?.assignment_type)) {
+    return effectiveAssignmentSectionIds(assignment);
+  }
+  const one = String(assignment?.section_id || "").trim().toLowerCase();
+  return one ? [one] : [];
+}
 
 /**
  * In-app "new assignment" fanout. Call only when the assignment is live for students
@@ -10,7 +20,7 @@ const { studentsInBatchesFilterResolved } = require("../utils/student-batch-cont
 async function fanoutAssignmentReleaseNotification(assignment) {
   const batchId = String(assignment?.batch_id || "").trim().toLowerCase();
   if (!batchId) return;
-  const sectionId = String(assignment?.section_id || "").trim().toLowerCase();
+  const sectionIds = notificationSectionIds(assignment);
   const subject = String(assignment?.subject || "").trim();
   const moduleLabel = String(assignment?.module || "").trim();
   const explicitTitle = String(assignment?.title || "").trim();
@@ -24,7 +34,10 @@ async function fanoutAssignmentReleaseNotification(assignment) {
   const refId = `assignment:${assignmentIdStr}`;
   const deepLink = `/assignments/${assignmentIdStr}`;
 
-  const studentFilter = await studentsInBatchesFilterResolved([batchId], { sectionId });
+  const studentFilter = await studentsInBatchesFilterResolved(
+    [batchId],
+    sectionIds.length ? { sectionIds } : {}
+  );
 
   const students = await Student.find(studentFilter).select("_id").lean();
   if (!students.length) return;
@@ -53,6 +66,16 @@ function isAssignmentReleaseLive(releaseDate) {
  */
 async function notifyAssignmentReleasedIfEligible(assignmentLean) {
   if (!assignmentLean?._id) return { notified: false, reason: "bad_doc" };
+  const { isProjectOpenForStudentDiscovery } = require("../utils/projectPublication");
+  if (isProjectAssignmentType(assignmentLean.assignment_type)) {
+    const open = await isProjectOpenForStudentDiscovery(assignmentLean);
+    if (!open) {
+      return {
+        notified: false,
+        reason: assignmentLean.project_published === false ? "draft" : "not_ready",
+      };
+    }
+  }
   if (!isAssignmentReleaseLive(assignmentLean.release_date)) {
     return { notified: false, reason: "not_live" };
   }

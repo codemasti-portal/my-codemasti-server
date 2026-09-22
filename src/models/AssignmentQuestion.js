@@ -116,8 +116,61 @@ const assignmentQuestionSchema = new mongoose.Schema(
         { dimension: "Clarity",      weight: 1, max_score: 5, description: "Is the answer well-structured and easy to understand?" },
       ],
     },
+
+    // ── Project-specific instructional document (not separate questions) ─────
+    project_document: {
+      type: {
+        overview: { type: String, default: "" },
+        prerequisites: { type: String, default: "" },
+        steps: {
+          type: [
+            {
+              step_id: { type: String, required: true, trim: true },
+              title: { type: String, default: "", trim: true },
+              content: { type: String, default: "" },
+              images: {
+                type: [{ url: { type: String, trim: true }, label: { type: String, default: "", trim: true }, _id: false }],
+                default: [],
+              },
+              videos: {
+                type: [{ url: { type: String, trim: true }, label: { type: String, default: "", trim: true }, _id: false }],
+                default: [],
+              },
+              resources: {
+                type: [{ url: { type: String, trim: true }, label: { type: String, default: "", trim: true }, _id: false }],
+                default: [],
+              },
+              _id: false,
+            },
+          ],
+          default: [],
+        },
+        deliverables: { type: String, default: "" },
+      },
+      default: () => ({ overview: "", prerequisites: "", steps: [], deliverables: "" }),
+    },
+    /**
+     * Project-only discriminator. "canonical" marks the single document question for a
+     * newly authored Project. Empty on quiz/coding/written/web and on historical Project
+     * questions so a partial unique index can enforce at-most-one canonical row without
+     * breaking multi-question assignment types or legacy multi-question Projects.
+     */
+    project_slot: { type: String, default: "", trim: true, index: true },
   },
   { timestamps: true, versionKey: false }
+);
+
+/**
+ * At most one canonical Project question per assignment.
+ * Historical Project questions omit project_slot (or leave it "") and are not constrained.
+ */
+assignmentQuestionSchema.index(
+  { assignment_id: 1 },
+  {
+    unique: true,
+    name: "uniq_project_canonical_question",
+    partialFilterExpression: { project_slot: "canonical" },
+  }
 );
 
 module.exports = mongoose.model("AssignmentQuestion", assignmentQuestionSchema);
