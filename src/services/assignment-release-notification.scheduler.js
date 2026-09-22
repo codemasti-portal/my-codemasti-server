@@ -1,5 +1,7 @@
 const Assignment = require("../models/Assignment");
 const { notifyAssignmentReleasedIfEligible } = require("./assignment-notifications.service");
+const { filterAssignmentsOpenToStudents } = require("../utils/projectPublication");
+const { isProjectAssignmentType } = require("../utils/projectQuestionPolicy");
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 
@@ -7,16 +9,37 @@ const CHECK_INTERVAL_MS = 60 * 1000;
 async function backfillReleaseNotificationFlag() {
   try {
     const now = new Date();
-    const r = await Assignment.updateMany(
+    const nonProject = await Assignment.updateMany(
       {
+        assignment_type: { $ne: "project" },
         release_date: { $lte: now },
         $or: [{ release_notification_sent_at: { $exists: false } }, { release_notification_sent_at: null }],
       },
       [{ $set: { release_notification_sent_at: "$release_date" } }],
       { updatePipeline: true }
     );
-    if (r.modifiedCount > 0) {
-      console.log("[ASSIGNMENT_NOTIFY_BACKFILL]", { modifiedCount: r.modifiedCount });
+
+    const projectCandidates = await Assignment.find({
+      assignment_type: "project",
+      project_published: { $ne: false },
+      release_date: { $lte: now },
+      $or: [{ release_notification_sent_at: { $exists: false } }, { release_notification_sent_at: null }],
+    }).lean();
+    const openProjects = await filterAssignmentsOpenToStudents(projectCandidates);
+    const openIds = openProjects.map((a) => a._id);
+    let projectModified = 0;
+    if (openIds.length) {
+      const project = await Assignment.updateMany(
+        { _id: { $in: openIds }, release_notification_sent_at: null },
+        [{ $set: { release_notification_sent_at: "$release_date" } }],
+        { updatePipeline: true }
+      );
+      projectModified = project.modifiedCount || 0;
+    }
+
+    const modifiedCount = (nonProject.modifiedCount || 0) + projectModified;
+    if (modifiedCount > 0) {
+      console.log("[ASSIGNMENT_NOTIFY_BACKFILL]", { modifiedCount });
     }
   } catch (e) {
     console.error("[ASSIGNMENT_NOTIFY_BACKFILL_FAILED]", e?.message || e);
@@ -28,12 +51,21 @@ async function runTick() {
   const candidates = await Assignment.find({
     release_date: { $lte: now },
     release_notification_sent_at: null,
+    $nor: [{ assignment_type: "project", project_published: false }],
   })
     .sort({ release_date: 1 })
-    .limit(40)
+    .limit(80)
     .lean();
 
-  for (const row of candidates) {
+  const nonProjects = candidates.filter((row) => !isProjectAssignmentType(row.assignment_type));
+  const openProjects = await filterAssignmentsOpenToStudents(
+    candidates.filter((row) => isProjectAssignmentType(row.assignment_type))
+  );
+  const ready = [...nonProjects, ...openProjects]
+    .sort((a, b) => new Date(a.release_date).getTime() - new Date(b.release_date).getTime())
+    .slice(0, 40);
+
+  for (const row of ready) {
     try {
       await notifyAssignmentReleasedIfEligible(row);
     } catch (e) {

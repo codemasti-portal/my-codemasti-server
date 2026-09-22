@@ -4,6 +4,7 @@ const { ROLES } = require("../../utils/rbac");
 const controller = require("../../controllers/admin.controller");
 const content = require("../../controllers/admin-content.controller");
 const catalog = require("../../controllers/admin-catalog.controller");
+const projectReview = require("../../controllers/admin-project-review.controller");
 const batchCatalog = require("../../controllers/admin-batch-catalog.controller");
 const adminUpload = require("../../controllers/admin-upload.controller");
 const adminScorecard = require("../../controllers/admin-scorecard.controller");
@@ -102,9 +103,22 @@ router.delete(
 );
 router.get("/assignments/:assignmentId/questions", ...manageAssignments, catalog.listAssignmentQuestions);
 router.post("/assignments/:assignmentId/questions", ...manageAssignments, catalog.createAssignmentQuestion);
+router.get("/assignments/:assignmentId/project-submissions", ...manageAssignments, projectReview.listProjectSubmissions);
+router.get(
+  "/assignments/:assignmentId/project-submissions/:submissionId",
+  ...manageAssignments,
+  projectReview.getProjectSubmission
+);
+router.patch(
+  "/assignments/:assignmentId/project-submissions/:submissionId/evaluation",
+  ...manageAssignments,
+  projectReview.evaluateProjectSubmission
+);
 // Authoring aid: dry-run web dom_tests against a reference solution (no DB access).
 router.post("/web-checks/verify", ...manageAssignments, catalog.verifyWebChecks);
 
+router.post("/assignments/:id/project-publish", ...manageAssignments, catalog.publishProjectAssignment);
+router.post("/assignments/:id/project-unpublish", ...manageAssignments, catalog.unpublishProjectAssignment);
 router.get("/assignments", ...manageAssignments, catalog.listAssignments);
 router.post("/assignments", ...manageAssignments, catalog.createAssignment);
 router.get("/assignments/:id", ...manageAssignments, catalog.getAssignment);

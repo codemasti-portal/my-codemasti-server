@@ -146,10 +146,13 @@ async function historicalEnrollmentBatchIdsForStudent(studentId) {
  */
 async function scopeStudentToBatch(req, student) {
   const ctx = await resolveStudentBatchContext(req, student);
+  const { sectionByBatch } = await resolveStudentBatchIds(student);
   if (ctx.explicit && student) {
     student.batch_id = ctx.batchId;
     // Suppress the enrollment-derived batch path — caller explicitly picked one.
     student.enrollment_number = "";
+    const sid = sectionByBatch[ctx.batchId] || "";
+    if (sid) student.section_id = sid;
   }
   // Attach the resolved membership set so the sync chokepoint (catalogBatchIdsFromStudentLean) returns it.
   if (student) {
@@ -159,6 +162,9 @@ async function scopeStudentToBatch(req, student) {
     // contests from a batch they've since left) must skip that widening when this is true —
     // an explicit pick means "show me only this course," full stop.
     student.__membershipExplicit = ctx.explicit;
+    student.__membershipSectionByBatch = ctx.explicit
+      ? { [ctx.batchId]: sectionByBatch[ctx.batchId] || "" }
+      : sectionByBatch;
   }
   return ctx;
 }

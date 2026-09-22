@@ -11,6 +11,33 @@ const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollme
 const { scopeStudentToBatch, membershipKeysOr } = require("../utils/student-batch-context");
 const { assignmentCatalogBatchScopeOr } = require("../utils/assignmentBatchFilter");
 const { catalogSubjectsForBatches } = require("../utils/catalog-subjects");
+const {
+  assignmentScopeBatchKeys,
+  isAssignmentVisibleToStudent,
+} = require("../utils/assignmentEligibility");
+const { projectDocumentForStudent } = require("../utils/projectDocument");
+const {
+  fullQuestionXp,
+  lateXpAmount,
+  xpAwardedForAccepted,
+  submittedAtOrBeforeDeadline,
+} = require("../utils/assignmentXp");
+const { isProjectAssignmentType } = require("../utils/projectQuestionPolicy");
+const {
+  filterAssignmentsOpenToStudents,
+  isProjectOpenForStudentDiscovery,
+  mongoExcludeExplicitProjectDrafts,
+} = require("../utils/projectPublication");
+const { normalizeProjectSubmissionLinks } = require("../utils/projectUrlValidation");
+const {
+  PROJECT_KIND,
+  REVIEW_PENDING,
+  isDuplicateKeyError,
+  resolveCanonicalProjectQuestion,
+  findExistingProjectSubmission,
+  ensureProjectXpGrant,
+  serializeProjectSubmissionForStudent,
+} = require("../services/project-submission.service");
 const { executeJsCode } = require("../services/js-executor");
 const { executeOnePython, executeManyPython } = require("../services/python-wasm-executor");
 const { evaluateWrittenAnswer, fallbackWrittenEvaluation } = require("../services/deepseek-evaluator");
@@ -40,68 +67,6 @@ function normalizeExpectedOutput(testRow) {
   return "";
 }
 
-
-function fullQuestionXp(xp) {
-  return Math.max(0, Math.floor(Number(xp) || 0));
-}
-
-function lateXpAmount(fullXp) {
-  return Math.floor(fullXp / 2);
-}
-
-/** Accepted only: 
- * - Full XP if submitted at or before assignment deadline (on-time)
- * - 0.5x full XP if submitted after deadline (late penalty)
- */
-function xpAwardedForAccepted(questionXp, submittedAt, deadlineDate) {
-  const full = fullQuestionXp(questionXp);
-  if (!deadlineDate) return full;
-  const tSub = new Date(submittedAt).getTime();
-  const tEnd = new Date(deadlineDate).getTime();
-  if (Number.isNaN(tEnd)) return full;
-  // On-time: full XP
-  if (tSub <= tEnd) return full;
-  // Late: half XP
-  return lateXpAmount(full);
-}
-
-function submittedAtOrBeforeDeadline(submittedAt, deadlineDate) {
-  if (deadlineDate == null) return true;
-  const tEnd = new Date(deadlineDate).getTime();
-  if (Number.isNaN(tEnd)) return true;
-  return new Date(submittedAt).getTime() <= tEnd;
-}
-
-function isAssignmentReleased(assignment, now = new Date()) {
-  const t = new Date(assignment.release_date).getTime();
-  return !Number.isNaN(t) && t <= now.getTime();
-}
-
-/** Normalized catalog batch keys on an assignment (batch_id + batch_ids), deduped. */
-function assignmentScopeBatchKeys(assignment) {
-  const keys = [];
-  const a = assignment || {};
-  const primary = String(a.batch_id || "").toLowerCase().trim();
-  if (primary) keys.push(primary);
-  const arr = Array.isArray(a.batch_ids) ? a.batch_ids : [];
-  for (const x of arr) {
-    const z = String(x || "").toLowerCase().trim();
-    if (z) keys.push(z);
-  }
-  return [...new Set(keys)];
-}
-
-/** Matches student list visibility: published + batch scope (batch_id and/or batch_ids, legacy global when unscoped). */
-function isAssignmentVisibleToStudent(assignment, student, now = new Date()) {
-  if (!isAssignmentReleased(assignment, now)) return false;
-  const scopes = assignmentScopeBatchKeys(assignment);
-  if (scopes.length === 0) return true;
-  // Read-switch: in legacy mode this is [batch_id] (byte-identical to scopes.includes(sbatch));
-  // in non-legacy mode it's the student's full attached membership set.
-  const studentBatches = membershipKeysOr(student, [String(student?.batch_id || "").toLowerCase().trim()].filter(Boolean));
-  if (studentBatches.length === 0) return false;
-  return studentBatches.some((b) => scopes.includes(b));
-}
 
 function normCatalogSectionId(s) {
   return String(s ?? "")
@@ -160,7 +125,7 @@ function assignmentScopeLabels(assignment, student, catalogById) {
 }
 
 function mergePublishedIntoFilter(baseFilter, now = new Date()) {
-  const published = { release_date: { $lte: now } };
+  const published = { release_date: { $lte: now }, ...mongoExcludeExplicitProjectDrafts() };
   if (!baseFilter || Object.keys(baseFilter).length === 0) return published;
   return { $and: [baseFilter, published] };
 }
@@ -193,7 +158,8 @@ function submissionPassedAllTestCases(submission) {
   return String(submission.status || "") === "Accepted";
 }
 
-async function assertStudentAssignmentAccess(req, res, assignmentId) {
+async function assertStudentAssignmentAccess(req, res, assignmentId, opts = {}) {
+  const allowPriorSubmission = Boolean(opts.allowPriorSubmission);
   const [student, assignment] = await Promise.all([
     Student.findById(req.user.sub).lean(),
     Assignment.findById(assignmentId).lean(),
@@ -207,11 +173,18 @@ async function assertStudentAssignmentAccess(req, res, assignmentId) {
     sendError(res, 404, "NOT_FOUND", "Assignment not found");
     return null;
   }
-  if (!isAssignmentVisibleToStudent(assignment, student)) {
-    sendError(res, 404, "NOT_FOUND", "Assignment not found");
-    return null;
+  const projectOpen = await isProjectOpenForStudentDiscovery(assignment);
+  const visible = isAssignmentVisibleToStudent(assignment, student) && projectOpen;
+  if (visible) return assignment;
+
+  if (allowPriorSubmission && isProjectAssignmentType(assignment.assignment_type)) {
+    const existing = await findExistingProjectSubmission(assignment._id, req.user.sub);
+    if (existing && String(existing.status) === "Accepted" && String(existing.student_id) === String(req.user.sub)) {
+      return assignment;
+    }
   }
-  return assignment;
+  sendError(res, 404, "NOT_FOUND", "Assignment not found");
+  return null;
 }
 
 async function list(req, res) {
@@ -247,7 +220,36 @@ async function list(req, res) {
     parts.length === 0 ? {} : parts.length === 1 ? parts[0] : { $and: parts };
   const assignmentFilter = mergePublishedIntoFilter(baseFilter);
 
-  const assignments = await Assignment.find(assignmentFilter).sort({ release_date: -1 }).lean();
+  const listed = (await Assignment.find(assignmentFilter).sort({ release_date: -1 }).lean()).filter((a) =>
+    isAssignmentVisibleToStudent(a, student)
+  );
+  const openListed = await filterAssignmentsOpenToStudents(listed);
+
+  const priorProjectIds = [];
+  const submitted = await AssignmentSubmission.find({
+    student_id: req.user.sub,
+    kind: PROJECT_KIND,
+    status: "Accepted",
+  })
+    .select("assignment_id")
+    .lean();
+  const have = new Set(openListed.map((a) => String(a._id)));
+  for (const row of submitted) {
+    const id = String(row.assignment_id);
+    if (!have.has(id)) priorProjectIds.push(row.assignment_id);
+  }
+  let priorAssignments = [];
+  if (priorProjectIds.length) {
+    priorAssignments = await Assignment.find({ _id: { $in: priorProjectIds } }).lean();
+  }
+  const seen = new Set();
+  const assignments = [];
+  for (const a of [...openListed, ...priorAssignments]) {
+    const id = String(a._id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    assignments.push(a);
+  }
   const assignmentIds = assignments.map((a) => a._id);
   if (!assignmentIds.length) return sendSuccess(res, []);
 
@@ -366,6 +368,7 @@ async function list(req, res) {
         scope_line: labels.scope_line,
         subject: assignment.subject,
         module: assignment.module,
+        title: assignment.title || "",
         assignment_type: assignment.assignment_type || "written",
         release_date: assignment.release_date,
         deadline_date: assignment.deadline_date,
@@ -399,7 +402,12 @@ async function filters(req, res) {
   }
 
   const assignmentFilter = mergePublishedIntoFilter({ $or: batchIds.flatMap((b) => assignmentCatalogBatchScopeOr(b)) });
-  const assignmentIds = (await Assignment.find(assignmentFilter).select("_id").lean()).map((x) => x._id);
+  const visibleAssignments = await filterAssignmentsOpenToStudents(
+    (
+      await Assignment.find(assignmentFilter).select("_id batch_id batch_ids section_id section_ids release_date assignment_type project_published project_max_marks").lean()
+    ).filter((a) => isAssignmentVisibleToStudent(a, student))
+  );
+  const assignmentIds = visibleAssignments.map((x) => x._id);
   if (!assignmentIds.length) {
     return sendSuccess(res, {
       subjects,
@@ -433,7 +441,9 @@ async function filters(req, res) {
 }
 
 async function questionDetail(req, res) {
-  const assignment = await assertStudentAssignmentAccess(req, res, req.params.assignmentId);
+  const assignment = await assertStudentAssignmentAccess(req, res, req.params.assignmentId, {
+    allowPriorSubmission: true,
+  });
   if (!assignment) return;
 
   const question = await AssignmentQuestion.findOne({
@@ -460,6 +470,9 @@ async function questionDetail(req, res) {
     xp_on_time: xpOnTime,
     xp_if_late: lateXpAmount(xpOnTime),
     title: question.title,
+    assignment_title: isProjectAssignmentType(assignment?.assignment_type)
+      ? String(assignment?.title || "")
+      : undefined,
     description: question.description,
     requirements: question.requirements || [],
     input_format: question.input_format,
@@ -492,12 +505,22 @@ async function questionDetail(req, res) {
     dom_test_labels: Array.isArray(question.dom_tests)
       ? question.dom_tests.map((t) => ({ label: t.label }))
       : [],
+    project_document:
+      String(assignment?.assignment_type || "").toLowerCase() === "project"
+        ? projectDocumentForStudent(question.project_document)
+        : undefined,
+    project_max_marks: isProjectAssignmentType(assignment?.assignment_type)
+      ? Number(assignment?.project_max_marks ?? 100)
+      : undefined,
   });
 }
 
 async function run(req, res) {
   const ok = await assertStudentAssignmentAccess(req, res, req.params.assignmentId);
   if (!ok) return;
+  if (isProjectAssignmentType(ok.assignment_type)) {
+    return sendError(res, 400, "PROJECT_RUN_NOT_SUPPORTED", "Project assignments are submitted as video and repository links, not executed code.");
+  }
 
   const schema = z.object({
     language: z.string().min(1),
@@ -546,6 +569,136 @@ async function run(req, res) {
   }
 }
 
+async function submitProject(req, res, assignment) {
+  if (!isProjectAssignmentType(assignment?.assignment_type)) {
+    return sendError(res, 400, "INVALID_ASSIGNMENT_TYPE", "This assignment is not a project.");
+  }
+
+  const canonical = await resolveCanonicalProjectQuestion(req.params.assignmentId);
+  if (!canonical.ok) {
+    const status = canonical.code === "PROJECT_AMBIGUOUS" ? 409 : 400;
+    return sendError(res, status, canonical.code, canonical.message);
+  }
+  if (String(canonical.question._id) !== String(req.params.questionId)) {
+    return sendError(
+      res,
+      400,
+      "PROJECT_QUESTION_MISMATCH",
+      "Submit using the project's document question."
+    );
+  }
+
+  const links = normalizeProjectSubmissionLinks(req.body || {});
+  if (!links.ok) {
+    return sendError(res, 400, "INVALID_PROJECT_LINKS", links.message);
+  }
+
+  const existing = await findExistingProjectSubmission(assignment._id, req.user.sub);
+  if (existing) {
+    await ensureProjectXpGrant({
+      assignment,
+      question: canonical.question,
+      studentId: req.user.sub,
+      submission: existing,
+      submittedAt: existing.submitted_at || existing.createdAt || new Date(),
+    });
+    const fresh = await findExistingProjectSubmission(assignment._id, req.user.sub);
+    return sendError(res, 409, "PROJECT_ALREADY_SUBMITTED", "This project has already been submitted.", {
+      submission: serializeProjectSubmissionForStudent(fresh || existing, {
+        assignment,
+        question: canonical.question,
+      }),
+    });
+  }
+
+  const submittedAt = new Date();
+  const xpFull = fullQuestionXp(canonical.question.xp);
+  const xpCandidate = xpAwardedForAccepted(canonical.question.xp, submittedAt, assignment.deadline_date);
+
+  let submission;
+  try {
+    submission = await AssignmentSubmission.create({
+      assignment_id: assignment._id,
+      question_id: canonical.question._id,
+      student_id: req.user.sub,
+      language: "",
+      code: "",
+      kind: PROJECT_KIND,
+      attempt_no: 1,
+      status: "Accepted",
+      xp_awarded: xpCandidate,
+      test_cases_passed: "1/1",
+      submitted_at: submittedAt,
+      project: {
+        explanation_video_url: links.value.explanation_video_url,
+        demo_video_url: links.value.demo_video_url,
+        github_repository_url: links.value.github_repository_url,
+        review_status: REVIEW_PENDING,
+        marks: null,
+        feedback: "",
+        reviewed_by: null,
+        evaluated_at: null,
+      },
+    });
+  } catch (err) {
+    if (!isDuplicateKeyError(err)) throw err;
+    const raced = await findExistingProjectSubmission(assignment._id, req.user.sub);
+    if (!raced) throw err;
+    await ensureProjectXpGrant({
+      assignment,
+      question: canonical.question,
+      studentId: req.user.sub,
+      submission: raced,
+      submittedAt: raced.submitted_at || submittedAt,
+    });
+    const fresh = await findExistingProjectSubmission(assignment._id, req.user.sub);
+    return sendError(res, 409, "PROJECT_ALREADY_SUBMITTED", "This project has already been submitted.", {
+      submission: serializeProjectSubmissionForStudent(fresh || raced, {
+        assignment,
+        question: canonical.question,
+      }),
+    });
+  }
+
+  const xp = await ensureProjectXpGrant({
+    assignment,
+    question: canonical.question,
+    studentId: req.user.sub,
+    submission: submission.toObject ? submission.toObject() : submission,
+    submittedAt,
+  });
+  const saved = await AssignmentSubmission.findById(submission._id).lean();
+
+  setImmediate(() => {
+    Promise.all([
+      achievementSvc.ensureMilestoneBadges(req.user.sub),
+      achievementSvc.ensureGapOvertakeBadge(req.user.sub),
+      achievementSvc.ensureRecoveredBadgeForAssignment(req.user.sub, req.params.questionId),
+      badgeProgramSvc.ensurePublishedProgramBadgesForStudent(req.user.sub),
+    ]).catch((err) => {
+      console.error(
+        "[BADGE_CHECK_FAILED]",
+        JSON.stringify({ student_id: String(req.user.sub), source: "project_submit", error: err?.message || String(err) })
+      );
+    });
+  });
+
+  return sendSuccess(
+    res,
+    {
+      ...serializeProjectSubmissionForStudent(saved || submission, {
+        assignment,
+        question: canonical.question,
+      }),
+      xp_awarded: xp.xp_awarded,
+      xp_if_on_time: xpFull,
+      xp_if_late: xp.xp_if_late,
+      submitted_before_deadline: xp.submitted_before_deadline,
+    },
+    "Submitted"
+  );
+}
+
 async function submit(req, res) {
   const schema = z.object({
     language: z.string().optional().default(""),
@@ -553,11 +706,18 @@ async function submit(req, res) {
     // Web assignments send html/css instead of language+code.
     html: z.string().optional().default(""),
     css: z.string().optional().default(""),
+    explanation_video_url: z.string().optional(),
+    demo_video_url: z.string().optional(),
+    github_repository_url: z.string().optional(),
   });
   const body = schema.parse(req.body);
 
-  const ok = await assertStudentAssignmentAccess(req, res, req.params.assignmentId);
-  if (!ok) return;
+  const assignment = await assertStudentAssignmentAccess(req, res, req.params.assignmentId);
+  if (!assignment) return;
+
+  if (isProjectAssignmentType(assignment.assignment_type)) {
+    return submitProject(req, res, assignment);
+  }
 
   const question = await AssignmentQuestion.findOne({
     _id: req.params.questionId,
@@ -567,9 +727,6 @@ async function submit(req, res) {
     return sendError(res, 404, "QUESTION_NOT_FOUND", "Assignment question not found");
   }
 
-  const assignment = await Assignment.findById(question.assignment_id)
-    .select("deadline_date assignment_type")
-    .lean();
   // Default to "written" if not set (matches Assignment schema default and questionDetail behavior)
   const assignmentType = String(assignment?.assignment_type || "written").toLowerCase();
   const executionMode = normalizeExecutionMode(question.execution_mode);
@@ -926,8 +1083,43 @@ async function submit(req, res) {
 }
 
 async function submissions(req, res) {
-  const ok = await assertStudentAssignmentAccess(req, res, req.params.assignmentId);
-  if (!ok) return;
+  const assignment = await assertStudentAssignmentAccess(req, res, req.params.assignmentId, {
+    allowPriorSubmission: true,
+  });
+  if (!assignment) return;
+
+  const question = await AssignmentQuestion.findOne({
+    _id: req.params.questionId,
+    assignment_id: req.params.assignmentId,
+  })
+    .select("_id xp")
+    .lean();
+  if (!question) {
+    return sendError(res, 404, "QUESTION_NOT_FOUND", "Assignment question not found");
+  }
+
+  if (isProjectAssignmentType(assignment.assignment_type)) {
+    const page = Number(req.query.page || 1);
+    const limit = Number(req.query.limit || 20);
+    const doc = await findExistingProjectSubmission(assignment._id, req.user.sub);
+    if (doc && String(doc.question_id) !== String(question._id)) {
+      return sendSuccess(res, [], "", { page, limit, total: 0 });
+    }
+    if (doc) {
+      await ensureProjectXpGrant({
+        assignment,
+        question,
+        studentId: req.user.sub,
+        submission: doc,
+        submittedAt: doc.submitted_at || doc.createdAt || new Date(),
+      });
+    }
+    const fresh = doc ? await findExistingProjectSubmission(assignment._id, req.user.sub) : null;
+    const items = fresh
+      ? [serializeProjectSubmissionForStudent(fresh, { assignment, question })]
+      : [];
+    return sendSuccess(res, items, "", { page, limit, total: items.length });
+  }
 
   const page = Number(req.query.page || 1);
   const limit = Number(req.query.limit || 20);
