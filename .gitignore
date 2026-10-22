@@ -22,3 +22,6 @@ Thumbs.db
 
 # User-generated uploads (keep local only)
 uploads/
+
+# Load test output
+loadtest/reports/
