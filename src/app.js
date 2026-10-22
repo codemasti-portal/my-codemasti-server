@@ -14,6 +14,10 @@ const routes = require("./routes");
 const { notFoundHandler, errorHandler } = require("./middlewares/error.middleware");
 
 const app = express();
+// Behind a reverse proxy (e.g. Nginx on EC2), set TRUST_PROXY=1 so req.ip / rate limits use the real client IP.
+if (process.env.TRUST_PROXY) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
+}
 let dbInitPromise = null;
 
 function parseCorsOrigins(raw) {
