@@ -16,15 +16,35 @@ Backend scaffold for the CodeMasti frontend handoff contract.
 
 ## Setup
 
-1. Copy env file:
+1. Install the required Node and npm versions (Node `24.22.1`, npm `12.2.1`).
+
+If you don't have nvm yet (check with `nvm --version`), install it on macOS:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+source ~/.zshrc             # or open a new terminal
+nvm --version               # should print 0.40.8
+```
+
+Then install Node and npm:
+
+```bash
+nvm install                 # reads .nvmrc → Node 24.22.1
+nvm use
+npm install -g npm@12.2.1
+node -v && npm -v           # should print v24.22.1 and 12.2.1
+```
+
+These versions are enforced via `devEngines` in `package.json` — `npm install` fails with `EBADDEVENGINES` on any other Node/npm version.
+2. Copy env file:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Update `.env` values (especially JWT secrets and Mongo URI).
+3. Update `.env` values (especially JWT secrets and Mongo URI).
 
-3. Install and run:
+4. Install and run:
 
 ```bash
 npm install

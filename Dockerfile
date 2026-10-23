@@ -1,14 +1,18 @@
 # syntax=docker/dockerfile:1
 # CodeMasti API — optimized multi-stage production image.
-# Node 22 LTS (mongoose 9 requires Node >= 20.19). Both stages are pinned to the same Alpine
-# release so the copied node binary links against the same musl/libstdc++.
+# Node/npm versions must match devEngines in package.json (and .nvmrc). Both stages are pinned
+# to the same Alpine release so the copied node binary links against the same musl/libstdc++.
 
-ARG NODE_VERSION=22
+ARG NODE_VERSION=24.22.1
+ARG NPM_VERSION=12.2.1
 ARG ALPINE_VERSION=3.24
 
 # ---------- Stage 1: production dependencies ----------
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS deps
+ARG NPM_VERSION
 WORKDIR /app
+
+RUN npm install -g npm@${NPM_VERSION} --no-audit --no-fund
 
 COPY package.json package-lock.json ./
 # Prod deps only; no dependency needs install scripts. This stage is discarded, so the npm
