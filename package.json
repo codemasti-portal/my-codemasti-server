@@ -14,6 +14,18 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24.22.1",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "12.2.1",
+      "onFail": "error"
+    }
+  },
   "dependencies": {
     "@googleapis/calendar": "^20.1.0",
     "bcryptjs": "^3.0.3",
