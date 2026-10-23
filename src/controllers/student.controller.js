@@ -1,5 +1,3 @@
-const fs = require("fs");
-const path = require("path");
 const { z } = require("zod");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
@@ -13,13 +11,11 @@ const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
   buildStudentAvatarFolder,
+  UPLOAD_UNAVAILABLE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
 } = require("../utils/cloudinary");
-const { getUploadsRoot } = require("../utils/upload-paths");
 const { scopeStudentToBatch } = require("../utils/student-batch-context");
 const { catalogSubjects } = require("../utils/catalog-subjects");
-
-const uploadsRoot = getUploadsRoot();
-const avatarsDir = path.join(uploadsRoot, "avatars");
 
 async function getMe(req, res) {
   const student = await Student.findById(req.user.sub).lean();
@@ -115,24 +111,20 @@ async function uploadAvatar(req, res) {
     return sendError(res, 400, "NO_FILE", 'Expected multipart field "file"');
   }
   const studentId = req.user.sub;
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "student_own_avatar" });
+  }
   let avatar_url;
-
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStudentAvatarFolder(studentId);
-      const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
-      avatar_url = result.secure_url || result.url;
-    } catch (e) {
-      return sendError(res, 500, "AVATAR_UPLOAD_FAILED", e.message || "Avatar upload failed");
-    }
-  } else {
-    fs.mkdirSync(avatarsDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".jpg";
-    const id = String(studentId || "").replace(/[^a-f0-9]/gi, "");
-    const filename = `student-${id || "x"}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(avatarsDir, filename), req.file.buffer);
-    const rel = `/v1/static/avatars/${filename}`;
-    avatar_url = `${req.protocol}://${req.get("host")}${rel}`;
+  try {
+    const folder = buildStudentAvatarFolder(studentId);
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
+    avatar_url = result.secure_url || result.url;
+  } catch (e) {
+    return sendError(res, 500, "AVATAR_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "student_own_avatar",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   const updated = await Student.findByIdAndUpdate(studentId, { $set: { avatar_url } }, { new: true }).lean();

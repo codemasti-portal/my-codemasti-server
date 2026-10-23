@@ -1,9 +1,14 @@
 const crypto = require("crypto");
 
-/** Lazy-load so API boots without Calendar credentials or before `npm install googleapis`. */
+/**
+ * Lazy-load so API boots without Calendar credentials or before `npm install @googleapis/calendar`.
+ * Uses the standalone Calendar client instead of the full `googleapis` bundle (~194 MB of every Google API);
+ * exposed as `{ google: { auth, calendar } }` so call sites match the `googleapis` API.
+ */
 function loadGoogleApis() {
   try {
-    return require("googleapis");
+    const { auth, calendar } = require("@googleapis/calendar");
+    return { google: { auth, calendar } };
   } catch {
     return null;
   }
@@ -70,7 +75,7 @@ function buildDateTime(dateYmd, hm, timeZone) {
 async function createMeetCalendarEvent(opts) {
   const goog = loadGoogleApis();
   if (!goog) {
-    throw new Error("Calendar integration requires the `googleapis` package (npm install googleapis).");
+    throw new Error("Calendar integration requires the `@googleapis/calendar` package (npm install @googleapis/calendar).");
   }
   const { google } = goog;
   const auth = getOAuthClient();
