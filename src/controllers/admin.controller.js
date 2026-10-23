@@ -1,5 +1,3 @@
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const { z } = require("zod");
 const { sendSuccess, sendError } = require("../utils/response");
@@ -33,12 +31,10 @@ const {
   isCloudinaryConfigured,
   uploadBufferToFolder,
   buildStudentAvatarFolder,
+  UPLOAD_UNAVAILABLE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
 } = require("../utils/cloudinary");
-const { getUploadsRoot } = require("../utils/upload-paths");
 const { getInstructorAssignedBatchIds, studentInAnyAssignedBatchResolved } = require("../utils/instructorBatchScope");
-
-const uploadsRoot = getUploadsRoot();
-const avatarsDir = path.join(uploadsRoot, "avatars");
 
 /** Arena catalog visible to a student's batch (aligned with student arena list). */
 async function arenaQuestionsForAdminBatchKeys(batchKeys) {
@@ -1128,24 +1124,20 @@ async function uploadStudentAvatar(req, res) {
   const doc = await Student.findOne({ _id: req.params.id, role: "student" });
   if (!doc) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
 
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "admin_student_avatar" });
+  }
   let avatar_url;
-
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStudentAvatarFolder(String(doc._id));
-      const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
-      avatar_url = result.secure_url || result.url;
-    } catch (e) {
-      return sendError(res, 500, "AVATAR_UPLOAD_FAILED", e.message || "Avatar upload failed");
-    }
-  } else {
-    fs.mkdirSync(avatarsDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".jpg";
-    const id = String(req.params.id || "").replace(/[^a-f0-9]/gi, "");
-    const filename = `student-${id || "x"}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(avatarsDir, filename), req.file.buffer);
-    const rel = `/v1/static/avatars/${filename}`;
-    avatar_url = `${req.protocol}://${req.get("host")}${rel}`;
+  try {
+    const folder = buildStudentAvatarFolder(String(doc._id));
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
+    avatar_url = result.secure_url || result.url;
+  } catch (e) {
+    return sendError(res, 500, "AVATAR_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "admin_student_avatar",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   doc.avatar_url = avatar_url;

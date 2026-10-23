@@ -1,7 +1,5 @@
 const { z } = require("zod");
 const bcrypt = require("bcryptjs");
-const fs = require("fs");
-const path = require("path");
 const { sendSuccess, sendError } = require("../utils/response");
 const Staff = require("../models/Staff");
 const { ROLES, canCreateRole, canDeleteStaff, canResetPassword, permissionsForRole } = require("../utils/rbac");
@@ -10,12 +8,13 @@ const {
   normalizeSchedulingAlertsFlag,
 } = require("../utils/scheduling-alerts");
 const { emitEventNotification } = require("../services/staffPanelNotification.service");
-const { isCloudinaryConfigured, uploadBufferToFolder, buildStaffProfileFolder } = require("../utils/cloudinary");
-const { getUploadsRoot } = require("../utils/upload-paths");
-
-const uploadsRoot = getUploadsRoot();
-const staffImagesDir = path.join(uploadsRoot, "staff-profile-images");
-const staffResumesDir = path.join(uploadsRoot, "staff-resumes");
+const {
+  isCloudinaryConfigured,
+  uploadBufferToFolder,
+  buildStaffProfileFolder,
+  UPLOAD_UNAVAILABLE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
+} = require("../utils/cloudinary");
 
 function parseCsvArray(value) {
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
@@ -619,21 +618,19 @@ async function uploadOwnProfileImage(req, res) {
   const doc = await Staff.findById(req.staff.sub);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Staff not found");
 
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStaffProfileFolder(doc._id);
-      const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
-      doc.profile_image_url = result.secure_url || result.url || "";
-    } catch (e) {
-      return sendError(res, 500, "PROFILE_IMAGE_UPLOAD_FAILED", e.message || "Profile image upload failed");
-    }
-  } else {
-    fs.mkdirSync(staffImagesDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".jpg";
-    const id = String(req.staff.sub || "").replace(/[^a-f0-9]/gi, "") || "x";
-    const filename = `staff-${id}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(staffImagesDir, filename), req.file.buffer);
-    doc.profile_image_url = `/v1/static/staff-profile-images/${filename}`;
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "staff_own_profile_image" });
+  }
+  try {
+    const folder = buildStaffProfileFolder(doc._id);
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
+    doc.profile_image_url = result.secure_url || result.url || "";
+  } catch (e) {
+    return sendError(res, 500, "PROFILE_IMAGE_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "staff_own_profile_image",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   await syncCompletion(doc);
@@ -645,23 +642,21 @@ async function uploadOwnResume(req, res) {
   const doc = await Staff.findById(req.staff.sub);
   if (!doc) return sendError(res, 404, "NOT_FOUND", "Staff not found");
 
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStaffProfileFolder(doc._id);
-      const result = await uploadBufferToFolder(req.file.buffer, "raw", folder, {
-        filenameOverride: req.file.originalname || "resume.pdf",
-      });
-      doc.resume_url = result.secure_url || result.url || "";
-    } catch (e) {
-      return sendError(res, 500, "RESUME_UPLOAD_FAILED", e.message || "Resume upload failed");
-    }
-  } else {
-    fs.mkdirSync(staffResumesDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".pdf";
-    const id = String(req.staff.sub || "").replace(/[^a-f0-9]/gi, "") || "x";
-    const filename = `resume-${id}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(staffResumesDir, filename), req.file.buffer);
-    doc.resume_url = `/v1/static/staff-resumes/${filename}`;
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "staff_own_resume" });
+  }
+  try {
+    const folder = buildStaffProfileFolder(doc._id);
+    const result = await uploadBufferToFolder(req.file.buffer, "raw", folder, {
+      filenameOverride: req.file.originalname || "resume.pdf",
+    });
+    doc.resume_url = result.secure_url || result.url || "";
+  } catch (e) {
+    return sendError(res, 500, "RESUME_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "staff_own_resume",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   await syncCompletion(doc);
@@ -676,21 +671,19 @@ async function uploadAdminProfileImage(req, res) {
   }
   if (!req.file?.buffer) return sendError(res, 400, "FILE_REQUIRED", "Profile image is required");
 
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStaffProfileFolder(doc._id);
-      const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
-      doc.profile_image_url = result.secure_url || result.url || "";
-    } catch (e) {
-      return sendError(res, 500, "PROFILE_IMAGE_UPLOAD_FAILED", e.message || "Profile image upload failed");
-    }
-  } else {
-    fs.mkdirSync(staffImagesDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".jpg";
-    const id = String(doc._id || "").replace(/[^a-f0-9]/gi, "") || "x";
-    const filename = `staff-${id}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(staffImagesDir, filename), req.file.buffer);
-    doc.profile_image_url = `/v1/static/staff-profile-images/${filename}`;
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "admin_staff_profile_image" });
+  }
+  try {
+    const folder = buildStaffProfileFolder(doc._id);
+    const result = await uploadBufferToFolder(req.file.buffer, "image", folder);
+    doc.profile_image_url = result.secure_url || result.url || "";
+  } catch (e) {
+    return sendError(res, 500, "PROFILE_IMAGE_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "admin_staff_profile_image",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   doc.last_updated_by_admin = req.staff.sub;
@@ -706,23 +699,21 @@ async function uploadAdminResume(req, res) {
   }
   if (!req.file?.buffer) return sendError(res, 400, "FILE_REQUIRED", "Resume file is required");
 
-  if (isCloudinaryConfigured()) {
-    try {
-      const folder = buildStaffProfileFolder(doc._id);
-      const result = await uploadBufferToFolder(req.file.buffer, "raw", folder, {
-        filenameOverride: req.file.originalname || "resume.pdf",
-      });
-      doc.resume_url = result.secure_url || result.url || "";
-    } catch (e) {
-      return sendError(res, 500, "RESUME_UPLOAD_FAILED", e.message || "Resume upload failed");
-    }
-  } else {
-    fs.mkdirSync(staffResumesDir, { recursive: true });
-    const ext = path.extname(req.file.originalname || "") || ".pdf";
-    const id = String(doc._id || "").replace(/[^a-f0-9]/gi, "") || "x";
-    const filename = `resume-${id}-${Date.now()}${ext}`;
-    fs.writeFileSync(path.join(staffResumesDir, filename), req.file.buffer);
-    doc.resume_url = `/v1/static/staff-resumes/${filename}`;
+  if (!isCloudinaryConfigured()) {
+    return sendError(res, 503, "CLOUDINARY_NOT_CONFIGURED", UPLOAD_UNAVAILABLE_MESSAGE, {}, { upload: "admin_staff_resume" });
+  }
+  try {
+    const folder = buildStaffProfileFolder(doc._id);
+    const result = await uploadBufferToFolder(req.file.buffer, "raw", folder, {
+      filenameOverride: req.file.originalname || "resume.pdf",
+    });
+    doc.resume_url = result.secure_url || result.url || "";
+  } catch (e) {
+    return sendError(res, 500, "RESUME_UPLOAD_FAILED", UPLOAD_FAILED_MESSAGE, {}, {
+      upload: "admin_staff_resume",
+      cause: e?.message,
+      stack: e?.stack,
+    });
   }
 
   doc.last_updated_by_admin = req.staff.sub;

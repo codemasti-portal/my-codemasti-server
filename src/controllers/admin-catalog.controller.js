@@ -2655,7 +2655,7 @@ async function provisionTimetableGoogleMeet(req, res) {
       res,
       503,
       "NOT_CONFIGURED",
-      "Google Calendar / Meet is not configured. Set GOOGLE_CALENDAR_* variables on the server and install googleapis."
+      "Google Calendar / Meet is not configured. Set GOOGLE_CALENDAR_* variables on the server and install @googleapis/calendar."
     );
   }
 

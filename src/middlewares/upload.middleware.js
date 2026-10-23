@@ -1,37 +1,6 @@
-const path = require("path");
-const fs = require("fs");
 const multer = require("multer");
-const { getUploadsRoot } = require("../utils/upload-paths");
 
-const uploadsRoot = getUploadsRoot();
-const avatarsDir = path.join(uploadsRoot, "avatars");
-const staffImagesDir = path.join(uploadsRoot, "staff-profile-images");
-const staffResumesDir = path.join(uploadsRoot, "staff-resumes");
-
-function ensureDirs() {
-  fs.mkdirSync(avatarsDir, { recursive: true });
-  fs.mkdirSync(staffImagesDir, { recursive: true });
-  fs.mkdirSync(staffResumesDir, { recursive: true });
-}
-
-ensureDirs();
-
-const avatarStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, avatarsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "") || ".jpg";
-    cb(null, `${req.user.sub}-${Date.now()}${ext}`);
-  },
-});
-
-exports.avatarUpload = multer({
-  storage: avatarStorage,
-  limits: { fileSize: 2 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
-    else cb(new Error("Only jpeg, png, webp, or gif images are allowed"));
-  },
-}).single("file");
+// All uploads are buffered in memory and sent to Cloudinary; nothing is written to local disk.
 
 const studentAvatarMemory = multer({
   storage: multer.memoryStorage(),
@@ -42,10 +11,10 @@ const studentAvatarMemory = multer({
   },
 });
 
-/** Admin student photo → memory; controller writes disk or Cloudinary. Field name: file */
+/** Admin student photo → memory → Cloudinary. Field name: file */
 exports.adminStudentAvatarUpload = studentAvatarMemory.single("file");
 
-/** Student app POST /me/avatar — same as admin (memory + Cloudinary or disk). Field name: file */
+/** Student app POST /me/avatar — same as admin (memory → Cloudinary). Field name: file */
 exports.studentSelfAvatarUpload = studentAvatarMemory.single("file");
 
 exports.doubtImageUpload = multer({

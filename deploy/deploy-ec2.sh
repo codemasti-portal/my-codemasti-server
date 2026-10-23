@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 echo "→ Syncing source to $HOST"
 rsync -az --delete -e "ssh -i $KEY" \
-  --exclude node_modules --exclude .git --exclude uploads --exclude .env \
+  --exclude node_modules --exclude .git --exclude .env \
   ./ "$HOST:~/codemasti/app/"
 
 if [[ "${1:-}" == "--env" ]]; then

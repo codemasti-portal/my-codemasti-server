@@ -8,6 +8,10 @@ function isCloudinaryConfigured() {
   return !!(n && k && s);
 }
 
+/** User-facing upload errors; the actual cause is only logged server-side (sendError's serverOnlyLog). */
+const UPLOAD_UNAVAILABLE_MESSAGE = "File uploads are temporarily unavailable. Please try again after some time.";
+const UPLOAD_FAILED_MESSAGE = "File upload failed. Please try again after some time.";
+
 function ensureCloudinaryConfig() {
   if (process.env.CLOUDINARY_URL) {
     cloudinary.config();
@@ -207,6 +211,8 @@ function buildPaymentProofUploadFolder(resourceType) {
 module.exports = {
   cloudinary,
   isCloudinaryConfigured,
+  UPLOAD_UNAVAILABLE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
   ensureCloudinaryConfig,
   uploadBuffer,
   uploadBufferToFolder,

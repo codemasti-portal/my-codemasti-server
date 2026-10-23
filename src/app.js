@@ -1,12 +1,9 @@
-const path = require("path");
-const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
-const { getUploadsRoot } = require("./utils/upload-paths");
 const { connectDb } = require("./config/db");
 
 const { apiLimiter, otpLimiter } = require("./middlewares/rateLimit.middleware");
@@ -42,7 +39,7 @@ app.use(
 app.use(
   helmet({
     // Allow the admin/student frontends (different origins/ports in dev)
-    // to render images/PDFs served from `/v1/static/...`.
+    // to embed any resource this API returns.
     crossOriginResourcePolicy: { policy: "cross-origin" },
   })
 );
@@ -104,12 +101,6 @@ app.use(async (req, res, next) => {
     });
   }
 });
-
-const uploadsRoot = getUploadsRoot();
-fs.mkdirSync(path.join(uploadsRoot, "avatars"), { recursive: true });
-fs.mkdirSync(path.join(uploadsRoot, "staff-profile-images"), { recursive: true });
-fs.mkdirSync(path.join(uploadsRoot, "staff-resumes"), { recursive: true });
-app.use("/v1/static", express.static(uploadsRoot));
 
 app.get("/health", (_req, res) => {
   return res.status(200).json({
