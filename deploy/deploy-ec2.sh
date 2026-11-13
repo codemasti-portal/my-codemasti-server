@@ -4,8 +4,8 @@
 #        ./deploy/deploy-ec2.sh --env      (also upload local .env to the server)
 set -euo pipefail
 
-HOST="${EC2_HOST:-ec2-user@ec2-3-26-161-229.ap-southeast-2.compute.amazonaws.com}"
-KEY="${EC2_KEY:-$HOME/Downloads/server-ssh.pem}"
+HOST="${EC2_HOST:-ec2-user@52.66.148.107}"
+KEY="${EC2_KEY:-$HOME/Downloads/mumbai-server-ssh.pem}"
 SSH=(ssh -i "$KEY" "$HOST")
 
 cd "$(dirname "$0")/.."

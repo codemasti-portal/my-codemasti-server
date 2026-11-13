@@ -4,8 +4,8 @@
 # Usage: CERTBOT_EMAIL=you@example.com ./deploy/setup-ssl.sh   (email gets Let's Encrypt expiry notices)
 set -euo pipefail
 
-HOST="${EC2_HOST:-ec2-user@ec2-3-26-161-229.ap-southeast-2.compute.amazonaws.com}"
-KEY="${EC2_KEY:-$HOME/Downloads/server-ssh.pem}"
+HOST="${EC2_HOST:-ec2-user@52.66.148.107}"
+KEY="${EC2_KEY:-$HOME/Downloads/mumbai-server-ssh.pem}"
 DOMAIN="${DOMAIN:-server.codemasti.com}"
 EMAIL="${CERTBOT_EMAIL:?Set CERTBOT_EMAIL for Lets Encrypt expiry notices}"
 
