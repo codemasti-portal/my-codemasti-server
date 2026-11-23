@@ -1,5 +1,4 @@
 const Staff = require("../models/Staff");
-const { augmentStudentCatalogFieldsFromEnrollment, catalogBatchIdsFromStudentLean } = require("./enrollment");
 const registry = require("./batch-catalog-registry");
 
 /**
@@ -20,14 +19,6 @@ async function getInstructorAssignedBatchIds(req) {
   /** Mentors without program assignments are not batch-scoped (e.g. doubt community filters). */
   if (role === "mentor" && !ids.length) return null;
   return ids;
-}
-
-function studentInAnyAssignedBatch(studentDoc, allowedNormalizedBatchIds) {
-  if (!allowedNormalizedBatchIds?.length) return false;
-  const aug = augmentStudentCatalogFieldsFromEnrollment(studentDoc);
-  const ids = catalogBatchIdsFromStudentLean(aug);
-  const allow = new Set(allowedNormalizedBatchIds);
-  return ids.some((id) => allow.has(String(id || "").trim().toLowerCase()));
 }
 
 /**
@@ -131,7 +122,6 @@ function noteMatchesInstructorScope(doc, allowed) {
 
 module.exports = {
   getInstructorAssignedBatchIds,
-  studentInAnyAssignedBatch,
   studentInAnyAssignedBatchResolved,
   assignmentDocTouchesAllowedBatches,
   arenaDocTouchesAllowedBatches,

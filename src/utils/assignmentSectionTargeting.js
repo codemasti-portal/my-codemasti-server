@@ -43,10 +43,6 @@ function effectiveAssignmentSectionIds(assignment) {
   return one ? [one] : [];
 }
 
-function isAllSectionsTargeting(assignment) {
-  return effectiveAssignmentSectionIds(assignment).length === 0;
-}
-
 /**
  * Fields to persist on an Assignment for a given explicit section list.
  * Empty list → all sections (clears legacy section_id).
@@ -155,7 +151,6 @@ module.exports = {
   normBatchId,
   uniqueSectionIds,
   effectiveAssignmentSectionIds,
-  isAllSectionsTargeting,
   sectionFieldsToStore,
   resolveAssignmentCreateTargets,
   validateSectionsForCatalog,

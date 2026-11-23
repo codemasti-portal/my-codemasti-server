@@ -7,8 +7,7 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed": "node src/scripts/seed.js",
-    "create-super-admin": "node src/scripts/create-super-admin.js",
-    "migrate:staff-static-media": "node src/scripts/migrate-staff-static-media.js"
+    "create-super-admin": "node src/scripts/create-super-admin.js"
   },
   "keywords": [],
   "author": "",
@@ -32,7 +31,6 @@
     "cheerio": "^1.2.0",
     "cloudinary": "^2.9.0",
     "colord": "^2.9.3",
-    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "css-tree": "^3.2.1",
     "dotenv": "^17.4.0",

@@ -334,11 +334,6 @@ async function grantMonthlyXpProgramsForStudent(studentId, programLean, opts = {
   return grantedAny;
 }
 
-/** @deprecated Prefer grantArenaOrLifetimeProgramBadge — kept name for callers. */
-async function grantProgramBadgeIfEligible(studentId, programLean, opts = {}) {
-  return grantArenaOrLifetimeProgramBadge(studentId, programLean, opts);
-}
-
 async function ensurePublishedProgramBadgesForStudent(studentId) {
   const programs = await BadgeProgram.find({ status: "published" }).lean();
   for (const p of programs) {
@@ -588,5 +583,4 @@ module.exports = {
   updateProgram,
   deleteBadgeProgram,
   normalizeBadgeLayout,
-  grantProgramBadgeIfEligible,
 };

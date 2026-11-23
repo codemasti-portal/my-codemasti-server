@@ -317,7 +317,6 @@ function verifyWebhookSignature(headers) {
 module.exports = {
   initiatePayment,
   verifyPayment,
-  verifyRefund,
   verifyWebhookSignature,
   initiateRefund,
   normalizeProviderResponse,

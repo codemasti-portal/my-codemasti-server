@@ -6,10 +6,6 @@ function isProjectAssignmentType(type) {
   return String(type || "").toLowerCase() === "project";
 }
 
-function isCanonicalProjectSlot(value) {
-  return String(value || "").trim() === CANONICAL_PROJECT_SLOT;
-}
-
 /** Placeholder / bulk create on assignment POST. */
 function mayCreateProjectQuestionPlaceholders(assignmentType, questionCount) {
   if (!isProjectAssignmentType(assignmentType)) return { ok: true };
@@ -72,7 +68,6 @@ function projectCreationPayloadMatches(existing, fields) {
 module.exports = {
   CANONICAL_PROJECT_SLOT,
   isProjectAssignmentType,
-  isCanonicalProjectSlot,
   mayCreateProjectQuestionPlaceholders,
   mayCreateProjectQuestion,
   projectCreationSharedMetadataMatches,

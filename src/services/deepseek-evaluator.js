@@ -158,96 +158,6 @@ function activeProvider() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CODING evaluator (unchanged logic, updated model)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function normalizeCodingResult(raw, fallbackTotal) {
-  const verdictRaw = String(raw?.verdict || "").trim().toLowerCase();
-  const verdict =
-    verdictRaw === "accepted"     ? "Accepted"    :
-    verdictRaw === "wrong answer" ? "Wrong Answer" : "Error";
-
-  const rows = Array.isArray(raw?.test_case_results) ? raw.test_case_results : [];
-  const test_case_results = rows.map((r, idx) => ({
-    label:  String(r?.label  || `TC #${idx + 1}`),
-    passed: Boolean(r?.passed),
-    reason: String(r?.reason || ""),
-  }));
-  const total       = Math.max(1, Number(fallbackTotal) || test_case_results.length || 1);
-  const passedCount = test_case_results.filter((x) => x.passed).length;
-
-  return {
-    status:             verdict,
-    test_cases_passed:  `${passedCount}/${Math.max(total, test_case_results.length || total)}`,
-    test_case_results,
-    feedback:           String(raw?.feedback || "").trim(),
-    score:              Number.isFinite(Number(raw?.score))
-                          ? Math.max(0, Math.min(100, Number(raw.score)))
-                          : undefined,
-    execution_time_ms:  Number.isFinite(Number(raw?.execution_time_ms))
-                          ? Math.max(0, Math.floor(Number(raw.execution_time_ms)))
-                          : 0,
-    memory_mb:          Number.isFinite(Number(raw?.memory_mb))
-                          ? Math.max(0, Math.floor(Number(raw.memory_mb)))
-                          : 0,
-  };
-}
-
-async function evaluateWithDeepseek(input) {
-  const payload = {
-    assignment_type: input.assignmentType,
-    question: {
-      title:        input?.question?.title        || "",
-      description:  input?.question?.description  || "",
-      requirements: Array.isArray(input?.question?.requirements) ? input.question.requirements : [],
-      input_format: input?.question?.input_format  || "",
-      output_format:input?.question?.output_format || "",
-      constraints:  Array.isArray(input?.question?.constraints)  ? input.question.constraints  : [],
-      examples:     Array.isArray(input?.question?.examples)     ? input.question.examples     : [],
-      hidden_tests: Array.isArray(input?.question?.hidden_tests) ? input.question.hidden_tests : [],
-    },
-    submission: {
-      language: input?.submission?.language || "",
-      code:     input?.submission?.code     || "",
-    },
-  };
-
-  const systemPrompt = `You are a strict coding evaluator. Return ONLY valid JSON — no markdown, no prose.`;
-
-  const userPrompt = `
-Evaluate this student coding submission strictly.
-
-Return ONLY valid JSON with this exact shape:
-{
-  "verdict": "Accepted" | "Wrong Answer" | "Error",
-  "score": number,
-  "feedback": "short evaluator feedback",
-  "test_case_results": [
-    { "label": "TC #1", "passed": true, "reason": "optional short reason" }
-  ],
-  "execution_time_ms": number,
-  "memory_mb": number
-}
-
-Rules:
-- Use hidden_tests and requirements for correctness.
-- Keep feedback concise and actionable.
-- Do not include markdown. JSON only.
-
-Data:
-${JSON.stringify(payload)}
-`.trim();
-
-  const { parsed, raw, provider, model } = await callLLM(systemPrompt, userPrompt);
-  return {
-    ...normalizeCodingResult(parsed, Array.isArray(input?.question?.hidden_tests) ? input.question.hidden_tests.length : 1),
-    provider,
-    model,
-    raw,
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Layer 1: Local input guard
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -599,34 +509,8 @@ function fallbackWrittenEvaluation({ question, wordCount }) {
   };
 }
 
-function fallbackEvaluation({ assignmentType, question }) {
-  const hiddenTests = Array.isArray(question?.hidden_tests) ? question.hidden_tests : [];
-  const total = Math.max(1, hiddenTests.length || 1);
-  return {
-    status:            "Wrong Answer",
-    test_cases_passed: `0/${total}`,
-    test_case_results: Array.from({ length: total }, (_, idx) => ({
-      label:  `TC #${idx + 1}`,
-      passed: false,
-      reason: "AI evaluator unavailable",
-    })),
-    feedback:
-      assignmentType === "written"
-        ? "Evaluation service is temporarily unavailable. Your answer is saved; please retry later."
-        : "Evaluation service is temporarily unavailable. Your code is saved; please retry later.",
-    score:             0,
-    execution_time_ms: 0,
-    memory_mb:         0,
-    provider:          "fallback",
-    model:             "local-fallback",
-    raw:               "DeepSeek unavailable.",
-  };
-}
-
 module.exports = {
-  evaluateWithDeepseek,
   evaluateWrittenAnswer,
   fallbackWrittenEvaluation,
-  fallbackEvaluation,
   checkInjection,
 };
