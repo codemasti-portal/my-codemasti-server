@@ -62,7 +62,7 @@ Body: optional `amount_paise` (default: remaining), `reason`. Only `success` / `
 
 ### Monthly scheduler (`monthly-invoice.scheduler.js`)
 
-Hourly in-process (and on every cron call). On **UTC day 1** it loads active courses with `billing_mode: monthly` and `base_fee_paise > 0`, finds active enrollments, skips those with an invoice whose `period_start` is in the current UTC month, and builds the rest (`generated_by: "system_cron"`, no due date). Toggle the in-process timer with `BILLING_INVOICE_SCHEDULER=0`; the cron endpoint still runs it. De-dupe is a query, not a unique index (see [RUNBOOK.md](RUNBOOK.md) open items). `upfront` courses are never auto-invoiced.
+Hourly in-process (and on every cron call). On **UTC day 1** it loads active courses with `billing_mode: monthly` and `base_fee_paise > 0`, finds active enrollments, skips those with an invoice whose `period_start` is in the current UTC month, and builds the rest (`generated_by: "system_cron"`, no due date). Toggle the in-process timer with `BILLING_INVOICE_SCHEDULER=0`; the cron endpoint still runs it. De-dupe is a query plus an in-transaction re-check after locking the enrollment document (`INVOICE_ALREADY_EXISTS` is treated as a skip), not a unique index (see [RUNBOOK.md](RUNBOOK.md) open items). `upfront` courses are never auto-invoiced.
 
 ### Side effects of enrollment changes
 - Removing a student from a batch completes the enrollment and **cancels its `pending` invoices** (`enrollment-sync.service.js`); paid invoices are kept; no automatic refund.

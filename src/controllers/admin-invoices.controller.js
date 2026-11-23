@@ -162,6 +162,9 @@ async function createInvoice(req, res) {
       generatedByStaffId: req.staff?.sub,
     });
   } catch (err) {
+    if (err?.code === "INVOICE_ALREADY_EXISTS") {
+      return sendError(res, 409, "ALREADY_EXISTS", "Invoice already exists for this enrollment + period");
+    }
     return sendError(res, 400, "GENERATE_FAILED", err.message);
   }
 
@@ -216,6 +219,10 @@ async function bulkGenerateForCourse(req, res) {
       });
       created += 1;
     } catch (err) {
+      if (err?.code === "INVOICE_ALREADY_EXISTS") {
+        skipped += 1;
+        continue;
+      }
       errors.push({ enrollment_id: String(e._id), message: err.message });
     }
   }
