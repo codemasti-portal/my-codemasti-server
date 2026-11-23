@@ -8,7 +8,7 @@ The server code supports two runtimes. Which repo deploys where:
 | `my-codemasti-admin` | Vercel | `vercel.json` rewrites `/v1/:path*` to `https://server.codemasti.com/v1/:path*` and falls back to `/index.html` |
 | `my-codemasti-com` | **unverified** | No `vercel.json`; `next.config.mjs` has only redirects. Nothing in the repo names its host. |
 
-Variables for every runtime: [ENV.md](ENV.md).
+Variables for every runtime: [ENV.md](ENV.md). Production safety notes (2026-11-23): `NODE_ENV=production` is set by the Docker image, `deploy/restart-container.sh` and Vercel; the server relies on it to keep OTPs out of the logs (`OTP_DEBUG_LOG`) and to print the `[SECURITY]` startup warning when `CORS_ORIGINS` is empty. On startup also watch for `[SECURITY] PAYMENTS_MODE=phonepe ...` (webhook credentials unset). `POST /v1/auth/google` returns 503 until `GOOGLE_CLIENT_ID` is set. Deploying this change needs no new env variable; existing deployments keep working (the only visible differences are: OTPs are no longer printed in logs when email sending fails, and the Google route is refused when unconfigured).
 
 ## 1. Vercel (serverless)
 

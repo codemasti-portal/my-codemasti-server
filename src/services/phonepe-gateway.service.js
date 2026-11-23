@@ -173,6 +173,8 @@ async function verifyPayment(merchantTransactionId) {
       Authorization: auth,
       accept: "application/json",
     },
+    // Status checks run inside webhook handlers; fail fast instead of hanging the request.
+    signal: AbortSignal.timeout(8000),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -269,6 +271,8 @@ async function verifyRefund(merchantRefundId) {
       Authorization: auth,
       accept: "application/json",
     },
+    // Status checks run inside webhook handlers; fail fast instead of hanging the request.
+    signal: AbortSignal.timeout(8000),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -289,9 +293,16 @@ async function verifyRefund(merchantRefundId) {
  * <hex> = lowercase SHA256("username:password"). Username/password are configured
  * in the merchant dashboard and mirrored in env vars on our side.
  *
- * If env vars aren't configured, this function returns true with a one-time warn —
- * caller is opting out of webhook auth (acceptable for dev, dangerous for prod).
+ * If env vars aren't configured, this function still returns true (backward compatible: the
+ * header cannot be checked). That is NOT proof of authenticity, so the webhook controller
+ * checks `isWebhookAuthConfigured()` and, when false, re-confirms every state-changing event
+ * with PhonePe's order/refund status API (verifyPayment / verifyRefund) before applying it.
+ * app.js also prints a [SECURITY] startup warning when PAYMENTS_MODE=phonepe and these are unset.
  */
+function isWebhookAuthConfigured() {
+  return Boolean(process.env.PHONEPE_WEBHOOK_USERNAME) && Boolean(process.env.PHONEPE_WEBHOOK_PASSWORD);
+}
+
 let warnedAboutWebhookAuth = false;
 function verifyWebhookSignature(headers) {
   const username = process.env.PHONEPE_WEBHOOK_USERNAME || "";
@@ -301,11 +312,12 @@ function verifyWebhookSignature(headers) {
     if (!warnedAboutWebhookAuth) {
       console.warn(
         "[WARN] PhonePe webhook auth DISABLED — set PHONEPE_WEBHOOK_USERNAME + PHONEPE_WEBHOOK_PASSWORD " +
-          "(matching values configured in PhonePe dashboard) to verify webhook authenticity in production."
+          "(matching values configured in PhonePe dashboard). Until then every webhook is re-confirmed " +
+          "against PhonePe's status API before it changes any state."
       );
       warnedAboutWebhookAuth = true;
     }
-    return true; // skip verification — dev-mode opt-out
+    return true; // header cannot be checked; the controller falls back to status-API confirmation
   }
 
   const auth = headers?.authorization || headers?.Authorization;
@@ -317,7 +329,9 @@ function verifyWebhookSignature(headers) {
 module.exports = {
   initiatePayment,
   verifyPayment,
+  verifyRefund,
   verifyWebhookSignature,
+  isWebhookAuthConfigured,
   initiateRefund,
   normalizeProviderResponse,
 };

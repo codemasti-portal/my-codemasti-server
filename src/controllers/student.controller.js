@@ -6,6 +6,7 @@ const Student = require("../models/Student");
 const OtpRequest = require("../models/OtpRequest");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { sendOtpEmail } = require("../services/brevo");
+const { logOtpIfAllowed } = require("../utils/otpDebug");
 const { signAccessToken, verifyAccessToken } = require("../utils/tokens");
 const {
   isCloudinaryConfigured,
@@ -151,10 +152,7 @@ async function sendPasswordUpdateOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: email, otp, expiresInSec });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[OTP_DEBUG]", error.message);
-      console.log(`[OTP_DEBUG] OTP for ${email}: ${otp}`);
-    }
+    logOtpIfAllowed("OTP_DEBUG", error, email, otp);
   }
 
   return sendSuccess(

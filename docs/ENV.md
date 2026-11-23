@@ -17,13 +17,13 @@ Derived from code (`grep process.env` over `src/`, `api/`, `loadtest/`, `deploy/
 | `JWT_ACCESS_EXPIRES_IN` | no | `1h` (`src/utils/tokens.js`) | no | Access-token lifetime. Note login/refresh responses hard-code `expires_in_sec: 3600` regardless. |
 | `JWT_REFRESH_EXPIRES_IN` | no | `30d` (`src/utils/tokens.js`) | no | Refresh-token lifetime. |
 | `PORT` | no | `5001` (`src/server.js`, `Dockerfile`) | no | HTTP port (long-running mode only; ignored on Vercel). |
-| `CORS_ORIGINS` | prod: yes | empty => any origin allowed (`src/app.js`) | no | Comma-separated allowed origins (trailing `/` stripped). Empty list means `cors({ origin: true })`, i.e. every origin is reflected. |
+| `CORS_ORIGINS` | prod: yes | empty => any origin allowed (`src/app.js`) | no | Comma-separated allowed origins (trailing `/` stripped). Empty list means `cors({ origin: true })`, i.e. every origin is reflected **with credentials**. Behaviour is unchanged, but with `NODE_ENV=production` and no origins configured the server prints a `[SECURITY]` warning once at startup. |
 | `CORS_ORIGIN` | no | empty (`src/app.js`) | no | Legacy alias, merged with `CORS_ORIGINS` and de-duplicated. |
 | `TRUST_PROXY` | behind proxy: yes | unset (`src/app.js`) | no | Passed to Express `trust proxy` (`Number(x) \|\| x`). Set to `1` behind Nginx so rate limiting uses the real client IP. `deploy/restart-container.sh` sets it. |
 | `RATE_LIMIT_API_MAX` | no | `200` req/min/IP (`src/middlewares/rateLimit.middleware.js`) | no | Global limiter cap. Raised temporarily by `loadtest/run-stress-test.sh`. The OTP limiter (5/min) is fixed. |
 | `CRON_SECRET` | prod: yes | none; endpoint returns 503 `CRON_NOT_CONFIGURED` (`src/routes/modules/internal.routes.js`) | yes | Shared secret for `GET\|POST /v1/internal/cron/run` (`x-cron-secret` header or `?key=`). |
-| `OTP_DEBUG_LOG` | no | enabled unless exactly `false` (`auth.controller.js`, `staff-auth.controller.js`, `student.controller.js`) | no | When the OTP email fails to send, the OTP is written to stdout. **Set `false` in production.** |
-| `GOOGLE_CLIENT_ID` | prod: yes if Google sign-in is used | unset => audience check skipped (`src/controllers/auth.controller.js`) | no | Expected `aud` of Google ID tokens for `POST /v1/auth/google`. |
+| `OTP_DEBUG_LOG` | no | unset => log only when `NODE_ENV` is not `production` (`src/utils/otpDebug.js`, used by `auth`, `staff-auth`, `student` controllers) | no | When the OTP email fails to send, the OTP is written to stdout only if `OTP_DEBUG_LOG=true`, or `NODE_ENV!=production` and the value is not `false`. `false` always disables it. The send failure itself is always logged (without the OTP). Since 2026-11-23 production no longer prints OTPs by default. |
+| `GOOGLE_CLIENT_ID` | to use Google sign-in | unset => `POST /v1/auth/google` returns 503 `GOOGLE_NOT_CONFIGURED` (`src/controllers/auth.controller.js`) | no | Expected `aud` of Google ID tokens for `POST /v1/auth/google`. Before 2026-11-23 an unset value skipped the audience check; it now refuses instead. No frontend calls this route. |
 
 ### Email (Brevo), uploads (Cloudinary), links
 
@@ -78,13 +78,13 @@ Derived from code (`grep process.env` over `src/`, `api/`, `loadtest/`, `deploy/
 | Variable | Required? | Default (where) | Secret? | Purpose |
 |---|---|---|---|---|
 | `PAYMENTS_MODE` | no | `manual_upi` (`src/utils/paymentsConfig.js`) | no | `manual_upi` or `phonepe` (anything else => `manual_upi`). Reported to clients by `GET /v1/students/payments/config`. |
-| `UPI_PAYEE_VPA` | for manual UPI | hard-coded fallback in `src/utils/paymentsConfig.js` | no | UPI id shown to students and stored on each manual payment. **Set explicitly; do not rely on the code default.** |
-| `UPI_PAYEE_NAME` | for manual UPI | hard-coded fallback in `paymentsConfig.js` | no | Payee display name. |
+| `UPI_PAYEE_VPA` | for manual UPI | hard-coded fallback in `src/utils/paymentsConfig.js` (production currently relies on it) | no | UPI id shown to students and stored on each manual payment. **Set explicitly; do not rely on the code default.** The fallback is deliberately unchanged for now (open item). |
+| `UPI_PAYEE_NAME` | for manual UPI | hard-coded fallback in `paymentsConfig.js` (production currently relies on it) | no | Payee display name. Same note as above. |
 | `PHONEPE_CLIENT_ID`, `PHONEPE_CLIENT_SECRET` | for PhonePe | none; `getConfig()` throws (`src/services/phonepe-gateway.service.js`) | yes | OAuth client credentials (Standard Checkout v2). |
 | `PHONEPE_CLIENT_VERSION` | no | `1` | no | OAuth `client_version`. |
 | `PHONEPE_SANDBOX` | prod: set `false` | `true` (anything except `false`/`0`/`no` is sandbox) | no | Selects sandbox vs production PhonePe hosts. |
 | `PHONEPE_REDIRECT_URL_BASE` | for PhonePe | `http://localhost:3000/checkout/return` | no | Where PhonePe sends the student after payment (portal route). |
-| `PHONEPE_WEBHOOK_USERNAME`, `PHONEPE_WEBHOOK_PASSWORD` | prod: yes | empty => webhook auth **disabled** with a one-time warning (`phonepe-gateway.service.js`) | yes | Must match the dashboard values; PhonePe sends `Authorization: sha256("username:password")`. |
+| `PHONEPE_WEBHOOK_USERNAME`, `PHONEPE_WEBHOOK_PASSWORD` | prod: yes (both) | empty => header not checked; every webhook is instead re-confirmed with PhonePe's status API before any state change (`payments-webhook.controller.js`), and `[SECURITY]` is warned at startup if `PAYMENTS_MODE=phonepe` | yes | Must match the dashboard values; PhonePe sends `Authorization: sha256("username:password")`. If only one is set it counts as unset. |
 
 ### Schedulers and retention
 
@@ -108,7 +108,7 @@ Derived from code (`grep process.env` over `src/`, `api/`, `loadtest/`, `deploy/
 
 | Variable | Where | Note |
 |---|---|---|
-| `NODE_ENV` | `Dockerfile` (`production`), `deploy/restart-container.sh` | Not read by `src/`; Express reads it internally. |
+| `NODE_ENV` | `Dockerfile` (`production`), `deploy/restart-container.sh` (`-e NODE_ENV=production`), Vercel (sets `production` automatically) | Read by `src/utils/otpDebug.js` (OTP logging) and `src/app.js` (CORS startup warning); also by Express internally. Local `npm run dev` leaves it unset, which counts as non-production. |
 | `PORT`, `TRUST_PROXY` | `deploy/restart-container.sh` (`5001`, `1`) | Override anything in `~/codemasti/.env`. |
 
 ## 2. Student portal (`my-codemasti-com`)
@@ -149,14 +149,14 @@ Not read by the app. Read by `deploy/*.sh` and `loadtest/*`.
 
 ## 5. Production safety checklist
 
-- [ ] `OTP_DEBUG_LOG=false` (otherwise OTPs are printed to logs whenever email sending fails).
-- [ ] `CORS_ORIGINS` set to the exact portal/admin origins (empty means every origin is allowed).
+- [ ] `NODE_ENV=production` (Docker, `restart-container.sh` and Vercel already do this). With it, OTPs are never printed unless you explicitly set `OTP_DEBUG_LOG=true`; leave `OTP_DEBUG_LOG` unset or `false`.
+- [ ] `CORS_ORIGINS` set to the exact portal/admin origins (empty means every origin is reflected with credentials; a `[SECURITY]` warning is printed at startup in production).
 - [ ] `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` set to long random, distinct values.
-- [ ] `GOOGLE_CLIENT_ID` set if `/v1/auth/google` is reachable (unset skips the audience check). No frontend calls this route today.
+- [ ] `GOOGLE_CLIENT_ID` set only if you want `/v1/auth/google` to work (unset => 503 `GOOGLE_NOT_CONFIGURED`). No frontend calls this route today.
 - [ ] `CRON_SECRET` set, and the cron pinger configured (mandatory on Vercel; also needed on EC2 for the post-session tasks tick, see [RUNBOOK.md](RUNBOOK.md)).
 - [ ] `TRUST_PROXY=1` when behind Nginx / a load balancer (set automatically by `deploy/restart-container.sh`).
-- [ ] If `PAYMENTS_MODE=phonepe`: `PHONEPE_CLIENT_ID/SECRET`, `PHONEPE_SANDBOX=false`, `PHONEPE_REDIRECT_URL_BASE`, and **`PHONEPE_WEBHOOK_USERNAME/PASSWORD`** (unset disables webhook authentication).
-- [ ] `UPI_PAYEE_VPA` / `UPI_PAYEE_NAME` set explicitly for manual UPI.
+- [ ] If `PAYMENTS_MODE=phonepe`: `PHONEPE_CLIENT_ID/SECRET`, `PHONEPE_SANDBOX=false`, `PHONEPE_REDIRECT_URL_BASE`, and **`PHONEPE_WEBHOOK_USERNAME/PASSWORD`** (unset => webhooks are unauthenticated and only accepted after a PhonePe status-API re-confirmation; a `[SECURITY]` warning is logged at startup).
+- [ ] `UPI_PAYEE_VPA` / `UPI_PAYEE_NAME` set explicitly for manual UPI (the hard-coded fallback in `paymentsConfig.js` still exists and production relies on it today).
 - [ ] `BREVO_API_KEY` + `BREVO_SENDER_EMAIL` set (OTP login depends on email).
 - [ ] Cloudinary configured (uploads return 503 otherwise).
 - [ ] `STUDENT_PORTAL_URL`, `ADMIN_PORTAL_URL`, `PUBLIC_APP_URL`/`REFERRAL_LINK_BASE` set to production URLs (links in emails).
@@ -168,8 +168,10 @@ Not read by the app. Read by `deploy/*.sh` and `loadtest/*`.
 - **`CORS_ORIGIN` is a legacy alias** of `CORS_ORIGINS`; both are merged.
 - **`GOOGLE_CALENDAR_TIMEZONE` is an alias** of `GOOGLE_CALENDAR_TIME_ZONE`, honoured only inside the calendar service. `CLASS_TIMEZONE` falls back to `GOOGLE_CALENDAR_TIME_ZONE` only (not the alias).
 - **`BATCH_MEMBERSHIP_SOURCE` is no longer read by any code.** Membership is always resolved from `StudentEnrollment`. The name survives only in a comment in `src/scripts/backfill-enrollment-section-id.js` and in the admin docs page. Remove it from any env file.
-- **`OTP_DEBUG_LOG` logic is inverted from its name:** logging is on unless the value is exactly `false`.
-- **Webhook auth fails open:** with `PHONEPE_WEBHOOK_USERNAME/PASSWORD` unset, `POST /v1/payments/webhook/phonepe` accepts any caller.
+- **`OTP_DEBUG_LOG` default depends on `NODE_ENV` (changed 2026-11-23):** unset/other values log OTPs only outside production; `true` forces logging, `false` forbids it. If production email is broken and `OTP_DEBUG_LOG` is not `true`, the OTP is not recoverable from logs (only the send failure is logged).
+- **Webhook without credentials is not open any more, but is not authenticated either:** with `PHONEPE_WEBHOOK_USERNAME/PASSWORD` unset, `POST /v1/payments/webhook/phonepe` accepts the request but re-confirms the order/refund with PhonePe before applying it (503 if PhonePe cannot be reached so PhonePe retries, 409 if PhonePe disagrees). This needs `PHONEPE_CLIENT_ID/SECRET`; without them every webhook is answered 503. Configure the webhook credentials to remove the extra API call per webhook.
+- **CORS with no configured origin reflects every origin with credentials** (unchanged; only a startup warning was added).
+- **`UPI_PAYEE_VPA` / `UPI_PAYEE_NAME` silently fall back to hard-coded values** if unset; production depends on this, so it was left as is.
 - **`BILLING_INVOICE_SCHEDULER=0` / `ASSIGNMENT_RELEASE_NOTIFY_SCHEDULER=0` only affect the in-process timers** in `src/server.js`. The cron endpoint runs those ticks regardless.
 - **`PAYMENTS_MODE` is advisory for clients:** `POST /v1/students/payments/initiate` (PhonePe) does not check the mode; it only requires PhonePe credentials.
 - **Access-token TTL is configurable but clients are told 3600s** (`expires_in_sec` is hard-coded in the auth controllers).

@@ -7,6 +7,7 @@ const OtpRequest = require("../models/OtpRequest");
 const Student = require("../models/Student");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { sendOtpEmail } = require("../services/brevo");
+const { logOtpIfAllowed } = require("../utils/otpDebug");
 const { buildLoginMeta } = require("../utils/requestMeta");
 
 const sendOtpSchema = z.object({
@@ -114,10 +115,7 @@ async function sendOtp(req, res) {
   } catch (error) {
     // Helpful for dev/testing if Brevo is not configured.
     // Security note: OTP is NOT returned to the client.
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[OTP_DEBUG]", error.message);
-      console.log(`[OTP_DEBUG] OTP for ${body.email}: ${otp}`);
-    }
+    logOtpIfAllowed("OTP_DEBUG", error, body.email, otp);
   }
 
   return sendSuccess(
@@ -158,10 +156,7 @@ async function sendForgotPasswordOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: body.email, otp, expiresInSec });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[OTP_DEBUG]", error.message);
-      console.log(`[OTP_DEBUG] OTP for ${body.email}: ${otp}`);
-    }
+    logOtpIfAllowed("OTP_DEBUG", error, body.email, otp);
   }
   return sendSuccess(
     res,
@@ -372,6 +367,18 @@ async function resetPasswordWithToken(req, res) {
 }
 
 async function googleLogin(req, res) {
+  // Without GOOGLE_CLIENT_ID we cannot check the token audience, so any valid Google ID token
+  // (issued for any app) would be accepted. Refuse instead of failing open.
+  const googleAud = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  if (!googleAud) {
+    return sendError(
+      res,
+      503,
+      "GOOGLE_NOT_CONFIGURED",
+      "Google sign-in is not configured on this server"
+    );
+  }
+
   const schema = z.object({ id_token: z.string().min(10) });
   const body = schema.parse(req.body);
 
@@ -392,8 +399,7 @@ async function googleLogin(req, res) {
     return sendError(res, 502, "GOOGLE_VERIFY_FAILED", "Could not verify Google token");
   }
 
-  const googleAud = process.env.GOOGLE_CLIENT_ID;
-  if (googleAud && tokenPayload.aud !== googleAud) {
+  if (tokenPayload.aud !== googleAud) {
     return sendError(res, 401, "INVALID_AUDIENCE", "Google token audience does not match GOOGLE_CLIENT_ID");
   }
 

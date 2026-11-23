@@ -89,9 +89,9 @@ Two flows share `src/utils/tokens.js` (HS256; access `JWT_ACCESS_EXPIRES_IN` def
 
 ### Student (`/v1/auth/*`, middleware `requireAuth`)
 - Students must already exist (created by an admin); every login path returns `STUDENT_NOT_REGISTERED` otherwise.
-- **OTP**: `POST /auth/otp/send` stores an `OtpRequest` (6 digits, 120 s TTL) and emails it via Brevo; `POST /auth/otp/verify` returns `access_token` + `refresh_token`. If email sending throws, the error is swallowed and the OTP is logged unless `OTP_DEBUG_LOG=false`.
+- **OTP**: `POST /auth/otp/send` stores an `OtpRequest` (6 digits, 120 s TTL) and emails it via Brevo; `POST /auth/otp/verify` returns `access_token` + `refresh_token`. If email sending throws, the error is swallowed and the failure is logged; the OTP value itself is logged only when `OTP_DEBUG_LOG=true`, or outside production unless `OTP_DEBUG_LOG=false` (`src/utils/otpDebug.js`).
 - **Password**: `POST /auth/login`. First-time set / reset use OTP -> short-lived (10 min) `signup_token` / `reset_token` -> `POST /auth/signup/password` / `/auth/password/reset`.
-- **Google**: `POST /auth/google` verifies the ID token against Google's `tokeninfo` endpoint; checks `aud` only if `GOOGLE_CLIENT_ID` is set; maps to an existing student by email. No caller exists in either frontend today.
+- **Google**: `POST /auth/google` verifies the ID token against Google's `tokeninfo` endpoint; always checks `aud` and returns 503 `GOOGLE_NOT_CONFIGURED` when `GOOGLE_CLIENT_ID` is unset; maps to an existing student by email. No caller exists in either frontend today.
 - `POST /auth/refresh` verifies the refresh token and issues a new access token (no rotation). `POST /auth/logout` is a stateless no-op; there is **no server-side revocation for student tokens**.
 - `requireAuth` only verifies the bearer JWT and sets `req.user`; it does not distinguish student from staff tokens.
 

@@ -9,16 +9,83 @@
 //   }
 //
 // Auth: PhonePe sends Authorization: <hex> where hex = SHA256("username:password"). We verify
-// against PHONEPE_WEBHOOK_USERNAME/PASSWORD env vars (or skip verification with a warn if unset).
+// against PHONEPE_WEBHOOK_USERNAME/PASSWORD env vars.
+//
+// If those env vars are NOT set the header cannot be checked, so the body is untrusted: before any
+// state change (payment status, invoice paid, refund status) the event is re-confirmed with
+// PhonePe's own order/refund status API (verifyPayment / verifyRefund). Status call failed -> 503
+// (PhonePe retries); status disagrees with the webhook -> 409 and nothing is changed.
+// When the env vars ARE set, behaviour is unchanged (signature check only, body trusted).
 
 const { sendError } = require("../utils/response");
 const Payment = require("../models/Payment");
 const Invoice = require("../models/Invoice");
 const Refund = require("../models/Refund");
-const {
-  verifyWebhookSignature,
-  normalizeProviderResponse,
-} = require("../services/phonepe-gateway.service");
+const gateway = require("../services/phonepe-gateway.service");
+const { verifyWebhookSignature, normalizeProviderResponse } = gateway;
+
+// Webhook refund `state` -> internal status (same mapping verifyRefund applies to the status API).
+function refundStateToStatus(state) {
+  const up = String(state || "").toUpperCase();
+  if (up === "COMPLETED" || up === "CONFIRMED") return "success";
+  if (up === "FAILED") return "failed";
+  return "pending";
+}
+
+/**
+ * Used only when webhook credentials are not configured. Asks PhonePe for the real order state.
+ * Returns { ok: true, norm } (norm taken from PhonePe's answer, not from the request body) or
+ * { ok: false, status, code, message } describing the HTTP response to send.
+ */
+async function confirmPaymentWithGateway(merchantTxnId, claimedStatus) {
+  let verified;
+  try {
+    verified = await gateway.verifyPayment(merchantTxnId);
+  } catch (err) {
+    console.error("[ERROR]", JSON.stringify({
+      context: "PHONEPE_WEBHOOK_CONFIRM_FAIL",
+      merchantTxnId,
+      message: err.message,
+    }));
+    return { ok: false, status: 503, code: "CONFIRMATION_UNAVAILABLE", message: "Could not confirm order with PhonePe" };
+  }
+  const idMismatch = verified.merchantOrderId && verified.merchantOrderId !== merchantTxnId;
+  if (idMismatch || verified.status !== claimedStatus) {
+    console.error("[ERROR]", JSON.stringify({
+      context: "PHONEPE_WEBHOOK_CONFIRM_MISMATCH",
+      merchantTxnId,
+      claimed: claimedStatus,
+      confirmed: verified.status,
+      idMismatch: Boolean(idMismatch),
+    }));
+    return { ok: false, status: 409, code: "WEBHOOK_UNCONFIRMED", message: "Webhook does not match PhonePe order status" };
+  }
+  return { ok: true, norm: verified };
+}
+
+async function confirmRefundWithGateway(merchantRefundId, claimedStatus) {
+  let verified;
+  try {
+    verified = await gateway.verifyRefund(merchantRefundId);
+  } catch (err) {
+    console.error("[ERROR]", JSON.stringify({
+      context: "PHONEPE_WEBHOOK_CONFIRM_FAIL",
+      merchantRefundId,
+      message: err.message,
+    }));
+    return { ok: false, status: 503, code: "CONFIRMATION_UNAVAILABLE", message: "Could not confirm refund with PhonePe" };
+  }
+  if (verified.status !== claimedStatus) {
+    console.error("[ERROR]", JSON.stringify({
+      context: "PHONEPE_WEBHOOK_CONFIRM_MISMATCH",
+      merchantRefundId,
+      claimed: claimedStatus,
+      confirmed: verified.status,
+    }));
+    return { ok: false, status: 409, code: "WEBHOOK_UNCONFIRMED", message: "Webhook does not match PhonePe refund status" };
+  }
+  return { ok: true };
+}
 
 function decodeRequestBody(rawBuffer) {
   try {
@@ -62,6 +129,11 @@ async function handlePhonepeWebhook(req, res) {
       console.error("[ERROR]", JSON.stringify({ context: "PHONEPE_WEBHOOK_UNKNOWN_REFUND", refundId }));
       return res.status(200).json({ success: true, data: { ignored: true } });
     }
+    if (!gateway.isWebhookAuthConfigured()) {
+      const claimed = refundStateToStatus(payload?.payload?.state);
+      const check = await confirmRefundWithGateway(refundId, claimed);
+      if (!check.ok) return sendError(res, check.status, check.code, check.message);
+    }
     return handleRefundWebhook(req, res, refund, payload);
   }
 
@@ -84,11 +156,26 @@ async function handlePhonepeWebhook(req, res) {
     return res.status(200).json({ success: true, data: { ignored: true } });
   }
 
-  const norm = normalizeProviderResponse(payload);
+  let norm = normalizeProviderResponse(payload);
+  // Without webhook credentials the body is unauthenticated: never store it, only PhonePe's answer.
+  const bodyIsTrusted = gateway.isWebhookAuthConfigured();
+  let storedPayload = payload;
+
+  if (!bodyIsTrusted) {
+    // Already processed with this status: nothing to confirm or write, and no outbound call.
+    if (payment.status === norm.status && payment.webhook_received_at) {
+      return res.status(200).json({ success: true, data: { duplicate: true } });
+    }
+    // Confirm with PhonePe and use ITS data.
+    const check = await confirmPaymentWithGateway(merchantTxnId, norm.status);
+    if (!check.ok) return sendError(res, check.status, check.code, check.message);
+    norm = check.norm;
+    storedPayload = check.norm.raw || {};
+  }
 
   // Idempotency: if status hasn't changed, just record the webhook receipt and exit.
   if (payment.status === norm.status && payment.webhook_received_at) {
-    payment.webhook_payload = payload;
+    payment.webhook_payload = storedPayload;
     payment.webhook_received_at = new Date();
     await payment.save();
     return res.status(200).json({ success: true, data: { duplicate: true } });
@@ -97,14 +184,16 @@ async function handlePhonepeWebhook(req, res) {
   payment.status = norm.status;
   payment.phonepe_transaction_id = norm.phonepeTransactionId || payment.phonepe_transaction_id || "";
   payment.payment_method = norm.paymentMethod || payment.payment_method;
-  payment.webhook_payload = payload;
+  payment.webhook_payload = storedPayload;
   payment.webhook_received_at = new Date();
   if (norm.status === "success" || norm.status === "failed") {
     payment.completed_at = new Date();
   }
   if (norm.status === "failed") {
     payment.failure_code = norm.code || "";
-    payment.failure_reason = payload?.payload?.errorContext?.detailedErrorCode || payload?.payload?.message || "";
+    payment.failure_reason = bodyIsTrusted
+      ? payload?.payload?.errorContext?.detailedErrorCode || payload?.payload?.message || ""
+      : String(norm.code || "");
   }
   await payment.save();
 

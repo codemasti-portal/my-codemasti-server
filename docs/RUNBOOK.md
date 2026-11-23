@@ -66,10 +66,13 @@ Errors are single-line `[ERROR] {json}` (every `sendError`, 4xx included, logs `
 | `UNHANDLED_REJECTION` | Logged, process continues |
 | `AUTH_REFRESH_TOKEN_VERIFY`, `STAFF_AUTH_REFRESH_TOKEN_VERIFY` | Bad refresh tokens |
 | `PHONEPE_WEBHOOK_SIG_FAIL` | Webhook `Authorization` mismatch (401) |
+| `PHONEPE_WEBHOOK_CONFIRM_FAIL` | Webhook credentials unset and the PhonePe status call failed (webhook answered 503, PhonePe retries) |
+| `PHONEPE_WEBHOOK_CONFIRM_MISMATCH` | Webhook credentials unset and PhonePe's status disagrees with the webhook (answered 409, nothing changed): possible forged request |
+| `[SECURITY]` (startup) | No CORS origins configured in production; or `PAYMENTS_MODE=phonepe` without webhook credentials |
 | `PHONEPE_WEBHOOK_DECODE_FAIL` | Webhook body is not JSON (400) |
 | `PHONEPE_WEBHOOK_UNKNOWN_ID`, `PHONEPE_WEBHOOK_UNKNOWN_REFUND` | Webhook for an id we do not know (acked 200 `ignored`) |
 | `PAYMENT_STATUS_VERIFY_FAIL` | PhonePe status poll failed |
-| `[OTP_DEBUG]`, `[STAFF_OTP_DEBUG]` | Email send failed; OTP printed (when `OTP_DEBUG_LOG != false`) |
+| `[OTP_DEBUG]`, `[STAFF_OTP_DEBUG]` | `OTP email send failed: <reason>` is always logged. The line `OTP for <email>: <otp>` is printed only if `OTP_DEBUG_LOG=true`, or `NODE_ENV!=production` and `OTP_DEBUG_LOG!=false` |
 | `[MONTHLY_INVOICE_GENERATE_FAILED]`, `[MONTHLY_INVOICE_TICK_FAILED]`, `[MONTHLY_INVOICE_BOOT_TICK_FAILED]` | Billing scheduler |
 | `[TIMETABLE_CLASS_REMINDER_TICK_FAILED]`, `[MENTOR_REMINDER_TICK_FAILED]`, `[EVENT_REMINDER_TICK_FAILED]`, `[MENTOR_PUBLISH_SWEEP_TICK_FAILED]`, `[ASSIGNMENT_RELEASE_NOTIFY_TICK]` | Reminder ticks |
 | `[TIMETABLE_POST_CLASS_TASKS]`, `[MENTOR_POST_SESSION_TASKS]`, `[POST_SESSION_TASKS] Disabled` | Post-session tasks |
@@ -84,12 +87,13 @@ Errors are single-line `[ERROR] {json}` (every `sendError`, 4xx included, logs `
 |---|---|---|
 | 503 `DB_NOT_CONNECTED` on every route including `/health` | MongoDB unreachable, wrong `MONGODB_URI`, Atlas IP allow-list | grep `DB_CONNECT_*`; try `MONGODB_URI_DIRECT` if SRV DNS fails |
 | Vercel: every request fails after one bad cold start | `api/index.js` caches a rejected `connectDb()` promise | Redeploy / wait for instance recycle; see [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Users never get OTP emails, "OTP sent" still returned | `BREVO_API_KEY` / `BREVO_SENDER_EMAIL` missing or Brevo error; the send error is swallowed | Logs show `[OTP_DEBUG]` with the OTP unless `OTP_DEBUG_LOG=false` (then there is no way to see it) |
+| Users never get OTP emails, "OTP sent" still returned | `BREVO_API_KEY` / `BREVO_SENDER_EMAIL` missing or Brevo error; the send error is swallowed | Logs show `[OTP_DEBUG] OTP email send failed: ...` with the reason. In production the OTP itself is not printed unless `OTP_DEBUG_LOG=true` (temporary break-glass: set it, restart, then unset; it exposes login codes to anyone with log access) |
 | Uploads fail with 503 `CLOUDINARY_NOT_CONFIGURED` ("File uploads are temporarily unavailable") | Cloudinary env missing | Set `CLOUDINARY_URL` or the three-variable form |
 | Upload 400 `UPLOAD_ERROR` / `INVALID_FILE` | Multer size limit (2-25 MB depending on the upload, see `upload.middleware.js`) or wrong file type | Client-side validation |
 | 413 on large bodies | Nginx `client_max_body_size 20m` or Express JSON limit 2 MB | Adjust the relevant layer |
 | PhonePe webhook 401 | Dashboard username/password differ from `PHONEPE_WEBHOOK_*` | `PHONEPE_WEBHOOK_SIG_FAIL`; sha256 of `username:password` must equal the `Authorization` header |
-| PhonePe webhook accepted from anyone | `PHONEPE_WEBHOOK_USERNAME/PASSWORD` unset => verification skipped (one-time warn) | Set both in production |
+| PhonePe webhook 503 `CONFIRMATION_UNAVAILABLE` / 409 `WEBHOOK_UNCONFIRMED` | `PHONEPE_WEBHOOK_USERNAME/PASSWORD` unset, so each webhook is re-confirmed with PhonePe's status API: 503 = status call failed (PhonePe client creds missing/wrong or PhonePe down), 409 = PhonePe's state differs (forged, or PhonePe not yet updated; PhonePe retries) | Set both webhook variables in production; check `PHONEPE_CLIENT_*`; grep `PHONEPE_WEBHOOK_CONFIRM_*` |
+| `POST /v1/auth/google` 503 `GOOGLE_NOT_CONFIGURED` | `GOOGLE_CLIENT_ID` unset (intentional since 2026-11-23) | Set it if Google sign-in is wanted |
 | Payment initiate 502 `GATEWAY_ERROR` | PhonePe creds missing (`PhonePe not configured`) or API error; `PHONEPE_SANDBOX` wrong for the credentials | Check env and sandbox flag |
 | Payment stuck `pending` | Webhook missed | Student status poll (`GET /students/payments/status/:id`) re-verifies with PhonePe; admin reconciliation: `GET /v1/admin/payments/reconciliation` |
 | Written assignments return "grading service unavailable" | No `GEMINI_API_KEY`/`DEEPSEEK_API_KEY` or provider outage; result has `provider: "fallback"` | See [AI_EVALUATOR.md](AI_EVALUATOR.md) |
@@ -124,8 +128,8 @@ Pinger failures (non-200 from the cron URL), container `unhealthy`, spikes of `"
 1. `postSessionTasks` is only reachable via the cron endpoint; decide whether EC2 should also start it in `server.js`.
 2. Monthly invoice de-dupe is not backed by a unique index (`Invoice` has no `{enrollment_id, period_start}` constraint); a day-1 race with both timer and pinger on EC2 used to double-invoice. **Code fix (2026-11-23): `buildInvoiceForPeriod` now locks the enrollment document and re-checks for an existing invoice inside the transaction; untested against a real replica set.** The unique index is still not added. **Confirmed in production data (read-only check, 2026-11-23): 9 groups of duplicate invoices (18 documents, all `system_cron`), one of them paid + pending for the same period.** The existing duplicates are not cleaned up: review them, cancel or remove the extras, and only then consider a unique index on `{enrollment_id, period_start}`.
 3. `api/index.js` caches a rejected DB-connect promise.
-4. PhonePe webhook auth is optional (fails open).
-5. `UPI_PAYEE_VPA` / `UPI_PAYEE_NAME` have hard-coded fallbacks in `src/utils/paymentsConfig.js`.
+4. PhonePe webhook auth: **partly fixed (2026-11-23).** With `PHONEPE_WEBHOOK_USERNAME/PASSWORD` unset the webhook no longer trusts the body: payment and refund events are re-confirmed with PhonePe's order/refund status API before any state change (503 if the call fails, 409 if it disagrees); a `[SECURITY]` warning is logged at startup when `PAYMENTS_MODE=phonepe`. **Remaining:** set the two webhook variables in production so webhooks are authenticated by signature (and cost no extra PhonePe call). The configured-credentials path is unchanged and trusts the signed body. Also unverified: a refund webhook whose `payload` lacks `merchantOrderId`/`orderId` is normalised to `pending` by `normalizeProviderResponse` (see [BILLING.md](BILLING.md)); worth checking against a real refund webhook.
+5. `UPI_PAYEE_VPA` / `UPI_PAYEE_NAME` have hard-coded fallbacks in `src/utils/paymentsConfig.js`. **Not changed (2026-11-23)**: production relies on them. Documented in the code, `.env.example` and [ENV.md](ENV.md); fix by setting both variables explicitly, then the fallback can be removed.
 6. Data findings from a read-only production check on 2026-11-23 (counts only; nothing was changed):
    - 1 student has a `batch_id` but no active enrollment (innovators); `POST /v1/admin/enrollments/reconcile` would add it.
    - 16 active enrollments still lack `section_id` while the student has a legacy section; `backfill-enrollment-section-id` would stamp them.
@@ -133,3 +137,10 @@ Pinger failures (non-200 from the cron URL), container `unhealthy`, spikes of `"
    - 4 collections have no model and no code reference: `scorecardconfigs` (1 doc), `scorecardmonths` (4), `remindersettings` (1), `studentbroadcastlogs` (0). They can be dropped once you confirm the data is not needed.
    - 2 collections are orphaned after the live-class removal: `liveclasses` and `classjoinaudits` (their models and routes were deleted; no code references them). They can be dropped once you confirm the data is not needed.
    - `Student.course` and `Student.progress` are empty/zero for every student.
+7. Security hardening done 2026-11-23: OTP printing is off in production unless `OTP_DEBUG_LOG=true` (shared helper `src/utils/otpDebug.js`); `POST /v1/auth/google` refuses with 503 `GOOGLE_NOT_CONFIGURED` when `GOOGLE_CLIENT_ID` is unset. **Still open:** CORS with no `CORS_ORIGINS` reflects any origin with credentials (only a `[SECURITY]` startup warning in production was added; set `CORS_ORIGINS` and the warning disappears).
+8. Known limits of the credential-less webhook confirmation (found in review, 2026-11-23):
+   - The webhook route is mounted before the global rate limiter, so it is not rate limited. Without credentials each valid-looking request costs one PhonePe status call (8 s timeout). Setting `PHONEPE_WEBHOOK_USERNAME`/`PASSWORD` removes this.
+   - Without credentials the stored `webhook_payload` is PhonePe's confirmed answer, not the request body, and an already-processed status is acknowledged without any outbound call.
+   - A stale event (for example `FAILED` for an earlier attempt after the order is `COMPLETED`) gets 409 and PhonePe keeps retrying it until it gives up; this is intentional because the alternative would downgrade a paid payment.
+   - The amount in PhonePe's answer is not compared with `Payment.amount_paise`.
+   - Refund webhooks: `CONFIRMED` is stored as `pending` and a payload without `orderId`/`merchantOrderId` is stored as `pending` (`normalizeProviderResponse`); real refund payloads were not available to check.
