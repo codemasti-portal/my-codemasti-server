@@ -71,4 +71,4 @@ Hourly in-process (and on every cron call). On **UTC day 1** it loads active cou
 - There is no proration logic: a mid-month joiner is invoiced by the next UTC day-1 run, or earlier if an admin generates an invoice manually.
 
 ## Admin tooling (super_admin)
-`/v1/admin/courses`, `/enrollments` (+ `/reconcile`, `/:id/transition`), `/invoices`, `/payments` (+ `/config`, `/reconciliation?period=YYYY-MM`, `/:id/refund`), `/refunds`, `/manual-payments`.
+`/v1/admin/courses`, `/enrollments` (+ `/reconcile`, `/:id/transition`), `/invoices`, `/payments` (+ `/config`, `/reconciliation?period=YYYY-MM` (expected vs received per course; `cancelled` invoices are excluded), `/:id/refund`), `/refunds`, `/manual-payments`.

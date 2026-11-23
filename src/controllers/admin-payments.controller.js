@@ -108,7 +108,8 @@ async function reconciliation(req, res) {
   const end = new Date(Date.UTC(y, m, 0, 23, 59, 59));
 
   const invoiceAgg = await Invoice.aggregate([
-    { $match: { period_start: { $gte: start, $lte: end } } },
+    // Cancelled invoices (voided duplicates, removed students) are not receivable.
+    { $match: { period_start: { $gte: start, $lte: end }, status: { $ne: "cancelled" } } },
     {
       $lookup: { from: "courses", localField: "course_id", foreignField: "_id", as: "course" },
     },
