@@ -50,7 +50,7 @@ All under `/v1/admin`; roles from [api/ROUTES.md](api/ROUTES.md).
 | `PATCH /batches/:batch_id` | SA, A | Update (name, order, sections, prefix, ...) |
 | `DELETE /batches/:batch_id` | SA, A | **Soft retire** (`is_active=false`). Protected batches (`spark`, `builders`, `innovators`) refused; 409 `BATCH_HAS_ACTIVE_STUDENTS` unless `?force=1` |
 | `POST /students` | SA, A | Create student from `enrollment_number`; auto-creates the matching enrollment (`meta.enrollment_sync`) |
-| `PATCH /students/:id` | SA, A | If the derived batch changes (enrollment number renamed), `syncEnrollmentToBatch` completes the old-batch enrollment and creates/reactivates the new one |
+| `PATCH /students/:id` | SA, A | `enrollment_number` is **immutable once set** (409 `ENROLLMENT_IMMUTABLE`); a student with no number yet may receive one. Batch moves go through add/remove batch below. |
 | `POST /students/:id/batches` `{batch_id, section_id?}` | SA, A | **Additive** add-to-batch (`addStudentToBatch`): reuses a completed/cancelled enrollment or creates one with a per-batch roll number; never touches other enrollments. 400 for unknown/inactive batch, 409 `NO_COURSE_FOR_BATCH` if no active course is linked. Then `recomputePrimaryBatchCache`. |
 | `DELETE /students/:id/batches/:batch_id` | SA, A | Targeted remove (`removeStudentFromBatch`): completes that batch's active enrollment(s) and **cancels their pending invoices** (paid ones kept). |
 | `GET /students/:id` | SA, A, I | Includes `batches[]` (batch + roll) |
@@ -70,7 +70,7 @@ The other backfills (`backfill-batch-catalog-fields`, `backfill-enrollment-batch
 
 | Area | Current behaviour / risk |
 |---|---|
-| Two student-move mechanisms | Renaming `enrollment_number` across batches (`syncEnrollmentToBatch`) completes the old enrollment, while add/remove-batch is additive. Using the rename on a multi-batch student closes only the old primary batch's enrollment but leaves the others; admins should prefer add/remove. |
+| One move mechanism | Renaming `enrollment_number` is blocked, so `syncEnrollmentToBatch` now runs only when a student is created (it creates their first enrollment). Moving a student between batches is add-batch plus remove-batch. |
 | Primary cache staleness | `recomputePrimaryBatchCache` only fills an **empty** `Student.batch_id`. Removing the primary batch leaves `batch_id`/`batch` pointing at it until fixed manually. |
 | Single `section_id` on Student | Section-scoped reads use the per-batch enrollment section; `Student.section_id` is only the primary section. Sections are largely unused ("no sections for now" product decision). |
 | No active course for a batch | Add-to-batch returns 409 `NO_COURSE_FOR_BATCH`; a placeholder course has fee 0, so no invoices are generated until a super_admin sets the fee. |
