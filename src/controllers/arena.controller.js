@@ -140,22 +140,6 @@ async function detail(req, res) {
   });
 }
 
-function run(req, res) {
-  const schema = z.object({
-    language: z.string().min(1),
-    code: z.string().min(1),
-    stdin: z.string().optional().default(""),
-  });
-  schema.parse(req.body);
-  return sendSuccess(res, {
-    stdout: "",
-    stderr: "",
-    execution_time_ms: 80,
-    memory_mb: 24,
-    status: "SUCCESS",
-  });
-}
-
 async function submit(req, res) {
   const schema = z.object({
     questionId: z.string().optional(),
@@ -349,5 +333,5 @@ async function solved(req, res) {
   return sendSuccess(res, solvedIds);
 }
 
-module.exports = { list, detail, run, submit, submissions, activity, solved };
+module.exports = { list, detail, submit, submissions, activity, solved };
 

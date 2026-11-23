@@ -132,32 +132,6 @@ async function uploadAvatar(req, res) {
   return sendSuccess(res, { avatar_url }, "Avatar updated");
 }
 
-async function changePassword(req, res) {
-  const schema = z.object({
-    current_password: z.string().optional(),
-    new_password: z.string().min(8),
-    confirm_password: z.string().min(8),
-  });
-  const body = schema.parse(req.body);
-  if (body.new_password !== body.confirm_password) {
-    return sendError(res, 400, "PASSWORD_MISMATCH", "New passwords do not match");
-  }
-
-  const student = await Student.findById(req.user.sub);
-  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
-
-  if (student.password_hash) {
-    if (!body.current_password || !bcrypt.compareSync(body.current_password, student.password_hash)) {
-      return sendError(res, 400, "INVALID_PASSWORD", "Current password is incorrect");
-    }
-  }
-
-  student.password_hash = bcrypt.hashSync(body.new_password, 10);
-  student.password_set_by_user = true;
-  await student.save();
-  return sendSuccess(res, {}, "Password updated");
-}
-
 async function sendPasswordUpdateOtp(req, res) {
   const student = await Student.findById(req.user.sub).lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
@@ -272,7 +246,6 @@ module.exports = {
   patchMe,
   subjects,
   uploadAvatar,
-  changePassword,
   sendPasswordUpdateOtp,
   verifyPasswordUpdateOtp,
   updatePasswordWithOtp,

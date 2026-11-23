@@ -7,7 +7,6 @@ const BatchCatalog = require("../models/BatchCatalog");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const ArenaSubmission = require("../models/ArenaSubmission");
-const LiveClass = require("../models/LiveClass");
 const TimetableSlot = require("../models/TimetableSlot");
 const TimetableEvent = require("../models/TimetableEvent");
 const MentorSlot = require("../models/MentorSlot");
@@ -174,9 +173,10 @@ const projectDocumentSchema = z.object({
     .default([]),
 });
 
+const PAGE_LIMIT_MAX = 500;
 function paginate(req) {
   const page = Math.max(1, Number(req.query.page || 1));
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  const limit = Math.min(PAGE_LIMIT_MAX, Math.max(1, Number(req.query.limit || 20)));
   return { page, limit, skip: (page - 1) * limit };
 }
 
@@ -1264,141 +1264,6 @@ async function deleteArenaQuestion(req, res) {
   await ArenaSubmission.deleteMany({ question_id: id });
   await ArenaQuestion.deleteOne({ _id: id });
   return sendSuccess(res, { id }, "Deleted");
-}
-
-/** —— Live classes —— */
-async function listLiveClasses(req, res) {
-  const { page, limit, skip } = paginate(req);
-  const batch_id_q = String(req.query.batch_id || "").trim().toLowerCase();
-  const filter = {};
-  const instructorBatches = await getInstructorAssignedBatchIds(req);
-  if (instructorBatches !== null) {
-    if (!instructorBatches.length) {
-      return sendSuccess(res, [], "", { page, limit, total: 0 });
-    }
-    if (batch_id_q) {
-      if (!instructorBatches.includes(batch_id_q)) {
-        return sendSuccess(res, [], "", { page, limit, total: 0 });
-      }
-      filter.batch_id = batch_id_q;
-    } else {
-      filter.batch_id = { $in: instructorBatches };
-    }
-  } else if (batch_id_q) {
-    filter.batch_id = batch_id_q;
-  }
-  const [items, total] = await Promise.all([
-    LiveClass.find(filter).sort({ date: 1, start_time: 1 }).skip(skip).limit(limit).lean(),
-    LiveClass.countDocuments(filter),
-  ]);
-  return sendSuccess(
-    res,
-    items.map((c) => ({ id: String(c._id), ...c })),
-    "",
-    { page, limit, total }
-  );
-}
-
-async function getLiveClass(req, res) {
-  const doc = await LiveClass.findById(req.params.id).lean();
-  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
-  const instructorBatches = await getInstructorAssignedBatchIds(req);
-  if (instructorBatches !== null) {
-    const bid = String(doc.batch_id || "").trim().toLowerCase();
-    if (!bid || !instructorBatches.includes(bid)) {
-      return sendError(res, 403, "FORBIDDEN", "Live class is not for your assigned batches");
-    }
-  }
-  return sendSuccess(res, { id: String(doc._id), ...doc });
-}
-
-async function createLiveClass(req, res) {
-  const schema = z.object({
-    subject: z.string().min(1).trim(),
-    topic: z.string().min(1).trim(),
-    instructor: z.string().min(1).trim(),
-    batch_id: z.string().min(1).trim(),
-    date: z.string().min(10),
-    start_time: z.string().min(1),
-    end_time: z.string().min(1),
-    meet_link: z.string().min(1).trim(),
-    recording_link: z.string().optional().default(""),
-  });
-  const body = schema.parse(req.body);
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
-    body.instructor = ownName;
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const bid = String(body.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length) {
-      return sendError(res, 403, "FORBIDDEN", "No batches assigned to your instructor profile");
-    }
-    if (!instructorBatches.includes(bid)) {
-      return sendError(res, 403, "FORBIDDEN", "Live class must be in one of your assigned batches");
-    }
-  }
-  const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id], body.subject);
-  if (!subjCheck.ok) return;
-  body.subject = subjCheck.value;
-  const created = await LiveClass.create(body);
-  return sendSuccess(res, { id: String(created._id), ...created.toObject() }, "Created");
-}
-
-async function updateLiveClass(req, res) {
-  const schema = z.object({
-    subject: z.string().min(1).trim().optional(),
-    topic: z.string().min(1).trim().optional(),
-    instructor: z.string().min(1).trim().optional(),
-    batch_id: z.string().min(1).trim().optional(),
-    date: z.string().min(10).optional(),
-    start_time: z.string().optional(),
-    end_time: z.string().optional(),
-    meet_link: z.string().optional(),
-    recording_link: z.string().optional(),
-  });
-  const body = schema.parse(req.body);
-  const doc = await LiveClass.findById(req.params.id);
-  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
-  if (req.staff?.role === "instructor") {
-    const ownName = await resolveStaffDisplayName(req);
-    if (!ownName) return sendError(res, 403, "FORBIDDEN", "Instructor profile is incomplete");
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const curBid = String(doc.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length || !curBid || !instructorBatches.includes(curBid)) {
-      return sendError(res, 403, "FORBIDDEN", "You can only update classes in your assigned batches");
-    }
-    if (body.batch_id !== undefined && body.batch_id) {
-      const nb = String(body.batch_id).trim().toLowerCase();
-      if (!instructorBatches.includes(nb)) {
-        return sendError(res, 403, "FORBIDDEN", "You can only move classes within your assigned batches");
-      }
-    }
-    body.instructor = ownName;
-  }
-  if (body.subject !== undefined) {
-    const subjCheck = await resolveCatalogSubjectOrError(res, [body.batch_id || doc.batch_id], body.subject);
-    if (!subjCheck.ok) return;
-    body.subject = subjCheck.value;
-  }
-  Object.assign(doc, body);
-  await doc.save();
-  return sendSuccess(res, { id: String(doc._id), ...doc.toObject() }, "Updated");
-}
-
-async function deleteLiveClass(req, res) {
-  const doc = await LiveClass.findById(req.params.id).lean();
-  if (!doc) return sendError(res, 404, "NOT_FOUND", "Live class not found");
-  if (req.staff?.role === "instructor") {
-    const instructorBatches = await getInstructorAssignedBatchIds(req);
-    const bid = String(doc.batch_id || "").trim().toLowerCase();
-    if (!instructorBatches?.length || !bid || !instructorBatches.includes(bid)) {
-      return sendError(res, 403, "FORBIDDEN", "You can only delete classes in your assigned batches");
-    }
-  }
-  const r = await LiveClass.deleteOne({ _id: req.params.id });
-  if (r.deletedCount === 0) return sendError(res, 404, "NOT_FOUND", "Live class not found");
-  return sendSuccess(res, { id: req.params.id }, "Deleted");
 }
 
 /** —— Timetable slots —— */
@@ -2755,11 +2620,6 @@ module.exports = {
   createArenaQuestion,
   updateArenaQuestion,
   deleteArenaQuestion,
-  listLiveClasses,
-  getLiveClass,
-  createLiveClass,
-  updateLiveClass,
-  deleteLiveClass,
   listTimetableSlots,
   listTimetableSchedule,
   getTimetableSlot,

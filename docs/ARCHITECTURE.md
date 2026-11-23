@@ -44,16 +44,16 @@ Node `24.22.1` / npm `12.2.1` are pinned in the server's `package.json` `devEngi
 
 | Directory | Count (files) | Role |
 |---|---|---|
-| `src/routes/modules` | 22 | One router per area; mounted in `src/routes/index.js` (22 mounts: 20 prefixes, `/admin` and `/students` are each mounted twice) |
-| `src/controllers` | 44 | HTTP handlers; Zod validation, `sendSuccess` / `sendError` |
+| `src/routes/modules` | 21 | One router per area; mounted in `src/routes/index.js` (21 mounts: 19 prefixes, `/admin` and `/students` are each mounted twice) |
+| `src/controllers` | 40 | HTTP handlers; Zod validation, `sendSuccess` / `sendError` |
 | `src/services` | 37 (+ `runners/` subdir with `python-runner.js`) | Business logic, schedulers, third-party clients |
-| `src/models` | 42 | Mongoose schemas (see section 9) |
+| `src/models` | 40 | Mongoose schemas (see section 9) |
 | `src/utils` | 30 | Pure helpers: tokens, RBAC, batch registry, enrollment parsing, money, cloudinary |
 | `src/middlewares` | 5 | `auth`, `staff`, `rateLimit`, `error`, `upload` (multer, memory storage) |
 | `src/scripts` | 5 | CLI scripts (seed, create-super-admin, section-id backfill, instructor batch reset, enrollment-sync debug) |
 | `src/config` | 2 | `db.js`, `achievement-badges.js` |
 
-Counts come from `ls <dir> | wc -l`. The full route table is in [api/ROUTES.md](api/ROUTES.md) (275 routes + 3 in `app.js`).
+Counts come from `ls <dir> | wc -l`. The full route table is in [api/ROUTES.md](api/ROUTES.md) (256 routes + 3 in `app.js`).
 
 ## 3. Request path (`src/app.js`, in order)
 
@@ -137,18 +137,22 @@ Details: [DEPLOYMENT.md](DEPLOYMENT.md). Observation: `api/index.js` caches `con
 - **Batches and enrollment**: `BatchCatalog` + `batch-catalog-registry.js` + `StudentEnrollment` as the membership source. See [batches-and-enrollment.md](batches-and-enrollment.md).
 - **Other modules**: contests (`contest.*`, `Contest`), badges / XP / monthly leaderboard (`achievement-badge-definition.service`, `badge-program.service`, `monthly-leaderboard-badge.service`, `weekly-climb-badge.service`, `xp-aggregation.service`, `AssignmentXpGrant`), mentor sessions (`MentorSlot`, `mentor-*` services), doubts and support chat, referrals (`referralRewards.js`, `ReferralEvent`), notifications (student + staff panel).
 
-## 9. Models (`src/models`, 42)
+## 9. Models (`src/models`, 40)
 
 | Domain | Models |
 |---|---|
 | Identity and auth | `Student`, `Staff`, `OtpRequest`, `StaffOtpRequest` |
 | Batches and billing | `BatchCatalog`, `Course`, `StudentEnrollment`, `Invoice`, `Payment`, `ManualPayment`, `Refund` |
-| Learning content | `Announcement`, `Note`, `LiveClass`, `Assignment`, `AssignmentQuestion`, `AssignmentSubmission`, `AssignmentXpGrant`, `ArenaQuestion`, `ArenaSubmission` |
-| Schedule and sessions | `TimetableSlot`, `TimetableEvent`, `ClassJoinAudit`, `MentorSlot`, `MentorSessionJoin` |
+| Learning content | `Announcement`, `Note`, `Assignment`, `AssignmentQuestion`, `AssignmentSubmission`, `AssignmentXpGrant`, `ArenaQuestion`, `ArenaSubmission` |
+| Schedule and sessions | `TimetableSlot`, `TimetableEvent`, `MentorSlot`, `MentorSessionJoin` |
 | Assessment and gamification | `ScorecardTest`, `ScorecardEntry`, `Contest`, `AchievementBadgeDefinition`, `BadgeProgram`, `StudentAchievementBadge`, `MonthlyLeaderboardBadge`, `StudentLeaderboardGapState` |
 | Doubts and support | `PersonalDoubt`, `CommunityMessage`, `SupportConversation`, `SupportMessage` |
 | Notifications and ops | `Notification`, `StaffPanelNotification`, `StaffPanelNotificationState`, `AdminTodoTask` |
 | Referral | `ReferralEvent` |
+
+The `LiveClass` and `ClassJoinAudit` models (old live-class feature, `/v1/classes/*` and `/v1/admin/live-classes`) were removed with their routes. The `liveclasses` and `classjoinaudits` collections still exist in the production database and are now **orphaned** (no model or code references them); they can be dropped once you confirm the data is not needed. The live schedule is `TimetableSlot` / `TimetableEvent`.
+
+List endpoints that use `paginate()` in `admin-catalog.controller.js` (arena questions, timetable slots, timetable events, mentor slots) default to 20 rows and accept `limit` up to 500 (previously silently capped at 100); `meta` reports the effective `page`, `limit` and `total`.
 
 ## 10. Frontends
 

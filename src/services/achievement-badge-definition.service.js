@@ -43,10 +43,6 @@ function allowedBadgeCodesSpec() {
   return out;
 }
 
-function isAllowedBadgeCode(code) {
-  return allowedBadgeCodesSpec().has(String(code || "").trim().toLowerCase());
-}
-
 /**
  * Published row wins; otherwise built-in default for that programmable badge.
  */
@@ -79,144 +75,9 @@ async function getPublishedPresentation(badgeCode) {
   };
 }
 
-/**
- * Admin catalog: every wired badge_code with DB draft/publish state merged with defaults.
- */
-async function listCatalogForAdmin() {
-  const spec = allowedBadgeCodesSpec();
-  const codes = [...spec.keys()].sort((a, b) => {
-    const sa = spec.get(a);
-    const sb = spec.get(b);
-    if (sa.category !== sb.category) return sa.category.localeCompare(sb.category);
-    return (sa.sort_order || 0) - (sb.sort_order || 0) || a.localeCompare(b);
-  });
-
-  const rows = await AchievementBadgeDefinition.find({ badge_code: { $in: codes } }).lean();
-  const byCode = new Map(rows.map((r) => [r.badge_code, r]));
-
-  return codes.map((badge_code) => {
-    const s = spec.get(badge_code);
-    const row = byCode.get(badge_code);
-    return {
-      badge_code,
-      category: s.category,
-      system_default: {
-        title: s.title,
-        description: s.description || "",
-        icon_key: s.icon_key,
-        accent: s.accent,
-      },
-      draft: row
-        ? {
-            title: row.title,
-            description: row.description || "",
-            icon_key: row.icon_key,
-            accent: row.accent,
-            is_published: Boolean(row.is_published),
-            updated_at: row.updatedAt ? new Date(row.updatedAt).toISOString() : null,
-          }
-        : null,
-      effective: row?.is_published
-        ? {
-            title: row.title,
-            description: row.description || "",
-            icon_key: row.icon_key,
-            accent: row.accent,
-            is_published: true,
-          }
-        : {
-            title: s.title,
-            description: s.description || "",
-            icon_key: s.icon_key,
-            accent: s.accent,
-            is_published: false,
-          },
-    };
-  });
-}
-
-async function upsertDefinition(badgeCode, payload = {}) {
-  const code = String(badgeCode || "").trim().toLowerCase();
-  if (!isAllowedBadgeCode(code)) {
-    const err = new Error("BADGE_CODE_NOT_PROGRAMMABLE");
-    err.code = "BADGE_CODE_NOT_PROGRAMMABLE";
-    throw err;
-  }
-  const spec = allowedBadgeCodesSpec().get(code);
-  const allowedIcons = AchievementBadgeDefinition.ICON_KEYS;
-  const allowedAccents = AchievementBadgeDefinition.ACCENTS;
-
-  const existing = await AchievementBadgeDefinition.findOne({ badge_code: code }).lean();
-
-  const merged = {
-    title: existing?.title ?? spec.title,
-    description: existing?.description ?? spec.description ?? "",
-    icon_key: existing?.icon_key ?? spec.icon_key,
-    accent: existing?.accent ?? spec.accent,
-    is_published: Boolean(existing?.is_published),
-  };
-
-  if (payload.title != null) merged.title = String(payload.title).trim().slice(0, 120);
-  if (payload.description != null) merged.description = String(payload.description).trim().slice(0, 500);
-  if (payload.icon_key != null) {
-    const ik = String(payload.icon_key).trim();
-    if (!allowedIcons.includes(ik)) {
-      const err = new Error("INVALID_ICON_KEY");
-      err.code = "INVALID_ICON_KEY";
-      throw err;
-    }
-    merged.icon_key = ik;
-  }
-  if (payload.accent != null) {
-    const ac = String(payload.accent).trim();
-    if (!allowedAccents.includes(ac)) {
-      const err = new Error("INVALID_ACCENT");
-      err.code = "INVALID_ACCENT";
-      throw err;
-    }
-    merged.accent = ac;
-  }
-  if (payload.is_published != null) merged.is_published = Boolean(payload.is_published);
-
-  const touched =
-    payload.title != null ||
-    payload.description != null ||
-    payload.icon_key != null ||
-    payload.accent != null ||
-    payload.is_published != null;
-
-  if (!touched) {
-    const err = new Error("EMPTY_PATCH");
-    err.code = "EMPTY_PATCH";
-    throw err;
-  }
-
-  const doc = await AchievementBadgeDefinition.findOneAndUpdate(
-    { badge_code: code },
-    {
-      $set: {
-        badge_code: code,
-        category: spec.category,
-        sort_order: spec.sort_order ?? 0,
-        title: merged.title,
-        description: merged.description,
-        icon_key: merged.icon_key,
-        accent: merged.accent,
-        is_published: merged.is_published,
-      },
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  ).lean();
-
-  return doc;
-}
-
 module.exports = {
   MONTHLY_BADGE_CODE,
   DEFAULT_MONTHLY_PRESENTATION,
   allowedBadgeCodesSpec,
-  isAllowedBadgeCode,
   getPublishedPresentation,
-  listCatalogForAdmin,
-  upsertDefinition,
 };

@@ -11,9 +11,6 @@ const adminScorecard = require("../../controllers/admin-scorecard.controller");
 const adminContest = require("../../controllers/admin-contest.controller");
 const adminSupport = require("../../controllers/admin-support.controller");
 const adminTodo = require("../../controllers/admin-todo.controller");
-const adminMonthlyLeaderboard = require("../../controllers/admin-monthly-leaderboard.controller");
-const adminStudentAchievements = require("../../controllers/admin-student-achievement.controller");
-const adminBadgeDefinitions = require("../../controllers/admin-badge-definition.controller");
 const adminBadgeProgram = require("../../controllers/admin-badge-program.controller");
 const uploadMw = require("../../middlewares/upload.middleware");
 
@@ -31,7 +28,6 @@ const adminPanelRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, 
 /** Instructors share read access for teaching modules only (announcements, arena reads, etc.) */
 const staffPanelRead = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageNotes = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
-const manageLiveClasses = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageAssignments = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const readTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.INSTRUCTOR])];
 const manageTimetable = [requireStaffAuth, requireStaffRoles([ROLES.SUPER_ADMIN, ROLES.ADMIN])];
@@ -131,12 +127,6 @@ router.get("/arena/questions/:id", ...staffPanelRead, catalog.getArenaQuestion);
 router.patch("/arena/questions/:id", ...manageContent, catalog.updateArenaQuestion);
 router.delete("/arena/questions/:id", ...manageContent, catalog.deleteArenaQuestion);
 
-router.get("/live-classes", ...manageLiveClasses, catalog.listLiveClasses);
-router.post("/live-classes", ...manageLiveClasses, catalog.createLiveClass);
-router.get("/live-classes/:id", ...manageLiveClasses, catalog.getLiveClass);
-router.patch("/live-classes/:id", ...manageLiveClasses, catalog.updateLiveClass);
-router.delete("/live-classes/:id", ...manageLiveClasses, catalog.deleteLiveClass);
-
 router.get("/timetable/slots", ...readTimetable, catalog.listTimetableSlots);
 router.get("/timetable/schedule", ...readTimetable, catalog.listTimetableSchedule);
 router.get("/timetable/google-meet/status", ...manageTimetable, catalog.googleMeetCalendarStatus);
@@ -211,13 +201,6 @@ router.get("/support/conversations", ...adminPanelRead, adminSupport.listConvers
 router.get("/support/conversations/:conversationId/messages", ...adminPanelRead, adminSupport.getConversationMessages);
 router.patch("/support/messages/:messageId/status", ...manageContent, adminSupport.updateMessageStatus);
 
-/** Student-of-the-month (IST) — admin / super_admin only (badge studio UI is not on instructor shell) */
-router.get("/leaderboard-monthly-badges", ...adminPanelRead, adminMonthlyLeaderboard.listMonthlyBadges);
-router.post("/leaderboard-monthly-badges/finalize-recent", ...manageContent, adminMonthlyLeaderboard.finalizeRecentMonthlyBadges);
-
-/** Arena quest / IST streak milestones (distinct accepted questions per batch catalog) */
-router.get("/student-milestone-badges", ...adminPanelRead, adminStudentAchievements.listMilestoneAchievementBadges);
-
 /** Admin-authored achievement badges (draft / publish + auto-award Arena rules) */
 router.get("/badge-programs", ...adminPanelRead, adminBadgeProgram.list);
 router.get("/badge-programs/:id", ...adminPanelRead, adminBadgeProgram.getOne);
@@ -225,10 +208,6 @@ router.post("/badge-programs", ...manageContent, adminBadgeProgram.create);
 router.patch("/badge-programs/:id", ...manageContent, adminBadgeProgram.patch);
 router.delete("/badge-programs/:id", ...manageContent, adminBadgeProgram.remove);
 router.post("/badge-programs/:id/reaward", ...manageContent, adminBadgeProgram.reawardPublished);
-
-/** Legacy styling catalog for built-in milestone codes */
-router.get("/badge-definitions/catalog", ...adminPanelRead, adminBadgeDefinitions.listCatalog);
-router.patch("/badge-definitions/:badgeCode", ...manageContent, adminBadgeDefinitions.patchDefinition);
 
 router.get("/todos", ...adminOnly, adminTodo.listTasks);
 router.post("/todos", ...adminOnly, adminTodo.createTask);

@@ -1,6 +1,6 @@
 # CodeMasti Backend (Express + MongoDB)
 
-REST API behind the CodeMasti student portal (`my-codemasti-com`) and the staff/admin panel (`my-codemasti-admin`). It handles student and staff authentication, course content (notes, assignments, arena questions, contests, timetable and live classes), mentor sessions, doubts and support chat, notifications, leaderboards and badges, referrals, and fee billing and payments.
+REST API behind the CodeMasti student portal (`my-codemasti-com`) and the staff/admin panel (`my-codemasti-admin`). It handles student and staff authentication, course content (notes, assignments, arena questions, contests, timetable), mentor sessions, doubts and support chat, notifications, leaderboards and badges, referrals, and fee billing and payments.
 
 ## Tech Stack
 
@@ -106,15 +106,14 @@ Mounted in `src/routes/index.js` (modules in `src/routes/modules/`):
 | `/v1/auth` | auth | Student auth: OTP send/verify, password login, signup, password reset, Google sign-in, token refresh, logout, `me` |
 | `/v1/staff-auth` | staff-auth | Staff auth (separate flow): OTP, password login, signup, password reset |
 | `/v1/staff` | staff-management | Staff profile (photo, resume upload) and super-admin staff account management |
-| `/v1/students` | student | Student profile, avatar, password change, achievements and monthly badges |
+| `/v1/students` | student | Student profile, avatar, OTP-based password update, achievements |
 | `/v1/students` | student-billing | Student fees: courses/enrollments, payment config, PhonePe initiate/status, manual UPI payment proofs |
 | `/v1/dashboard` | dashboard | Student dashboard summary and home data |
 | `/v1/notes` | notes | Notes list, filters, detail, download |
 | `/v1/assignments` | assignment | Assignments list, filters, question detail, run, submit, submissions |
-| `/v1/arena` | arena | Practice question arena: activity, solved, questions, run, submit, submissions |
+| `/v1/arena` | arena | Practice question arena: activity, solved, questions, submit, submissions |
 | `/v1/contests` | contest | Contests list and detail for students |
-| `/v1/timetable` | timetable | Weekly timetable, events, class recordings and notes |
-| `/v1/classes` | classes | Live classes, recordings, join tracking |
+| `/v1/timetable` | timetable | Weekly timetable and events |
 | `/v1/admin` | admin | Admin/instructor panel: announcements, notes, assignments, arena, contests, students, batches, timetable, uploads |
 | `/v1/admin` | admin-billing | Admin billing: courses, enrollments, invoices, reconciliation, manual payment review |
 | `/v1/leaderboard` | leaderboard | Leaderboard, a student's own rank, monthly winners |

@@ -8,9 +8,7 @@ const Assignment = require("../models/Assignment");
 const AssignmentQuestion = require("../models/AssignmentQuestion");
 const TimetableSlot = require("../models/TimetableSlot");
 const TimetableEvent = require("../models/TimetableEvent");
-const LiveClass = require("../models/LiveClass");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
-const ClassJoinAudit = require("../models/ClassJoinAudit");
 const ArenaQuestion = require("../models/ArenaQuestion");
 const MentorSlot = require("../models/MentorSlot");
 const CommunityMessage = require("../models/CommunityMessage");
@@ -391,117 +389,6 @@ async function seed() {
     },
     { upsert: true }
   );
-
-  const now = new Date();
-  const nowDate = now.toISOString().slice(0, 10);
-  const pad = (n) => String(n).padStart(2, "0");
-  const toHHmm = (dateObj) => `${pad(dateObj.getUTCHours())}:${pad(dateObj.getUTCMinutes())}`;
-  const minus20 = new Date(now.getTime() - 20 * 60 * 1000);
-  const plus20 = new Date(now.getTime() + 20 * 60 * 1000);
-  const plus8 = new Date(now.getTime() + 8 * 60 * 1000);
-  const plus68 = new Date(now.getTime() + 68 * 60 * 1000);
-
-  await LiveClass.updateOne(
-    { batch_id: BATCH_ID, topic: "Dynamic Programming Intro", date: nowDate },
-    {
-      $set: {
-        subject: "DSA",
-        topic: "Dynamic Programming Intro",
-        instructor: "Rahul Sharma",
-        batch_id: BATCH_ID,
-        target_batch_ids: [BATCH_ID],
-        target_section_refs: [],
-        date: nowDate,
-        start_time: toHHmm(minus20),
-        end_time: toHHmm(plus20),
-        meet_link: "https://meet.example.com/live-dp",
-        recording_link: "",
-      },
-    },
-    { upsert: true }
-  );
-
-  await LiveClass.updateOne(
-    { batch_id: BATCH_ID, topic: "System Design Basics", date: nowDate },
-    {
-      $set: {
-        subject: "System Design",
-        topic: "System Design Basics",
-        instructor: "Neha Gupta",
-        batch_id: BATCH_ID,
-        target_batch_ids: [],
-        target_section_refs: [{ batch_id: BATCH_ID, section_id: "01" }],
-        date: nowDate,
-        start_time: toHHmm(plus8),
-        end_time: toHHmm(plus68),
-        meet_link: "https://meet.example.com/system-design",
-        recording_link: "",
-      },
-    },
-    { upsert: true }
-  );
-
-  await LiveClass.updateOne(
-    { batch_id: BATCH_ID, topic: "React Advanced Patterns", date: "2026-04-30" },
-    {
-      $set: {
-        subject: "Web Development",
-        topic: "React Advanced Patterns",
-        instructor: "Amit Verma",
-        batch_id: BATCH_ID,
-        target_batch_ids: [BATCH_ID],
-        target_section_refs: [],
-        date: "2026-04-30",
-        start_time: "18:00",
-        end_time: "19:30",
-        meet_link: "https://meet.example.com/react-advanced",
-        recording_link: "",
-      },
-    },
-    { upsert: true }
-  );
-
-  await LiveClass.updateOne(
-    { batch_id: BATCH_ID, topic: "Git & CI/CD Revision", date: "2026-03-20" },
-    {
-      $set: {
-        subject: "DevOps",
-        topic: "Git & CI/CD Revision",
-        instructor: "Priya Nair",
-        batch_id: BATCH_ID,
-        target_batch_ids: [BATCH_ID],
-        target_section_refs: [],
-        date: "2026-03-20",
-        start_time: "17:00",
-        end_time: "18:30",
-        meet_link: "https://meet.example.com/devops-revision",
-        recording_link: "https://videos.example.com/devops-revision",
-      },
-    },
-    { upsert: true }
-  );
-
-  const dpClass = await LiveClass.findOne({
-    batch_id: BATCH_ID,
-    topic: "Dynamic Programming Intro",
-    date: nowDate,
-  });
-  if (dpClass) {
-    const existingJoin = await ClassJoinAudit.findOne({
-      class_id: dpClass._id,
-      student_id: student._id,
-    });
-    if (!existingJoin) {
-      await ClassJoinAudit.create({
-        class_id: dpClass._id,
-        student_id: student._id,
-        joined_at: new Date("2026-04-02T07:45:00Z"),
-        source: "web",
-        ip_address: "127.0.0.1",
-        user_agent: "seed-script",
-      });
-    }
-  }
 
   await TimetableEvent.updateOne(
     { title: "Institute Holiday", date: new Date("2026-04-21T00:00:00Z") },

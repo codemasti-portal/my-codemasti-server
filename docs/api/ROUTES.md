@@ -1,6 +1,6 @@
 # API route table
 
-Generated from `src/routes/modules/*.js` + mount order in `src/routes/index.js` (all mounted under `/v1` by `src/app.js`). **275 routes** in 22 route files, plus 3 routes defined directly in `src/app.js` (2 health, 1 webhook).
+Generated from `src/routes/modules/*.js` + mount order in `src/routes/index.js` (all mounted under `/v1` by `src/app.js`). **256 routes** in 21 route files, plus 3 routes defined directly in `src/app.js` (2 health, 1 webhook).
 
 Legend: roles `SA` = super_admin, `A` = admin, `I` = instructor, `M` = mentor (see `src/utils/rbac.js`). `requireStaffAuth` also does the token_version / is_active revocation check. "upload" = route runs the multer middleware (`src/middlewares/upload.middleware.js`). Handler is `controllerFile.exportName` (`src/controllers/<controllerFile>.controller.js`). Some controllers apply extra scoping inside the handler (e.g. instructors restricted to their batches); this table shows route-level guards only.
 
@@ -82,14 +82,12 @@ Notes:
 | PATCH | `/v1/staff/:id` | requireStaffAuth + SA/A | `staff-management.updateStaff` |
 | DELETE | `/v1/staff/:id` | requireStaffAuth + SA | `staff-management.deleteStaff` |
 
-## student.routes.js  (mount `/v1/students`, 12 routes)
+## student.routes.js  (mount `/v1/students`, 10 routes)
 
 | Method | Full path | Auth | Handler |
 |---|---|---|---|
 | GET | `/v1/students/me/achievements` | requireAuth | `student-achievement.combinedAchievements` |
-| GET | `/v1/students/me/monthly-badges` | requireAuth | `monthly-leaderboard-badge.myMonthlyBadges` |
 | POST | `/v1/students/me/avatar` | requireAuth | `student.uploadAvatar` (upload) |
-| POST | `/v1/students/me/password` | requireAuth | `student.changePassword` |
 | POST | `/v1/students/me/password/otp/send` | requireAuth | `student.sendPasswordUpdateOtp` |
 | POST | `/v1/students/me/password/otp/verify` | requireAuth | `student.verifyPasswordUpdateOtp` |
 | POST | `/v1/students/me/password/otp/update` | requireAuth | `student.updatePasswordWithOtp` |
@@ -137,7 +135,7 @@ Notes:
 | POST | `/v1/assignments/:assignmentId/questions/:questionId/submit` | requireAuth | `assignment.submit` |
 | GET | `/v1/assignments/:assignmentId/questions/:questionId/submissions` | requireAuth | `assignment.submissions` |
 
-## arena.routes.js  (mount `/v1/arena`, 8 routes)
+## arena.routes.js  (mount `/v1/arena`, 7 routes)
 
 | Method | Full path | Auth | Handler |
 |---|---|---|---|
@@ -145,7 +143,6 @@ Notes:
 | GET | `/v1/arena/solved` | requireAuth | `arena.solved` |
 | GET | `/v1/arena/questions` | requireAuth | `arena.list` |
 | GET | `/v1/arena/questions/:questionId` | requireAuth | `arena.detail` |
-| POST | `/v1/arena/questions/:questionId/run` | requireAuth | `arena.run` |
 | POST | `/v1/arena/questions/:questionId/submit` | requireAuth | `arena.submit` |
 | GET | `/v1/arena/questions/:questionId/submissions` | requireAuth | `arena.submissions` |
 | POST | `/v1/arena/submit` | requireAuth | `arena.submit` |
@@ -157,25 +154,14 @@ Notes:
 | GET | `/v1/contests` | requireAuth | `contest.listMyContests` |
 | GET | `/v1/contests/:id` | requireAuth | `contest.getMyContest` |
 
-## timetable.routes.js  (mount `/v1/timetable`, 4 routes)
+## timetable.routes.js  (mount `/v1/timetable`, 2 routes)
 
 | Method | Full path | Auth | Handler |
 |---|---|---|---|
 | GET | `/v1/timetable/weekly` | requireAuth | `timetable.weekly` |
-| GET | `/v1/timetable/recordings` | requireAuth | `timetable.recordings` |
-| GET | `/v1/timetable/notes` | requireAuth | `timetable.notes` |
 | GET | `/v1/timetable/events` | requireAuth | `timetable.events` |
 
-## classes.routes.js  (mount `/v1/classes`, 4 routes)
-
-| Method | Full path | Auth | Handler |
-|---|---|---|---|
-| GET | `/v1/classes/live` | requireAuth | `classes.live` |
-| GET | `/v1/classes/recordings` | requireAuth | `classes.recordings` |
-| POST | `/v1/classes/:classId/join` | requireAuth | `classes.join` |
-| GET | `/v1/classes/:classId/joins` | requireAuth | `classes.joins` |
-
-## admin.routes.js  (mount `/v1/admin`, 115 routes)
+## admin.routes.js  (mount `/v1/admin`, 105 routes)
 
 | Method | Full path | Auth | Handler |
 |---|---|---|---|
@@ -214,11 +200,6 @@ Notes:
 | GET | `/v1/admin/arena/questions/:id` | requireStaffAuth + SA/A/I | `admin-catalog.getArenaQuestion` |
 | PATCH | `/v1/admin/arena/questions/:id` | requireStaffAuth + SA/A | `admin-catalog.updateArenaQuestion` |
 | DELETE | `/v1/admin/arena/questions/:id` | requireStaffAuth + SA/A | `admin-catalog.deleteArenaQuestion` |
-| GET | `/v1/admin/live-classes` | requireStaffAuth + SA/A/I | `admin-catalog.listLiveClasses` |
-| POST | `/v1/admin/live-classes` | requireStaffAuth + SA/A/I | `admin-catalog.createLiveClass` |
-| GET | `/v1/admin/live-classes/:id` | requireStaffAuth + SA/A/I | `admin-catalog.getLiveClass` |
-| PATCH | `/v1/admin/live-classes/:id` | requireStaffAuth + SA/A/I | `admin-catalog.updateLiveClass` |
-| DELETE | `/v1/admin/live-classes/:id` | requireStaffAuth + SA/A/I | `admin-catalog.deleteLiveClass` |
 | GET | `/v1/admin/timetable/slots` | requireStaffAuth + SA/A/I | `admin-catalog.listTimetableSlots` |
 | GET | `/v1/admin/timetable/schedule` | requireStaffAuth + SA/A/I | `admin-catalog.listTimetableSchedule` |
 | GET | `/v1/admin/timetable/google-meet/status` | requireStaffAuth + SA/A | `admin-catalog.googleMeetCalendarStatus` |
@@ -278,17 +259,12 @@ Notes:
 | GET | `/v1/admin/support/conversations` | requireStaffAuth + SA/A | `admin-support.listConversations` |
 | GET | `/v1/admin/support/conversations/:conversationId/messages` | requireStaffAuth + SA/A | `admin-support.getConversationMessages` |
 | PATCH | `/v1/admin/support/messages/:messageId/status` | requireStaffAuth + SA/A | `admin-support.updateMessageStatus` |
-| GET | `/v1/admin/leaderboard-monthly-badges` | requireStaffAuth + SA/A | `admin-monthly-leaderboard.listMonthlyBadges` |
-| POST | `/v1/admin/leaderboard-monthly-badges/finalize-recent` | requireStaffAuth + SA/A | `admin-monthly-leaderboard.finalizeRecentMonthlyBadges` |
-| GET | `/v1/admin/student-milestone-badges` | requireStaffAuth + SA/A | `admin-student-achievement.listMilestoneAchievementBadges` |
 | GET | `/v1/admin/badge-programs` | requireStaffAuth + SA/A | `admin-badge-program.list` |
 | GET | `/v1/admin/badge-programs/:id` | requireStaffAuth + SA/A | `admin-badge-program.getOne` |
 | POST | `/v1/admin/badge-programs` | requireStaffAuth + SA/A | `admin-badge-program.create` |
 | PATCH | `/v1/admin/badge-programs/:id` | requireStaffAuth + SA/A | `admin-badge-program.patch` |
 | DELETE | `/v1/admin/badge-programs/:id` | requireStaffAuth + SA/A | `admin-badge-program.remove` |
 | POST | `/v1/admin/badge-programs/:id/reaward` | requireStaffAuth + SA/A | `admin-badge-program.reawardPublished` |
-| GET | `/v1/admin/badge-definitions/catalog` | requireStaffAuth + SA/A | `admin-badge-definition.listCatalog` |
-| PATCH | `/v1/admin/badge-definitions/:badgeCode` | requireStaffAuth + SA/A | `admin-badge-definition.patchDefinition` |
 | GET | `/v1/admin/todos` | requireStaffAuth + SA/A | `admin-todo.listTasks` |
 | POST | `/v1/admin/todos` | requireStaffAuth + SA/A | `admin-todo.createTask` |
 | PATCH | `/v1/admin/todos/reorder` | requireStaffAuth + SA/A | `admin-todo.reorderTasks` |

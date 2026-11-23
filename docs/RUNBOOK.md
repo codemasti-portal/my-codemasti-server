@@ -131,4 +131,5 @@ Pinger failures (non-200 from the cron URL), container `unhealthy`, spikes of `"
    - 16 active enrollments still lack `section_id` while the student has a legacy section; `backfill-enrollment-section-id` would stamp them.
    - 1 `personaldoubts.image_url` still points at a `/v1/static/...` path that no route serves any more, so that image is broken.
    - 4 collections have no model and no code reference: `scorecardconfigs` (1 doc), `scorecardmonths` (4), `remindersettings` (1), `studentbroadcastlogs` (0). They can be dropped once you confirm the data is not needed.
+   - 2 collections are orphaned after the live-class removal: `liveclasses` and `classjoinaudits` (their models and routes were deleted; no code references them). They can be dropped once you confirm the data is not needed.
    - `Student.course` and `Student.progress` are empty/zero for every student.
