@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const Student = require("../models/Student");
 const MonthlyLeaderboardBadge = require("../models/MonthlyLeaderboardBadge");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
-const { resolveStudentBatchIds, catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
+const { catalogBatchMongoMatchResolved } = require("../utils/student-batch-context");
 const {
   submittedAtIndiaCalendarMonth,
   recentClosedIndianMonthPeriods,
@@ -29,21 +29,6 @@ function scopeKeyForStudentLean(studentLean) {
   const bid = String(s.batch_id || "").trim().toLowerCase();
   if (bid) return bid;
   return `solo:${String(s._id)}`;
-}
-
-async function distinctScopeKeys() {
-  const rows = await Student.find({ role: "student" }).select("_id batch_id enrollment_number").lean();
-  const keys = new Set();
-  for (const row of rows) {
-    // A multi-batch student contributes a cohort key for EACH active batch.
-    const { batchIds } = await resolveStudentBatchIds(row);
-    if (batchIds.length) {
-      for (const b of batchIds) keys.add(b);
-    } else {
-      keys.add(`solo:${String(row._id)}`);
-    }
-  }
-  return [...keys];
 }
 
 /**
@@ -141,23 +126,6 @@ async function ensureRecentMonthsForScope(scopeKey, monthsBack = 4, nowDate = ne
   }
 }
 
-/**
- * Finalize last N closed months for every cohort (idempotent).
- */
-async function ensureRecentMonthsFinalized({ monthsBack = 4 } = {}) {
-  const periods = recentClosedPeriods(monthsBack);
-  const scopeKeys = await distinctScopeKeys();
-  for (const period of periods) {
-    for (const sk of scopeKeys) {
-      try {
-        await finalizePeriodForScopeIfMissing(sk, period);
-      } catch {
-        /* ignore per-scope failures */
-      }
-    }
-  }
-}
-
 async function listWinnersForScope(scopeKey, { limit = 12 } = {}) {
   if (!scopeKey) return [];
   return MonthlyLeaderboardBadge.find({ scope_key: scopeKey })
@@ -173,7 +141,6 @@ async function listBadgesForStudent(studentId) {
 module.exports = {
   scopeKeyForStudentLean,
   ensureRecentMonthsForScope,
-  ensureRecentMonthsFinalized,
   finalizePeriodForScopeIfMissing,
   listWinnersForScope,
   listBadgesForStudent,

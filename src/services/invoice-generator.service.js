@@ -175,6 +175,26 @@ async function buildInvoiceForPeriod({
   let invoice;
   try {
     await session.withTransaction(async () => {
+      // Serialize concurrent generators for the same enrollment. Two transactions that both read
+      // "no invoice yet" and then insert would otherwise both commit (there is no unique index on
+      // enrollment + period). Touching the enrollment document first makes the second transaction
+      // hit a write conflict; withTransaction retries it, and the re-check below then sees the
+      // committed invoice and stops before consuming any referral credit.
+      await StudentEnrollment.updateOne(
+        { _id: enrollment._id },
+        { $currentDate: { updatedAt: true } },
+        { session }
+      );
+      const alreadyInvoiced = await Invoice.exists({
+        enrollment_id: enrollment._id,
+        period_start: { $gte: ps, $lte: pe },
+      }).session(session);
+      if (alreadyInvoiced) {
+        const err = new Error("Invoice already exists for this enrollment + period");
+        err.code = "INVOICE_ALREADY_EXISTS";
+        throw err;
+      }
+
       // Consume the referral credit (decrement months, remove if 0)
       if (referralCredit && referralIndex >= 0 && breakdown.referral_paise > 0) {
         const queue = student.referral_benefits_queue || [];

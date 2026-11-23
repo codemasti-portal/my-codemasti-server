@@ -151,12 +151,6 @@ function isProtectedSync(batchId) {
   return !!(b && b.is_protected);
 }
 
-/** All enrollment letters currently mapped to a batch (for relaxed enrollment_number validation). */
-function knownPrefixesSync() {
-  maybeRefresh();
-  return Object.keys(snapshot.byPrefix);
-}
-
 /** batch_ids flagged for "all default batches" views (replaces staff-doubts defaultBatchIds). */
 function defaultViewBatchIdsSync() {
   maybeRefresh();
@@ -173,14 +167,6 @@ function isKnownBatchIdSync(batchId, { activeOnly = true } = {}) {
   return activeOnly ? b.is_active !== false : true;
 }
 
-function allBatchIdsSync({ activeOnly = true } = {}) {
-  maybeRefresh();
-  return Object.values(snapshot.byId)
-    .filter((b) => (activeOnly ? b.is_active !== false : true))
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-    .map((b) => b.batch_id);
-}
-
 module.exports = {
   refresh,
   maybeRefresh,
@@ -191,10 +177,8 @@ module.exports = {
   batchIdToPrefixSync,
   tierLabelSync,
   isProtectedSync,
-  knownPrefixesSync,
   defaultViewBatchIdsSync,
   isKnownBatchIdSync,
-  allBatchIdsSync,
   // exposed for tests / explicit seeding
   SEED_LIST,
 };

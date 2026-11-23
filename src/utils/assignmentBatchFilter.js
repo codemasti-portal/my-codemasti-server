@@ -112,30 +112,10 @@ function assignmentBatchKeysOnDoc(assignment) {
   return [...new Set(keys)];
 }
 
-function assignmentDocMatchesCatalogBatch(assignment, batchKey) {
-  const b = String(batchKey || "").trim().toLowerCase();
-  if (!b) return true;
-  const keys = assignmentBatchKeysOnDoc(assignment);
-  if (keys.length === 0) return true;
-  return keys.includes(b);
-}
-
-function assignmentDocIsPublished(assignment, now = new Date()) {
-  const t = new Date(assignment?.release_date).getTime();
-  if (Number.isNaN(t)) return false;
-  if (t > now.getTime()) return false;
-  if (String(assignment?.assignment_type || "").toLowerCase() === "project" && assignment?.project_published === false) {
-    return false;
-  }
-  return true;
-}
-
 module.exports = {
   assignmentMatchesCatalogBatchId,
   assignmentCatalogBatchScopeOr,
   assignmentPublishedVisibleToCatalogBatch,
   assignmentVisibleToCatalogBatchCountFilter,
   assignmentBatchKeysOnDoc,
-  assignmentDocMatchesCatalogBatch,
-  assignmentDocIsPublished,
 };

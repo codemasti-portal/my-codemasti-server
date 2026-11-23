@@ -58,6 +58,7 @@ async function runMonthlyInvoiceTick() {
           generatedBy: "system_cron",
         });
       } catch (err) {
+        if (err?.code === "INVOICE_ALREADY_EXISTS") continue;
         console.error("[MONTHLY_INVOICE_GENERATE_FAILED]", JSON.stringify({
           enrollment_id: String(e._id),
           course_code: course.code,

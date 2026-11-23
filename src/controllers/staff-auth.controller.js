@@ -6,6 +6,7 @@ const { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken
 const StaffOtpRequest = require("../models/StaffOtpRequest");
 const Staff = require("../models/Staff");
 const { sendOtpEmail } = require("../services/brevo");
+const { logOtpIfAllowed } = require("../utils/otpDebug");
 const { permissionsForRole } = require("../utils/rbac");
 const { buildLoginMeta } = require("../utils/requestMeta");
 
@@ -86,10 +87,7 @@ async function sendOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: body.email, otp, expiresInSec });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[STAFF_OTP_DEBUG]", error.message);
-      console.log(`[STAFF_OTP_DEBUG] OTP for ${body.email}: ${otp}`);
-    }
+    logOtpIfAllowed("STAFF_OTP_DEBUG", error, body.email, otp);
   }
 
   return sendSuccess(
@@ -133,10 +131,7 @@ async function sendForgotPasswordOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: body.email, otp, expiresInSec });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[STAFF_OTP_DEBUG]", error.message);
-      console.log(`[STAFF_OTP_DEBUG] OTP for ${body.email}: ${otp}`);
-    }
+    logOtpIfAllowed("STAFF_OTP_DEBUG", error, body.email, otp);
   }
   return sendSuccess(
     res,
@@ -344,10 +339,7 @@ async function sendMePasswordUpdateOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: email, otp, expiresInSec: 120 });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[STAFF_OTP_DEBUG]", error.message);
-      console.log(`[STAFF_OTP_DEBUG] OTP for ${email}: ${otp}`);
-    }
+    logOtpIfAllowed("STAFF_OTP_DEBUG", error, email, otp);
   }
   return sendSuccess(res, { otp_request_id, expires_in_sec: 120, resend_after_sec: 30 }, "OTP sent");
 }

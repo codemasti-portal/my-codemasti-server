@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
-const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
 const { connectDb } = require("./config/db");
 
@@ -29,6 +28,25 @@ const corsOrigins = [
   ...parseCorsOrigins(process.env.CORS_ORIGINS),
   ...parseCorsOrigins(process.env.CORS_ORIGIN),
 ].filter((origin, index, all) => all.indexOf(origin) === index);
+
+// Startup security warnings (log only; behaviour is unchanged).
+if (process.env.NODE_ENV === "production" && corsOrigins.length === 0) {
+  console.warn(
+    "[SECURITY] CORS_ORIGINS / CORS_ORIGIN is not set: this API reflects ANY request origin with " +
+      "credentials enabled. Set CORS_ORIGINS to the exact portal/admin origins."
+  );
+}
+{
+  const { getPaymentsMode } = require("./utils/paymentsConfig");
+  const { isWebhookAuthConfigured } = require("./services/phonepe-gateway.service");
+  if (getPaymentsMode() === "phonepe" && !isWebhookAuthConfigured()) {
+    console.warn(
+      "[SECURITY] PAYMENTS_MODE=phonepe but PHONEPE_WEBHOOK_USERNAME/PHONEPE_WEBHOOK_PASSWORD are not set: " +
+        "webhook requests are unauthenticated, so each one is re-confirmed with PhonePe's status API " +
+        "before it changes anything. Set both (matching the PhonePe dashboard) to authenticate webhooks."
+    );
+  }
+}
 
 app.use(
   cors({
@@ -65,7 +83,6 @@ app.use(
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
 app.use(apiLimiter);
 
 app.use(async (req, res, next) => {

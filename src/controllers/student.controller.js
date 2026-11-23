@@ -6,6 +6,7 @@ const Student = require("../models/Student");
 const OtpRequest = require("../models/OtpRequest");
 const { augmentStudentCatalogFieldsFromEnrollment } = require("../utils/enrollment");
 const { sendOtpEmail } = require("../services/brevo");
+const { logOtpIfAllowed } = require("../utils/otpDebug");
 const { signAccessToken, verifyAccessToken } = require("../utils/tokens");
 const {
   isCloudinaryConfigured,
@@ -132,32 +133,6 @@ async function uploadAvatar(req, res) {
   return sendSuccess(res, { avatar_url }, "Avatar updated");
 }
 
-async function changePassword(req, res) {
-  const schema = z.object({
-    current_password: z.string().optional(),
-    new_password: z.string().min(8),
-    confirm_password: z.string().min(8),
-  });
-  const body = schema.parse(req.body);
-  if (body.new_password !== body.confirm_password) {
-    return sendError(res, 400, "PASSWORD_MISMATCH", "New passwords do not match");
-  }
-
-  const student = await Student.findById(req.user.sub);
-  if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
-
-  if (student.password_hash) {
-    if (!body.current_password || !bcrypt.compareSync(body.current_password, student.password_hash)) {
-      return sendError(res, 400, "INVALID_PASSWORD", "Current password is incorrect");
-    }
-  }
-
-  student.password_hash = bcrypt.hashSync(body.new_password, 10);
-  student.password_set_by_user = true;
-  await student.save();
-  return sendSuccess(res, {}, "Password updated");
-}
-
 async function sendPasswordUpdateOtp(req, res) {
   const student = await Student.findById(req.user.sub).lean();
   if (!student) return sendError(res, 404, "STUDENT_NOT_FOUND", "Student not found");
@@ -177,10 +152,7 @@ async function sendPasswordUpdateOtp(req, res) {
   try {
     await sendOtpEmail({ toEmail: email, otp, expiresInSec });
   } catch (error) {
-    if (process.env.OTP_DEBUG_LOG !== "false") {
-      console.warn("[OTP_DEBUG]", error.message);
-      console.log(`[OTP_DEBUG] OTP for ${email}: ${otp}`);
-    }
+    logOtpIfAllowed("OTP_DEBUG", error, email, otp);
   }
 
   return sendSuccess(
@@ -272,7 +244,6 @@ module.exports = {
   patchMe,
   subjects,
   uploadAvatar,
-  changePassword,
   sendPasswordUpdateOtp,
   verifyPasswordUpdateOtp,
   updatePasswordWithOtp,
